@@ -672,6 +672,13 @@ fn sync_windows(call: &Entity<Call>, cx: &mut App) {
         _ => {}
     }
 
+    tracing::debug!(
+        "call windows: {} circles, {} screen shares, toolbar {}, tiles {}",
+        windows.bubbles.len(),
+        windows.screens.len(),
+        windows.toolbar.is_some(),
+        windows.regular.is_some(),
+    );
     call.update(cx, |c, _| c.windows = windows);
 }
 

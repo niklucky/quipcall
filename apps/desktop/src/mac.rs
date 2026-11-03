@@ -4,12 +4,24 @@
 //! layer is masked to a circle. The compositor does the clipping, so video
 //! inside costs nothing extra. GPUI can't round video corners itself.
 
+use std::ptr::NonNull;
+
+use block2::RcBlock;
 use gpui::{App, Size, Window};
 use objc2::rc::Retained;
-use objc2_app_kit::{NSView, NSWindow, NSWindowSharingType, NSWindowStyleMask};
+use objc2_app_kit::{
+    NSApplicationDidBecomeActiveNotification, NSApplicationDidChangeScreenParametersNotification,
+    NSApplicationDidHideNotification, NSApplicationDidResignActiveNotification,
+    NSApplicationDidUnhideNotification, NSView, NSWindow,
+    NSWindowDidChangeOcclusionStateNotification, NSWindowDidChangeScreenNotification,
+    NSWindowOcclusionState, NSWindowSharingType, NSWindowStyleMask, NSWindowWillCloseNotification,
+    NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
+};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGMutablePath;
-use objc2_foundation::{NSPoint, NSRect, NSSize};
+use objc2_foundation::{
+    NSNotification, NSNotificationCenter, NSNotificationName, NSPoint, NSRect, NSSize,
+};
 use objc2_quartz_core::{CAShapeLayer, CATransaction};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -91,22 +103,25 @@ fn apply_mask(window: &NSWindow, mask: &Mask) {
     CATransaction::commit();
 }
 
-/// Strip the window frame and shadow and clip the content to `mask`.
-/// Floating windows also stay out of our own screen shares.
+/// Drop the shadow and clip the content to `mask`. Floating windows also stay
+/// out of our own screen shares.
 ///
-/// Deferred like [`resize`]: changing the style mask makes AppKit resize the
-/// content view, and GPUI is still building the window when we're called.
+/// The window must already be borderless: GPUI creates title-less popups that
+/// way (patched, see vendor/README.md). Switching the style mask here instead
+/// crashed Macs with a Touch Bar.
+///
+/// Deferred like [`resize`]: GPUI is still building the window when we're called.
 pub fn make_shape(window: &Window, mask: Mask, cx: &App) {
     let Some(ns) = ns_window(window) else {
         return;
     };
+    debug_assert!(
+        !ns.styleMask().contains(NSWindowStyleMask::Titled),
+        "floating windows must be created borderless"
+    );
+    tracing::debug!("floating window {}: {mask:?}", ns.windowNumber());
     cx.foreground_executor()
         .spawn(async move {
-            ns.setStyleMask(
-                NSWindowStyleMask::Borderless
-                    | NSWindowStyleMask::FullSizeContentView
-                    | NSWindowStyleMask::NonactivatingPanel,
-            );
             ns.setHasShadow(false);
             ns.setSharingType(NSWindowSharingType::None);
             apply_mask(&ns, &mask);
@@ -153,4 +168,78 @@ pub fn resize(window: &Window, size: Size<f32>, mask: Mask, anchor: Anchor, cx: 
             apply_mask(&ns, &mask);
         })
         .detach();
+}
+
+/// Log what macOS does to our app and windows: deactivated, hidden, covered,
+/// closed, moved to another display or Space. Some bugs only show on a
+/// friend's Mac, and then the log is all we have.
+pub fn log_window_events() {
+    // SAFETY: AppKit's notification names are immutable statics.
+    let events: [(&NSNotificationName, &'static str); 8] = unsafe {
+        [
+            (
+                NSApplicationDidBecomeActiveNotification,
+                "app became active",
+            ),
+            (
+                NSApplicationDidResignActiveNotification,
+                "app went to the background",
+            ),
+            (NSApplicationDidHideNotification, "app hidden"),
+            (NSApplicationDidUnhideNotification, "app unhidden"),
+            (
+                NSApplicationDidChangeScreenParametersNotification,
+                "displays changed",
+            ),
+            (
+                NSWindowDidChangeOcclusionStateNotification,
+                "window visibility changed",
+            ),
+            (NSWindowWillCloseNotification, "window closing"),
+            (
+                NSWindowDidChangeScreenNotification,
+                "window moved to another display",
+            ),
+        ]
+    };
+    let center = NSNotificationCenter::defaultCenter();
+    for (name, what) in events {
+        observe(&center, name, what);
+    }
+    // SAFETY: as above.
+    let space_changed = unsafe { NSWorkspaceActiveSpaceDidChangeNotification };
+    let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
+    observe(&workspace, space_changed, "switched Space");
+}
+
+fn observe(center: &NSNotificationCenter, name: &NSNotificationName, what: &'static str) {
+    let block = RcBlock::new(move |note: NonNull<NSNotification>| {
+        // SAFETY: AppKit hands us a live notification.
+        let note = unsafe { note.as_ref() };
+        match note.object().and_then(|o| o.downcast::<NSWindow>().ok()) {
+            Some(window) => {
+                let frame = window.frame();
+                tracing::debug!(
+                    "{what}: window {} visible={} unobscured={} level={} at ({:.0}, {:.0}) {:.0}x{:.0}",
+                    window.windowNumber(),
+                    window.isVisible(),
+                    window
+                        .occlusionState()
+                        .contains(NSWindowOcclusionState::Visible),
+                    window.level(),
+                    frame.origin.x,
+                    frame.origin.y,
+                    frame.size.width,
+                    frame.size.height,
+                );
+            }
+            None => tracing::info!("{what}"),
+        }
+    });
+    // SAFETY: the block only logs. With no queue it runs on the posting
+    // thread, the main thread for these. The center keeps the registration
+    // alive; the returned token is only needed to unregister.
+    let _ = unsafe {
+        center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &block)
+    };
 }

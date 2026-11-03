@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/protocol", "crates/core", "apps/server", "apps/desktop"]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,3 +20,7 @@ opt-level = 2
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# GPUI's macOS backend with one change: borderless popup windows (see vendor/README.md).
+[patch.crates-io]
+gpui-pre-macos = { path = "vendor/gpui-pre-macos" }

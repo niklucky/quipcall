@@ -18,6 +18,7 @@ pub mod video;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use livekit::options::TrackPublishOptions;
@@ -150,11 +151,23 @@ impl Engine {
         async move {
             handle
                 .spawn(async move {
-                    let resp = reqwest::Client::new()
-                        .get(&url)
-                        .query(&query)
-                        .send()
-                        .await?;
+                    let client = reqwest::Client::builder()
+                        .timeout(Duration::from_secs(10))
+                        .build()?;
+                    // Flaky Wi-Fi or a VPN dropping the first connection
+                    // shouldn't fail the call: retry transport errors only.
+                    let mut attempt = 1;
+                    let resp = loop {
+                        match client.get(&url).query(&query).send().await {
+                            Ok(resp) => break resp,
+                            Err(e) if attempt < 3 && (e.is_connect() || e.is_timeout()) => {
+                                tracing::warn!("join attempt {attempt} failed: {e}");
+                                tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
+                                attempt += 1;
+                            }
+                            Err(e) => return Err(e.into()),
+                        }
+                    };
                     if !resp.status().is_success() {
                         let err: ApiError = resp.json().await.unwrap_or(ApiError {
                             error: "unknown server error".into(),

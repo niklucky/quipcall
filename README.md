@@ -52,4 +52,6 @@ To run a second, separate stack next to `make dev` (for example for automated te
 
 - **macOS permissions.** The app asks for microphone access before joining and for camera access when you turn the camera on, and waits for your answer ("Waiting for … access" in the header). We ask up front because a prompt that WebRTC triggers itself blocks its audio thread and freezes the call. When run from a terminal, macOS attributes the request to the terminal app (for example "Terminal would like to access the camera").
 - **Metal shaders.** GPUI compiles its shaders at runtime (`runtime_shaders` feature), so you don't need Xcode's separate Metal toolchain. Release builds should precompile them: `xcodebuild -downloadComponent MetalToolchain`, then drop the feature.
+- **Patched GPUI.** `vendor/gpui-pre-macos` is GPUI's macOS backend with one change, so floating windows are created borderless instead of switching later (that crashed Macs with a Touch Bar). See `vendor/README.md`.
+- **Logs.** Started from Finder, the app writes `~/Library/Logs/Quipcall/quipcall.log`, including what macOS does to its windows (hidden, covered, moved, app activated or not), for bugs we can only see on other people's Macs.
 - **`-ObjC` link flag.** `apps/desktop/build.rs` adds it. libwebrtc's Objective-C categories are dropped without it.

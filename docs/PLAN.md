@@ -127,6 +127,8 @@ Started early (2026-11-03), ahead of Stages 3–6: there are no accounts yet, so
 - [x] ~~macOS build: `.app` bundle, ad-hoc signing for friends~~ — one app per architecture, `curl … | sh` installer, call links (`quipcall://join/<room>`); `make release-mac`
 - [ ] Notarization (Apple Developer ID), so updates keep their permissions; simple update check
 - [ ] Invite codes for friends
+- [x] ~~Fix: crash on join on Macs with a Touch Bar~~ — floating windows are created borderless (patched GPUI) instead of switching style afterwards
+- [ ] Bug: on a friend's Intel Mac (macOS 15.6, two displays, Touch Bar) all call windows vanished after he started a screen share, though the app kept running and the share worked. Not reproducible here; the app now logs window visibility, waiting for a log
 
 **Done when:** friends install the app, sign up, and call each other over the internet, including through strict NAT.
 
