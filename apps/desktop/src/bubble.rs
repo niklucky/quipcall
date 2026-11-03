@@ -1,16 +1,18 @@
 //! A floating circle for one participant: their camera, or their avatar.
 //!
-//! Drag to move. Scroll or pinch to resize.
+//! Drag to move. Resize with the handle that appears on hover, or by
+//! scrolling or pinching over the circle.
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, FontWeight, MouseButton, ObjectFit, PinchEvent, ScrollEvent,
-    Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
-    WindowOptions, div, hsla, px, rgb, size, svg,
+    App, Context, Entity, FontWeight, MouseButton, ObjectFit, PinchEvent, Pixels, Point,
+    ScrollEvent, Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
+    WindowKind, WindowOptions, div, hsla, px, rgb, size, svg,
 };
 
 use crate::assets::Icon;
 use crate::call::{Call, Member};
+use crate::handle::{self, Resizable};
 use crate::mac;
 use crate::theme::{SPEAKING, TEXT, avatar_background, initials};
 
@@ -20,6 +22,11 @@ pub const SELF_SIZE: f32 = 200.0;
 pub const OTHER_SIZE: f32 = 160.0;
 const MIN_SIZE: f32 = 120.0;
 const MAX_SIZE: f32 = 480.0;
+/// The handle sits on the 45° line, this far from the centre (as a fraction
+/// of the radius), so it stays inside the circle.
+const HANDLE_RADIUS: f32 = 0.78;
+/// Handle centre as a fraction of the diameter: ½ + ½·0.78·cos 45°.
+const HANDLE_AT: f32 = 0.5 + 0.5 * HANDLE_RADIUS * std::f32::consts::FRAC_1_SQRT_2;
 
 pub fn open(
     call: Entity<Call>,
@@ -60,6 +67,7 @@ pub struct Bubble {
     member: Entity<Member>,
     diameter: f32,
     hovered: bool,
+    resizing: bool,
     _subscriptions: [Subscription; 2],
 }
 
@@ -81,11 +89,18 @@ impl Bubble {
             member,
             diameter,
             hovered: false,
+            resizing: false,
             _subscriptions: subscriptions,
         }
     }
 
-    fn resize_to(&mut self, diameter: f32, window: &mut Window, cx: &mut Context<Self>) {
+    fn resize_to(
+        &mut self,
+        diameter: f32,
+        anchor: mac::Anchor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let diameter = diameter.clamp(MIN_SIZE, MAX_SIZE);
         if (diameter - self.diameter).abs() < 0.5 {
             return;
@@ -95,10 +110,31 @@ impl Bubble {
             window,
             size(diameter, diameter),
             diameter as f64 / 2.0,
-            mac::Anchor::Center,
+            anchor,
             cx,
         );
         cx.notify();
+    }
+}
+
+impl Resizable for Bubble {
+    fn start_drag(&mut self, cx: &mut Context<Self>) {
+        self.resizing = true;
+        cx.notify();
+    }
+
+    fn drag_to(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        // The top-left corner stays put, so the handle's spot along the
+        // diagonal gives the new size directly.
+        let along = (position.x + position.y) / px(2.0);
+        self.resize_to(along / HANDLE_AT, mac::Anchor::TopLeft, window, cx);
+    }
+
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if self.resizing {
+            self.resizing = false;
+            cx.notify();
+        }
     }
 }
 
@@ -128,6 +164,7 @@ impl Render for Bubble {
                 .into_any_element(),
         };
         let show_name = self.hovered && !m.is_local;
+        let show_handle = self.hovered || self.resizing;
 
         div()
             .id("bubble")
@@ -149,6 +186,10 @@ impl Render for Bubble {
             })
             .when(m.mic_muted, |el| el.child(muted_badge(d)))
             .when(show_name, |el| el.child(name_label(m.name.clone(), d)))
+            .when(show_handle, |el| {
+                el.child(handle::handle(d * HANDLE_AT, d * HANDLE_AT, cx))
+            })
+            .when(self.resizing, |el| el.child(handle::tracker(cx.entity())))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 this.hovered = *hovered;
                 cx.notify();
@@ -156,10 +197,15 @@ impl Render for Bubble {
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                 let dy = event.delta.pixel_delta(px(16.0)).y / px(1.0);
-                this.resize_to(this.diameter - dy, window, cx);
+                this.resize_to(this.diameter - dy, mac::Anchor::Center, window, cx);
             }))
             .on_pinch(cx.listener(|this, event: &PinchEvent, window, cx| {
-                this.resize_to(this.diameter * (1.0 + event.delta), window, cx);
+                this.resize_to(
+                    this.diameter * (1.0 + event.delta),
+                    mac::Anchor::Center,
+                    window,
+                    cx,
+                );
             }))
     }
 }

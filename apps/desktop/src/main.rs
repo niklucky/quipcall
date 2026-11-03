@@ -1,6 +1,7 @@
 mod assets;
 mod bubble;
 mod call;
+mod handle;
 mod home;
 mod mac;
 mod regular;
@@ -89,6 +90,10 @@ impl Shell {
 
     pub fn in_call(&self) -> bool {
         self.call.is_some()
+    }
+
+    pub fn call(&self) -> Option<Entity<Call>> {
+        self.call.as_ref().map(|(call, _)| call.clone())
     }
 
     pub fn quick_call(&mut self, cx: &mut Context<Self>) {
@@ -203,9 +208,12 @@ fn main() {
                 None => shell.open_home(cx),
             });
 
-            // Quit once the last window is gone (home closed, no call).
+            // Quit once home is closed and there's no call. Not merely when no
+            // window is open: switching call modes swaps windows.
             cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
+                let shell = Shell::global(cx);
+                let s = shell.read(cx);
+                if cx.windows().is_empty() && !s.in_call() && !s.home_pending {
                     cx.quit();
                 }
             })

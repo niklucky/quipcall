@@ -405,6 +405,11 @@ impl Call {
             }
             Event::WaitingForPermission(device) => self.waiting_for = Some(device),
             Event::ParticipantJoined { identity, name } => {
+                let name = if name.trim().is_empty() {
+                    identity.clone()
+                } else {
+                    name
+                };
                 self.people.insert(name.clone());
                 if self.member(&identity, cx).is_none() {
                     let member = cx.new(|_| Member {
@@ -653,8 +658,14 @@ fn sync_windows(call: &Entity<Call>, cx: &mut App) {
     call.update(cx, |c, _| c.windows = windows);
 }
 
+/// Closes on the next run-loop turn: the window may be the one handling the
+/// click that got us here (the toolbar's expand button, say).
 fn close<V: 'static>(handle: &WindowHandle<V>, cx: &mut App) {
-    let _ = handle.update(cx, |_, window, _| window.remove_window());
+    let handle = *handle;
+    cx.spawn(async move |cx| {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+    })
+    .detach();
 }
 
 /// The usable part of the main screen (no menu bar or Dock).

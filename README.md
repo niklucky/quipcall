@@ -41,7 +41,7 @@ Desktop app options for tests:
 - `QUIPCALL_FAKE_CAMERA=1` replaces the camera with a synthetic 720p30 pattern that goes through the real encode path (no camera, no permission prompt).
 - `--camera` turns the camera on as soon as the call connects; `--regular` starts calls in the tile window instead of circles.
 - `QUIPCALL_DATA_DIR=/tmp/x` keeps rooms and history somewhere other than `~/Library/Application Support/Quipcall`.
-- `cargo run -p quipcall-desktop --features snapshot` with `QUIPCALL_SNAPSHOT_DIR=/tmp/snaps` writes a PNG of every window every 2 s, to check layouts without screen-recording access (AppKit's circle clip and blur aren't in the image).
+- `cargo run -p quipcall-desktop --features snapshot` with `QUIPCALL_SNAPSHOT_DIR=/tmp/snaps` writes a PNG of every window every 2 s, to check layouts without screen-recording access (AppKit's circle clip and blur aren't in the image). `QUIPCALL_SCRIPT="4:regular 8:minimal 12:leave"` presses buttons on a timer (see `src/snapshot.rs`).
 
 Measuring: `dev/measure.sh $(pgrep -x quipcall-desktop) 8` samples CPU and the physical footprint (use the footprint, not RSS). For a 10-person call, `lk load-test --room <room> --video-publishers 9 --video-codec h264` adds nine simulated publishers.
 

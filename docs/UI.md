@@ -42,7 +42,7 @@ A small window (about 380 × 560):
 
 - Every participant, you included, is a **floating circle** above all apps and on every Space. Circles never take focus away from what you're doing.
 - A circle shows the person's camera, or their avatar (initials on a colour picked from their name) when the camera is off.
-- **Move** a circle by dragging it. **Resize** by scrolling or pinching over it (an edge handle comes next), from 120 to 480 px. Your circle starts at 200 px, everyone else's at 160 px.
+- **Move** a circle by dragging it. **Resize** with the handle that appears on its edge when you hover (or scroll / pinch over it), from 120 to 480 px. Your circle starts at 200 px, everyone else's at 160 px.
 - A soft ring shows who is speaking; a small badge shows a muted mic.
 - Someone else's **screen share** floats as a rounded rectangle you can move and resize the same way.
 - The **glass toolbar** has: mic · camera · screen share (choose 5 / 15 / 30 / 60 fps) · copy call link · invite · expand to regular mode · leave. Drag it by its empty space.

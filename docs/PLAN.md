@@ -64,11 +64,12 @@ Design: [UI.md](UI.md).
 
 - [x] ~~Design: home screen, minimal mode (floating circles + glass toolbar), regular mode~~
 - [x] ~~App structure: one call model shared by several windows; each video view repaints only itself~~
-- [ ] Floating circle: circle-clipped borderless panel above all apps, drag to move, scroll or pinch to resize (120–480 px), video or avatar, speaking ring, muted badge. *Built; content checked with snapshots. The circle clip, dragging and resizing need a look on a real screen.*
-- [ ] Resize handle on the circle's edge (scroll and pinch work already)
+- [ ] Floating circle: circle-clipped borderless panel above all apps, drag to move, resize (handle, scroll or pinch; 120–480 px), video or avatar, speaking ring, muted badge. *Built; content checked with snapshots. The circle clip, dragging and resizing need a look on a real screen.*
+- [x] ~~Resize handle on hover (circles: on the edge at 45°; screen shares: bottom-right corner)~~ *Added after the first try: scroll and pinch weren't discoverable.*
+- [x] ~~Fix: the expand button quit the app~~ *Switching modes closed every window before opening the new one, and the app quit when no window was left. Windows now close a tick later, and the app only quits when there's no call and no home window.*
 - [ ] Glass toolbar: Lucide icons; mic, camera, screen share with fps presets, copy link, invite, expand, leave; draggable. *Built; the blur and clicks need a look on a real screen.*
 - [ ] Other participants as circles, screen shares as floating rectangles, sensible placement for new circles. *Circles verified with 10 people; screen-share windows not tested yet.*
-- [ ] Regular mode: one window with tiles and the toolbar; switch both ways. *Regular window verified (`--regular`); switching by button needs a click test.*
+- [ ] Regular mode: one window with tiles and the toolbar; switch both ways. *Verified with a scripted run (circles → regular → circles → leave → home); needs a click test.*
 - [ ] Home window: rooms (persistent and one-time) and call history, stored locally until Stage 3. *Built and rendered; rooms get generated names ("Room 1") until there's a text field to rename them.*
 - [ ] Text field for naming rooms (adapt GPUI's `input.rs` example)
 - [ ] Mirror your own circle

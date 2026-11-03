@@ -57,6 +57,8 @@ pub fn make_shape(window: &Window, radius: f64, cx: &App) {
 #[derive(Clone, Copy)]
 pub enum Anchor {
     Center,
+    /// Resize handles: the corner opposite the handle stays put.
+    TopLeft,
     /// The toolbar grows upwards from where it sits.
     BottomCenter,
 }
@@ -73,11 +75,17 @@ pub fn resize(window: &Window, size: Size<f32>, radius: f64, anchor: Anchor, cx:
         .spawn(async move {
             let frame = ns.frame();
             let (w, h) = (size.width as f64, size.height as f64);
-            let x = frame.origin.x + (frame.size.width - w) / 2.0;
             // AppKit's y axis points up: origin is the bottom-left corner.
-            let y = match anchor {
-                Anchor::Center => frame.origin.y + (frame.size.height - h) / 2.0,
-                Anchor::BottomCenter => frame.origin.y,
+            let (x, y) = match anchor {
+                Anchor::Center => (
+                    frame.origin.x + (frame.size.width - w) / 2.0,
+                    frame.origin.y + (frame.size.height - h) / 2.0,
+                ),
+                Anchor::TopLeft => (frame.origin.x, frame.origin.y + frame.size.height - h),
+                Anchor::BottomCenter => (
+                    frame.origin.x + (frame.size.width - w) / 2.0,
+                    frame.origin.y,
+                ),
             };
             ns.setFrame_display(NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)), true);
             set_radius(&ns, radius);
