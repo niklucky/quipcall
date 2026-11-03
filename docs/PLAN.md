@@ -41,16 +41,16 @@ These are targets. We measure them at the end of Stage 1 and at every milestone,
 - [x] ~~Desktop: GPUI window that connects to a room with a dev token~~
 - [x] ~~Desktop: render remote video. I420 → full-range NV12 `CVPixelBuffer` → GPUI `surface`~~
 - [ ] Desktop: microphone and speaker via `PlatformAudio`, with echo cancellation, noise suppression and auto gain from WebRTC. *Mic → web verified (audio arrives with signal, no concealment). Speaker playback still needs a human ear.*
-- [ ] Desktop: screen share via ScreenCaptureKit (system picker), with frame-rate presets 5/15/30/60 and a text/motion mode. *Implemented with libwebrtc's `DesktopCapturer`; needs a manual test (picker and Screen Recording permission).*
+- [x] ~~Desktop: screen share via ScreenCaptureKit, with frame-rate presets 5/15/30/60 and a text/motion mode~~ *Verified by sharing one of Quipcall's own windows: the web client receives 2200×1440 at 15 fps (text) and 1920×1256 at 30 fps (motion), 0 dropped frames.*
 - [x] ~~Desktop: ask for mic and camera permission up front (AVCaptureDevice `requestAccess`) before opening the audio device. Otherwise a pending prompt blocks WebRTC's audio thread and freezes the call (found in testing).~~ *The header shows "Waiting for … access" while the prompt is open; if the mic is denied, the call continues listen-only.*
 - [x] ~~Desktop: pick the simulcast layer per tile from its on-screen size (the Rust SDK's adaptive stream doesn't report sizes)~~
 - [ ] Desktop: camera capture and publish (AVFoundation → full-range NV12 `CVPixelBuffer` → VideoToolbox H.264, simulcast 720p/360p/180p). *Publish path verified with the synthetic camera (`QUIPCALL_FAKE_CAMERA=1`): the web client receives 720p30 H.264 with 0 dropped frames. The AVFoundation capture itself still needs a first run by a person (camera permission prompt).*
 - [ ] Desktop: local self-view for the camera, drawn straight from the capture buffers. Screen share shows the active preset instead of a preview, so we don't spend CPU converting our own screen. *Implemented with the camera; not mirrored yet.*
 - [x] ~~Web: minimal Svelte page that joins the same room with camera, mic, and screen share (with frame-rate picker)~~
 - [x] ~~Zero-copy receive path for hardware-decoded frames~~ *VideoToolbox already outputs full-range NV12, so the decoded `CVPixelBuffer` goes to GPUI as is. Receiving 720p: ~7.5% CPU with H.264 vs ~12.5% with VP8. The web client now publishes H.264 by default.*
-- [ ] Direct ScreenCaptureKit capture (`CVPixelBuffer` → `NativeBuffer` → VideoToolbox), if the libwebrtc capturer uses too much CPU
+- [x] ~~Direct ScreenCaptureKit capture (`CVPixelBuffer` → `NativeBuffer` → VideoToolbox)~~ *Replaced libwebrtc's capturer on macOS; needed for our own picker anyway. Text mode moved from VP9 to H.264: 460 → 173 MB, 24 → 11% CPU.*
 - [x] ~~Fix: every video frame leaked an IOSurface (libwebrtc's autoreleased Objective-C wrappers on threads without an autorelease pool)~~ *Found while measuring.*
-- [ ] Measure the footprint and write `docs/FOOTPRINT.md`. *Recorded (as physical footprint): receive only ~170 MB / 6%, 1:1 both ways ~189 MB / 9%, 10-person grid ~199 MB / 15%, all within budget. Screen share still to measure (needs the picker, so a person).*
+- [ ] Measure the footprint and write `docs/FOOTPRINT.md`. *Recorded (as physical footprint): receive only ~170 MB / 6%, 1:1 both ways ~189 MB / 9%, 10-person grid ~199 MB / 15%, all within budget. Screen share (sending, plus receiving one 720p camera): 15 fps text at 2200 px ~173 MB / ~11%, 30 fps motion at 1920 px ~188 MB / ~13%.*
 - [ ] Find out why the mic track sometimes shows as muted on the server right after joining. *Seen twice, not reproduced in 10 scripted runs. Mic toggles and mute changes are logged now.*
 - [ ] GPUI go/no-go. *Recommendation: go (see the notes below the stage).*
 
@@ -65,7 +65,8 @@ Design: [UI.md](UI.md).
 - [x] ~~Design: home screen, minimal mode (floating circles + glass toolbar), regular mode~~
 - [x] ~~App structure: one call model shared by several windows; each video view repaints only itself~~
 - [ ] Floating circle: circle-clipped borderless panel above all apps, drag to move, resize (handle, scroll or pinch; 120–480 px), video or avatar, speaking ring, muted badge. *Built; content checked with snapshots. The circle clip, dragging and resizing need a look on a real screen.*
-- [x] ~~Resize handle on hover (circles: on the edge at 45°; screen shares: bottom-right corner)~~ *Added after the first try: scroll and pinch weren't discoverable.*
+- [x] ~~Resize knob on hover: a dark knob with arrows on the circle's rim at 45° (the window mask grows to include it while you hover); screen shares get it in the corner~~
+- [x] ~~Share picker: a window with live thumbnails of screens and windows, frame-rate presets, Share / Cancel (Esc, Enter, double-click)~~ *Explains the Screen Recording permission when it's off.*
 - [x] ~~Fix: the expand button quit the app~~ *Switching modes closed every window before opening the new one, and the app quit when no window was left. Windows now close a tick later, and the app only quits when there's no call and no home window.*
 - [ ] Glass toolbar: Lucide icons; mic, camera, screen share with fps presets, copy link, invite, expand, leave; draggable. *Built; the blur and clicks need a look on a real screen.*
 - [ ] Other participants as circles, screen shares as floating rectangles, sensible placement for new circles. *Circles verified with 10 people; screen-share windows not tested yet.*

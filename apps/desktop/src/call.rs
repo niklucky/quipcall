@@ -13,7 +13,7 @@ use gpui::{
     WindowBounds, WindowHandle, point, px, size,
 };
 use quipcall_core::{
-    Engine, Event, MediaDevice, ScreenSharePreset, TrackKey, VideoKind, VideoQuality,
+    Engine, Event, MediaDevice, ScreenSharePreset, SourceId, TrackKey, VideoKind, VideoQuality,
     VideoSubscription,
 };
 
@@ -21,6 +21,7 @@ use crate::Args;
 use crate::bubble::{self, Bubble};
 use crate::regular::Regular;
 use crate::screen_window::{self, ScreenWindow};
+use crate::share_picker::{self, SharePicker};
 use crate::toolbar::{self, Toolbar};
 use crate::video_mac::SurfaceSink;
 
@@ -132,8 +133,9 @@ pub struct Call {
     pub mic_on: bool,
     pub camera: Camera,
     pub sharing: Option<ScreenSharePreset>,
-    /// The toolbar's screen-share preset picker is open.
-    pub share_menu: bool,
+    /// Preset to preselect next time you share.
+    share_preset: ScreenSharePreset,
+    picker: Option<WindowHandle<SharePicker>>,
     /// When the call link was last copied (for the "copied" tick).
     pub copied_at: Option<Instant>,
     pub mode: Mode,
@@ -204,7 +206,8 @@ impl Call {
             mic_on: false,
             camera: Camera::Off,
             sharing: None,
-            share_menu: false,
+            share_preset: ScreenSharePreset::PRESETS[1],
+            picker: None,
             copied_at: None,
             mode: if args.regular {
                 Mode::Regular
@@ -280,19 +283,31 @@ impl Call {
         cx.notify();
     }
 
-    pub fn toggle_share_menu(&mut self, cx: &mut Context<Self>) {
+    /// Stop sharing, or open the picker to start.
+    pub fn toggle_share(&mut self, cx: &mut Context<Self>) {
         if self.sharing.is_some() {
             self.engine.stop_screen_share();
-            self.share_menu = false;
-        } else {
-            self.share_menu = !self.share_menu;
+            return;
         }
-        cx.notify();
+        // Already open: bring it to the front.
+        if let Some(picker) = self.picker
+            && picker
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+        {
+            return;
+        }
+        let call = cx.entity();
+        let preset = self.share_preset;
+        cx.defer(move |cx| {
+            let picker = share_picker::open(call.clone(), preset, cx);
+            call.update(cx, |c, _| c.picker = picker);
+        });
     }
 
-    pub fn share(&mut self, preset: ScreenSharePreset, cx: &mut Context<Self>) {
-        self.engine.start_screen_share(preset);
-        self.share_menu = false;
+    pub fn share(&mut self, source: SourceId, preset: ScreenSharePreset, cx: &mut Context<Self>) {
+        self.engine.start_screen_share(Some(source), preset);
+        self.share_preset = preset;
         cx.notify();
     }
 
@@ -321,7 +336,6 @@ impl Call {
     pub fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
         if self.mode != mode {
             self.mode = mode;
-            self.share_menu = false;
             cx.notify();
             schedule_sync(&cx.entity(), cx);
         }
@@ -338,6 +352,9 @@ impl Call {
         }
         self.engine.disconnect();
         self.status = Status::Ended;
+        if let Some(picker) = self.picker.take() {
+            close(&picker, cx);
+        }
         let (started, duration) = match self.connected_at {
             Some((wall, mono)) => (Some(wall), mono.elapsed()),
             None => (None, Duration::ZERO),

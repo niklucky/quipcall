@@ -26,7 +26,7 @@ export function screenShareOptions(
   p: ScreenSharePreset,
 ): [ScreenShareCaptureOptions, TrackPublishOptions] {
   const text = p.mode === 'text';
-  const maxBitrate = text ? (p.fps <= 5 ? 1_200_000 : 2_500_000) : p.fps <= 30 ? 4_000_000 : 6_000_000;
+  const maxBitrate = text ? (p.fps <= 5 ? 1_500_000 : 3_000_000) : p.fps <= 30 ? 4_000_000 : 6_000_000;
   return [
     {
       audio: false,
@@ -36,7 +36,9 @@ export function screenShareOptions(
         : { width: 1920, height: 1080, frameRate: p.fps },
     },
     {
-      videoCodec: text ? 'vp9' : 'h264',
+      // H.264 for both modes: desktop receivers decode it in hardware, and
+      // VP9 at this size is heavy for everyone (see docs/FOOTPRINT.md).
+      videoCodec: 'h264',
       screenShareEncoding: { maxBitrate, maxFramerate: p.fps },
       degradationPreference: text ? 'maintain-resolution' : 'maintain-framerate',
     },

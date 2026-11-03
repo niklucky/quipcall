@@ -6,7 +6,6 @@ use gpui::{
     App, Bounds, Context, Div, Entity, MouseButton, Pixels, Size, Stateful, Subscription, Window,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, div, hsla, px, rgb, size, svg,
 };
-use quipcall_core::ScreenSharePreset;
 
 use crate::assets::Icon;
 use crate::bubble::floating_options;
@@ -20,16 +19,10 @@ const RADIUS: f64 = 28.0;
 const BUTTON: f32 = 40.0;
 const GAP: f32 = 6.0;
 const PAD: f32 = 8.0;
-const CHIP: f32 = 118.0;
 
 /// The toolbar window's size for the call's current state.
 pub fn window_size(call: &Call) -> Size<f32> {
-    let width = if call.share_menu {
-        // Four preset chips and a close button.
-        4.0 * CHIP + BUTTON + 4.0 * GAP + 2.0 * PAD
-    } else {
-        7.0 * BUTTON + 6.0 * GAP + 2.0 * PAD + 10.0
-    };
+    let width = 7.0 * BUTTON + 6.0 * GAP + 2.0 * PAD + 10.0;
     let width: f32 = if call.notice().is_some() {
         width.max(360.0)
     } else {
@@ -66,12 +59,18 @@ pub struct Toolbar {
 
 impl Toolbar {
     fn new(call: Entity<Call>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        mac::make_shape(window, RADIUS, cx);
+        mac::make_shape(window, mac::Mask::Rounded(RADIUS), cx);
         let subscription = cx.observe_in(&call, window, |this, call, window, cx| {
             let wanted = window_size(call.read(cx));
             if wanted != this.size {
                 this.size = wanted;
-                mac::resize(window, wanted, RADIUS, mac::Anchor::BottomCenter, cx);
+                mac::resize(
+                    window,
+                    wanted,
+                    mac::Mask::Rounded(RADIUS),
+                    mac::Anchor::BottomCenter,
+                    cx,
+                );
             }
             cx.notify();
         });
@@ -137,22 +136,6 @@ pub fn controls(call: &Entity<Call>, mode: Mode, cx: &App) -> Div {
     let c = call.read(cx);
     let row = div().flex().items_center().gap(px(GAP));
 
-    if c.share_menu {
-        let mut row = row;
-        for (ix, preset) in ScreenSharePreset::PRESETS.into_iter().enumerate() {
-            let call = call.clone();
-            row = row.child(
-                chip(("preset", ix), preset.label())
-                    .on_click(move |_, _, cx| call.update(cx, |c, cx| c.share(preset, cx))),
-            );
-        }
-        let call = call.clone();
-        return row.child(
-            icon_button("close-share", Icon::X, BUTTON, Tone::Plain)
-                .on_click(move |_, _, cx| call.update(cx, |c, cx| c.toggle_share_menu(cx))),
-        );
-    }
-
     let copied = c.copied_at.is_some();
     let on = |f: fn(&mut Call, &mut Context<Call>)| {
         let call = call.clone();
@@ -210,7 +193,7 @@ pub fn controls(call: &Entity<Call>, mode: Mode, cx: &App) -> Div {
                 Tone::Plain
             },
         )
-        .on_click(on(Call::toggle_share_menu)),
+        .on_click(on(Call::toggle_share)),
     )
     .child(
         icon_button(
@@ -288,22 +271,4 @@ fn icon_button(
                 .size(px(diameter * 0.45))
                 .text_color(fg),
         )
-}
-
-fn chip(id: impl Into<gpui::ElementId>, label: String) -> Stateful<Div> {
-    div()
-        .id(id)
-        .h(px(BUTTON))
-        .w(px(CHIP))
-        .flex_none()
-        .rounded_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(hsla(0.0, 0.0, 1.0, 0.10))
-        .text_sm()
-        .cursor_pointer()
-        .hover(|s| s.opacity(0.82))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(label)
 }

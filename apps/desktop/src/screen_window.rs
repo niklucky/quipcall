@@ -50,7 +50,7 @@ impl ScreenWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        mac::make_shape(window, RADIUS, cx);
+        mac::make_shape(window, mac::Mask::Rounded(RADIUS), cx);
         let subscriptions = [
             cx.observe(&screen, |_, _, cx| cx.notify()),
             cx.observe(&call, |_, _, cx| cx.notify()),
@@ -76,7 +76,13 @@ impl ScreenWindow {
             return;
         }
         self.width = width;
-        mac::resize(window, size(width, width * 9.0 / 16.0), RADIUS, anchor, cx);
+        mac::resize(
+            window,
+            size(width, width * 9.0 / 16.0),
+            mac::Mask::Rounded(RADIUS),
+            anchor,
+            cx,
+        );
         cx.notify();
     }
 }
@@ -94,7 +100,7 @@ impl Resizable for ScreenWindow {
         self.resize_to(x.max(y), mac::Anchor::TopLeft, window, cx);
     }
 
-    fn end_drag(&mut self, cx: &mut Context<Self>) {
+    fn end_drag(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.resizing {
             self.resizing = false;
             cx.notify();
@@ -106,7 +112,7 @@ impl Render for ScreenWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (w, h) = (self.width, self.width * 9.0 / 16.0);
         let show_handle = self.hovered || self.resizing;
-        let handle = show_handle.then(|| handle::handle(w - HANDLE_INSET, h - HANDLE_INSET, cx));
+        let handle = show_handle.then(|| handle::knob(w - HANDLE_INSET, h - HANDLE_INSET, cx));
         let tracker = self.resizing.then(|| handle::tracker(cx.entity()));
         let screen = self.screen.read(cx);
         let frame = screen.video.sink.latest();

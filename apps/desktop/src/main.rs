@@ -6,6 +6,7 @@ mod home;
 mod mac;
 mod regular;
 mod screen_window;
+mod share_picker;
 #[cfg(feature = "snapshot")]
 mod snapshot;
 mod store;
@@ -195,6 +196,7 @@ fn main() {
                 home_pending: false,
             });
             cx.set_global(GlobalShell(shell.clone()));
+            share_picker::bind_keys(cx);
 
             shell.update(cx, |shell, cx| match shell.args.room.clone() {
                 Some(id) => shell.start_call(

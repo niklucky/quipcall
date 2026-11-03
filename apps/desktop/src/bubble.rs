@@ -1,7 +1,7 @@
 //! A floating circle for one participant: their camera, or their avatar.
 //!
-//! Drag to move. Resize with the handle that appears on hover, or by
-//! scrolling or pinching over the circle.
+//! Drag to move. Resize by scrolling or pinching over the circle, or with the
+//! knob that appears on its rim while you hover.
 
 use gpui::prelude::*;
 use gpui::{
@@ -22,11 +22,8 @@ pub const SELF_SIZE: f32 = 200.0;
 pub const OTHER_SIZE: f32 = 160.0;
 const MIN_SIZE: f32 = 120.0;
 const MAX_SIZE: f32 = 480.0;
-/// The handle sits on the 45° line, this far from the centre (as a fraction
-/// of the radius), so it stays inside the circle.
-const HANDLE_RADIUS: f32 = 0.78;
-/// Handle centre as a fraction of the diameter: ½ + ½·0.78·cos 45°.
-const HANDLE_AT: f32 = 0.5 + 0.5 * HANDLE_RADIUS * std::f32::consts::FRAC_1_SQRT_2;
+/// The knob's centre, as a fraction of the diameter: on the rim at 45°.
+const KNOB_AT: f32 = 0.5 + 0.5 * std::f32::consts::FRAC_1_SQRT_2;
 
 pub fn open(
     call: Entity<Call>,
@@ -79,7 +76,7 @@ impl Bubble {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        mac::make_shape(window, diameter as f64 / 2.0, cx);
+        mac::make_shape(window, mac::Mask::circle(diameter, None), cx);
         let subscriptions = [
             cx.observe(&member, |_, _, cx| cx.notify()),
             cx.observe(&call, |_, _, cx| cx.notify()),
@@ -106,13 +103,34 @@ impl Bubble {
             return;
         }
         self.diameter = diameter;
-        mac::resize(
-            window,
-            size(diameter, diameter),
-            diameter as f64 / 2.0,
-            anchor,
-            cx,
-        );
+        mac::resize(window, size(diameter, diameter), self.mask(), anchor, cx);
+        cx.notify();
+    }
+
+    fn knob_visible(&self) -> bool {
+        self.hovered || self.resizing
+    }
+
+    /// The circle, plus the knob while it's showing.
+    fn mask(&self) -> mac::Mask {
+        let knob = self.knob_visible().then(|| {
+            let at = self.diameter * KNOB_AT - handle::SIZE / 2.0;
+            (at, at, handle::SIZE)
+        });
+        mac::Mask::circle(self.diameter, knob)
+    }
+
+    pub(crate) fn set_hovered(
+        &mut self,
+        hovered: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.knob_visible();
+        self.hovered = hovered;
+        if self.knob_visible() != before {
+            mac::set_mask(window, self.mask(), cx);
+        }
         cx.notify();
     }
 }
@@ -124,15 +142,18 @@ impl Resizable for Bubble {
     }
 
     fn drag_to(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        // The top-left corner stays put, so the handle's spot along the
+        // The top-left corner stays put, so where the cursor is along the
         // diagonal gives the new size directly.
         let along = (position.x + position.y) / px(2.0);
-        self.resize_to(along / HANDLE_AT, mac::Anchor::TopLeft, window, cx);
+        self.resize_to(along / KNOB_AT, mac::Anchor::TopLeft, window, cx);
     }
 
-    fn end_drag(&mut self, cx: &mut Context<Self>) {
+    fn end_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.resizing {
             self.resizing = false;
+            if !self.knob_visible() {
+                mac::set_mask(window, self.mask(), cx);
+            }
             cx.notify();
         }
     }
@@ -164,7 +185,8 @@ impl Render for Bubble {
                 .into_any_element(),
         };
         let show_name = self.hovered && !m.is_local;
-        let show_handle = self.hovered || self.resizing;
+        let show_knob = self.knob_visible();
+        let knob_at = d * KNOB_AT;
 
         div()
             .id("bubble")
@@ -186,13 +208,10 @@ impl Render for Bubble {
             })
             .when(m.mic_muted, |el| el.child(muted_badge(d)))
             .when(show_name, |el| el.child(name_label(m.name.clone(), d)))
-            .when(show_handle, |el| {
-                el.child(handle::handle(d * HANDLE_AT, d * HANDLE_AT, cx))
-            })
+            .when(show_knob, |el| el.child(handle::knob(knob_at, knob_at, cx)))
             .when(self.resizing, |el| el.child(handle::tracker(cx.entity())))
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                this.hovered = *hovered;
-                cx.notify();
+            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
+                this.set_hovered(*hovered, window, cx);
             }))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {

@@ -42,10 +42,11 @@ A small window (about 380 × 560):
 
 - Every participant, you included, is a **floating circle** above all apps and on every Space. Circles never take focus away from what you're doing.
 - A circle shows the person's camera, or their avatar (initials on a colour picked from their name) when the camera is off.
-- **Move** a circle by dragging it. **Resize** with the handle that appears on its edge when you hover (or scroll / pinch over it), from 120 to 480 px. Your circle starts at 200 px, everyone else's at 160 px.
+- **Move** a circle by dragging it. **Resize** by scrolling or pinching over it, or drag the knob with arrows that sits on its rim while you hover, from 120 to 480 px. Your circle starts at 200 px, everyone else's at 160 px.
 - A soft ring shows who is speaking; a small badge shows a muted mic.
 - Someone else's **screen share** floats as a rounded rectangle you can move and resize the same way.
-- The **glass toolbar** has: mic · camera · screen share (choose 5 / 15 / 30 / 60 fps) · copy call link · invite · expand to regular mode · leave. Drag it by its empty space.
+- The **glass toolbar** has: mic · camera · screen share · copy call link · invite · expand to regular mode · leave. Drag it by its empty space.
+- **Screen share** opens a picker window with live thumbnails of your screens and windows and the frame-rate presets (5 / 15 fps for text, 30 / 60 fps for motion). Double-click a thumbnail or press Enter to share. Clicking the share button again stops sharing.
 
 ## Call: regular mode
 
@@ -61,6 +62,8 @@ One ordinary window with video tiles and the same toolbar at the bottom. The col
 - New rooms are named "Room 1", "Room 2", … until there's a text field to rename them.
 - Closing the regular window doesn't end the call; it goes back to circles. Leaving is the red button.
 - Your own circle isn't mirrored yet (GPUI can't flip video; needs its own fix).
+- The share picker needs macOS's Screen Recording permission once (the system picker didn't, but it has no previews).
+- Shares are always H.264, for both text and motion (VP9 cost too much; see FOOTPRINT.md).
 
 ## How it's built
 

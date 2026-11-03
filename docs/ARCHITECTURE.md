@@ -50,10 +50,11 @@ docs/               plan, architecture, footprint measurements
 
 ## Media decisions
 
-- **Rendering video (macOS).** GPUI's `surface()` draws full-range NV12 `CVPixelBuffer`s directly on the GPU. Remote frames are converted to that format in pooled, IOSurface-backed buffers. Later, a zero-copy path for hardware-decoded frames.
-- **Screen share.** Picked with the ScreenCaptureKit system picker. **We drive the capture timing**, which gives the selectable frame rate. Presets:
-  - *Text*: 5 or 15 fps; when bandwidth drops, keep resolution and lower the frame rate; screen-content codec.
-  - *Motion*: 30 or 60 fps; when bandwidth drops, keep the frame rate and lower resolution.
+- **Rendering video (macOS).** GPUI's `surface()` draws full-range NV12 `CVPixelBuffer`s directly on the GPU. Hardware-decoded H.264 already arrives in that format and is drawn with no copy; software-decoded frames are converted into pooled IOSurface buffers.
+- **Codec.** H.264 everywhere (camera and screen share) so every Mac encodes and decodes in hardware. VP9 for screen text cost ~460 MB and ~24% CPU at 2560 px, against ~175 MB and ~11% for H.264.
+- **Screen share (macOS).** Our own picker (live thumbnails from ScreenCaptureKit), then ScreenCaptureKit captures straight into IOSurface buffers at the preset's frame rate and VideoToolbox encodes them, no CPU copy. Needs the Screen Recording permission once. Our own floating windows are left out of the share. Presets:
+  - *Text*: 5 or 15 fps, up to 2560 px; when bandwidth drops, keep resolution and lower the frame rate.
+  - *Motion*: 30 or 60 fps, up to 1920 px; when bandwidth drops, keep the frame rate and lower resolution.
 - **Bandwidth.** Simulcast + adaptive stream (each video is received at the size it's shown) + dynacast (layers nobody watches aren't encoded) + pausing tiles that aren't visible.
 - **Audio.** Opus with DTX and RED, using WebRTC's audio processing through the platform audio device module.
 

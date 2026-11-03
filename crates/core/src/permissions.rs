@@ -42,6 +42,33 @@ pub async fn request(_device: MediaDevice) -> bool {
     true
 }
 
+/// Whether we may capture the screen (macOS: Screen Recording permission).
+/// Never shows a prompt.
+pub fn screen_recording_allowed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        objc2_core_graphics::CGPreflightScreenCaptureAccess()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+/// Ask for Screen Recording permission. The first time, macOS shows its
+/// prompt; afterwards it only works through System Settings, and the app
+/// (or the terminal it runs from) must be restarted for a change to apply.
+pub fn request_screen_recording() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        objc2_core_graphics::CGRequestScreenCaptureAccess()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod mac {
     use block2::RcBlock;

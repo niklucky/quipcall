@@ -12,6 +12,8 @@ pub mod permissions;
 #[cfg(target_os = "macos")]
 pub mod pixel_buffer;
 mod screen;
+#[cfg(target_os = "macos")]
+mod screen_mac;
 pub mod video;
 
 use std::collections::HashMap;
@@ -28,7 +30,9 @@ pub use livekit;
 pub use livekit::track::VideoQuality;
 pub use permissions::{Access, MediaDevice};
 pub use quipcall_protocol as protocol;
-pub use screen::{ContentMode, ScreenSharePreset};
+pub use screen::{ContentMode, ScreenSharePreset, SourceId};
+#[cfg(target_os = "macos")]
+pub use screen_mac::{NoPermission, ShareSource, Thumbnail, list_sources, own_window};
 pub use video::{FrameSink, VideoSubscription};
 
 /// Stable identifier of a remote track inside the UI.
@@ -182,7 +186,7 @@ impl Engine {
             (s.room.take(), s.screen.take(), s.camera.take())
         };
         if let Some(screen) = screen {
-            screen.stop();
+            drop(screen);
         }
         let state = self.state.clone();
         self.rt.spawn(async move {
@@ -282,7 +286,8 @@ impl Engine {
         });
     }
 
-    pub fn start_screen_share(&self, preset: ScreenSharePreset) {
+    /// Share `source` (required on macOS, where our own picker chooses it).
+    pub fn start_screen_share(&self, source: Option<SourceId>, preset: ScreenSharePreset) {
         let state = self.state.clone();
         let events = self.events.clone();
         let handle = self.rt.handle().clone();
@@ -300,7 +305,8 @@ impl Engine {
                     }
                 };
                 let share =
-                    screen::ScreenShare::start(&room, preset, events.clone(), on_fail).await?;
+                    screen::ScreenShare::start(&room, source, preset, events.clone(), on_fail)
+                        .await?;
                 state.lock().screen = Some(share);
                 anyhow::Ok(())
             }

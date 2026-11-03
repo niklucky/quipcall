@@ -57,6 +57,18 @@ Release build, mic on, sending the synthetic 720p camera. 9 `lk load-test` H.264
 
 Small windows are cheap in memory (the 10-tile grid window was ~199 MB). CPU is higher than the grid (~15%) because each circle is its own window with its own Metal drawable and frame. If it matters: draw small circles at 15 fps, or share one renderer between windows.
 
+## 2026-11-03 — Stage 2, screen share (ScreenCaptureKit)
+
+Release build, sharing one of Quipcall's own windows (1100×721 pt) to a headless Chrome receiver, while also receiving its 720p camera. ScreenCaptureKit delivers IOSurface NV12 frames that go straight to the encoder.
+
+| Preset | Codec | Sent | CPU (one core) | Footprint |
+|---|---|---|---|---|
+| 15 fps · text | VP9 (software) | 2200×1440 @ 15 | 22–28%, ~24% | ~460 MB |
+| 15 fps · text | H.264 (VideoToolbox) | 2200×1440 @ 15 | 9–12.5%, ~10.5% | ~173 MB |
+| 30 fps · motion | H.264 (VideoToolbox) | 1920×1256 @ 30 | 9–16%, ~12.7% | ~188 MB |
+
+VP9 is out: software VP9 at this size more than doubles memory and CPU. Everything is H.264 now, including the web client's screen share. The window was mostly still; a busy screen costs more encoder time but the same memory.
+
 Ideas to try if we need headroom:
 - Direct ScreenCaptureKit capture, letting SCK scale on the GPU, for screen share.
 - Find out what the ~90 MB of GPU memory is (drawables at 2× scale, glyph/path atlases, MSAA textures for paths) and whether GPUI lets us shrink it.

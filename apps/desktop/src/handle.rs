@@ -1,39 +1,51 @@
-//! Resize handles for floating windows.
+//! Resize knobs for floating windows.
 //!
-//! The handle starts a drag on mouse down; while it lasts, `tracker` listens to
+//! The knob starts a drag on mouse down; while it lasts, `tracker` listens to
 //! every mouse move in the window (not just over the handle), because the
 //! cursor runs ahead of a window that resizes a frame later.
 
 use gpui::prelude::*;
 use gpui::{
     Context, CursorStyle, DispatchPhase, Div, Entity, MouseButton, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, Stateful, Window, canvas, div, hsla, px,
+    Pixels, Point, Stateful, Window, canvas, div, hsla, px, rgb, svg,
 };
 
-pub const SIZE: f32 = 22.0;
+use crate::assets::Icon;
+
+/// Knob diameter.
+pub const SIZE: f32 = 28.0;
 
 /// Implemented by windows with a resize handle.
 pub trait Resizable: 'static + Sized {
     /// The cursor moved to `position` (window coordinates) with the handle held.
     fn drag_to(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>);
-    fn end_drag(&mut self, cx: &mut Context<Self>);
+    fn end_drag(&mut self, window: &mut Window, cx: &mut Context<Self>);
     fn start_drag(&mut self, cx: &mut Context<Self>);
 }
 
-/// The handle itself, centred on `(x, y)` in window coordinates.
-pub fn handle<V: Resizable>(x: f32, y: f32, cx: &mut Context<V>) -> Stateful<Div> {
+/// The knob, centred on `(x, y)` in window coordinates. Opaque on purpose:
+/// on a circle it straddles the rim and hides the video corner under it.
+pub fn knob<V: Resizable>(x: f32, y: f32, cx: &mut Context<V>) -> Stateful<Div> {
     div()
-        .id("resize-handle")
+        .id("resize-knob")
         .absolute()
         .left(px(x - SIZE / 2.0))
         .top(px(y - SIZE / 2.0))
         .size(px(SIZE))
         .rounded_full()
-        .bg(hsla(0.0, 0.0, 1.0, 0.92))
-        .border_2()
-        .border_color(hsla(0.0, 0.0, 0.0, 0.25))
-        .shadow_md()
+        .bg(rgb(0x1d2027))
+        .border_1()
+        .border_color(hsla(0.0, 0.0, 1.0, 0.7))
+        .flex()
+        .items_center()
+        .justify_center()
         .cursor(CursorStyle::ResizeUpLeftDownRight)
+        .child(
+            svg()
+                .path(Icon::MoveDiagonal.path())
+                .size(px(SIZE * 0.5))
+                .text_color(hsla(0.0, 0.0, 1.0, 0.95)),
+        )
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _, _, cx| {
@@ -58,13 +70,13 @@ pub fn tracker<V: Resizable>(view: Entity<V>) -> impl IntoElement {
                     if event.pressed_button == Some(MouseButton::Left) {
                         this.drag_to(event.position, window, cx);
                     } else {
-                        this.end_drag(cx);
+                        this.end_drag(window, cx);
                     }
                 });
             });
-            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+            window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
                 if phase == DispatchPhase::Capture {
-                    view.update(cx, |this, cx| this.end_drag(cx));
+                    view.update(cx, |this, cx| this.end_drag(window, cx));
                 }
             });
         },
