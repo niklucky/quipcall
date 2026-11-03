@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Query for the dev-only token endpoint (`GET /api/dev/token`).
-/// Replaced by authenticated call tokens in Stage 2.
+/// Replaced by authenticated call tokens in Stage 3.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevTokenRequest {
     pub room: String,

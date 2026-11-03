@@ -26,12 +26,12 @@ Desktop (macOS first, then Windows and Linux) plus a web client.
 | Part | Tech |
 |---|---|
 | Media server | LiveKit (self-hosted). 1:1 calls also go through it, so there's one code path |
-| Desktop | Rust, GPUI (`gpui-pre` + `gpui-component`), LiveKit Rust SDK (libwebrtc) |
+| Desktop | Rust, GPUI (`gpui-pre`, custom controls, no widget library), LiveKit Rust SDK (libwebrtc). UI design: [UI.md](UI.md) |
 | macOS media | `PlatformAudio` (CoreAudio, WebRTC echo cancellation / noise suppression / auto gain), ScreenCaptureKit, AVFoundation, VideoToolbox |
 | Web | Svelte 5, Vite, `livekit-client` |
 | Backend | Rust: Axum, tokio, sqlx + SQLite |
 | Shared types | `crates/protocol` (serde), with TypeScript types generated for web |
-| Speech-to-text | `crates/stt`: Silero VAD + a pluggable ASR model (chosen in Stage 8) |
+| Speech-to-text | `crates/stt`: Silero VAD + a pluggable ASR model (chosen in Stage 9) |
 | Summaries | `Summarizer` trait: Claude API or a local LLM |
 
 ## Repo layout
@@ -40,7 +40,7 @@ Desktop (macOS first, then Windows and Linux) plus a web client.
 crates/protocol     shared request/response and WebSocket message types
 crates/core         call engine: LiveKit room, tracks, devices, call state (no UI)
 crates/capture-mac  ScreenCaptureKit and AVFoundation capture (added when needed)
-crates/stt          VAD + ASR pipeline, model manager (Stage 8)
+crates/stt          VAD + ASR pipeline, model manager (Stage 9)
 apps/desktop        GPUI app
 apps/server         Axum backend
 apps/web            Svelte web client

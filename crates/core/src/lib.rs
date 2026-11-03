@@ -69,6 +69,11 @@ pub enum Event {
         key: TrackKey,
     },
     ActiveSpeakers(Vec<String>),
+    /// A remote participant's microphone was muted, unmuted, or removed.
+    ParticipantMic {
+        identity: String,
+        muted: bool,
+    },
     /// The OS is showing a permission prompt; the call waits for the answer.
     WaitingForPermission(MediaDevice),
     MicChanged {
@@ -573,6 +578,35 @@ fn translate(event: RoomEvent) -> Option<Event> {
             };
             Event::VideoTrackRemoved { key }
         }
+        RoomEvent::TrackSubscribed {
+            track: RemoteTrack::Audio(_),
+            publication,
+            participant,
+        } if publication.source() == TrackSource::Microphone => Event::ParticipantMic {
+            identity: participant.identity().to_string(),
+            muted: publication.is_muted(),
+        },
+        RoomEvent::TrackMuted {
+            participant: Participant::Remote(participant),
+            publication,
+        } if publication.source() == TrackSource::Microphone => Event::ParticipantMic {
+            identity: participant.identity().to_string(),
+            muted: true,
+        },
+        RoomEvent::TrackUnmuted {
+            participant: Participant::Remote(participant),
+            publication,
+        } if publication.source() == TrackSource::Microphone => Event::ParticipantMic {
+            identity: participant.identity().to_string(),
+            muted: false,
+        },
+        RoomEvent::TrackUnpublished {
+            publication,
+            participant,
+        } if publication.source() == TrackSource::Microphone => Event::ParticipantMic {
+            identity: participant.identity().to_string(),
+            muted: true,
+        },
         RoomEvent::ActiveSpeakersChanged { speakers } => {
             Event::ActiveSpeakers(speakers.iter().map(|p| p.identity().to_string()).collect())
         }

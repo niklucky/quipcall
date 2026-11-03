@@ -43,7 +43,7 @@ export function screenShareOptions(
   ];
 }
 
-/** Dev-only token endpoint (replaced by real auth in Stage 2). */
+/** Dev-only token endpoint (replaced by real auth in Stage 3). */
 export async function devJoin(room: string, identity: string, name: string) {
   const q = new URLSearchParams({ room, identity, name });
   const res = await fetch(`/api/dev/token?${q}`);

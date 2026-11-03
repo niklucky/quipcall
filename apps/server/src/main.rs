@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .nest("/api", api)
         .layer(TraceLayer::new_for_http())
-        // Dev: the Vite server runs on a different origin. Tightened in Stage 2.
+        // Dev: the Vite server runs on a different origin. Tightened in Stage 3.
         .layer(CorsLayer::permissive())
         .with_state(state);
 

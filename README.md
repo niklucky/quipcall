@@ -16,8 +16,9 @@ A small, fast app for video and audio calls, 1:1 and in groups. Native Rust desk
 ```sh
 make dev                     # LiveKit (dev/livekit.yaml) + quipcall-server on :8080
 make web                     # web client on http://127.0.0.1:5173 (first time: cd apps/web && pnpm install)
-make desktop                 # desktop app, joins room "spike"
-cargo run -p quipcall-desktop -- --room spike --name Alice   # options
+make desktop                 # desktop app: home screen with rooms and history
+make desktop ROOM=spike      # join a room straight away
+cargo run -p quipcall-desktop -- --room spike --name Alice --regular   # options
 ```
 
 Handy test participants:
@@ -38,7 +39,9 @@ Web client URL options for test participants: `autojoin=1`, `codec=vp8|vp9|av1|h
 Desktop app options for tests:
 - `QUIPCALL_NO_MIC=1` starts the app without opening any audio device.
 - `QUIPCALL_FAKE_CAMERA=1` replaces the camera with a synthetic 720p30 pattern that goes through the real encode path (no camera, no permission prompt).
-- `--camera` turns the camera on as soon as the call connects.
+- `--camera` turns the camera on as soon as the call connects; `--regular` starts calls in the tile window instead of circles.
+- `QUIPCALL_DATA_DIR=/tmp/x` keeps rooms and history somewhere other than `~/Library/Application Support/Quipcall`.
+- `cargo run -p quipcall-desktop --features snapshot` with `QUIPCALL_SNAPSHOT_DIR=/tmp/snaps` writes a PNG of every window every 2 s, to check layouts without screen-recording access (AppKit's circle clip and blur aren't in the image).
 
 Measuring: `dev/measure.sh $(pgrep -x quipcall-desktop) 8` samples CPU and the physical footprint (use the footprint, not RSS). For a 10-person call, `lk load-test --room <room> --video-publishers 9 --video-codec h264` adds nine simulated publishers.
 

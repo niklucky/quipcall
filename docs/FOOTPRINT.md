@@ -47,6 +47,16 @@ Where the ~170 MB baseline goes (`footprint`): ~90 MB GPU memory owned by the wi
 
 **Bug found while measuring:** every video frame leaked an IOSurface (3.3 GB after a minute of sending). libwebrtc's Objective-C frame wrappers are autoreleased, and our threads (tokio workers, the synthetic camera) never drained an autorelease pool. Frame callbacks now run inside one. RSS barely showed it, which is how we found out RSS is the wrong metric.
 
+## 2026-11-03 — Stage 2, minimal mode with 10 circles
+
+Release build, mic on, sending the synthetic 720p camera. 9 `lk load-test` H.264 publishers, so 10 circles (you at 200 px, others at 160 px, each on the 360p layer) plus the glass toolbar: 11 windows.
+
+| Scenario | CPU (one core) | Footprint |
+|---|---|---|
+| Minimal mode, 10 circles + toolbar | 17–26%, ~23% avg | ~207 MB, flat |
+
+Small windows are cheap in memory (the 10-tile grid window was ~199 MB). CPU is higher than the grid (~15%) because each circle is its own window with its own Metal drawable and frame. If it matters: draw small circles at 15 fps, or share one renderer between windows.
+
 Ideas to try if we need headroom:
 - Direct ScreenCaptureKit capture, letting SCK scale on the GPU, for screen share.
 - Find out what the ~90 MB of GPU memory is (drawables at 2× scale, glyph/path atlases, MSAA textures for paths) and whether GPUI lets us shrink it.

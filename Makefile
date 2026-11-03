@@ -16,8 +16,9 @@ server:
 web:
 	cd apps/web && pnpm dev
 
+# Opens home. `make desktop ROOM=spike` joins a room straight away.
 desktop:
-	cargo run -p quipcall-desktop
+	cargo run -p quipcall-desktop -- $(if $(ROOM),--room $(ROOM))
 
 check:
 	cargo clippy --workspace --all-targets -- -D warnings
