@@ -9,6 +9,8 @@
 
 mod camera;
 pub mod permissions;
+#[cfg(target_os = "macos")]
+pub mod pixel_buffer;
 mod screen;
 pub mod video;
 
@@ -194,6 +196,7 @@ impl Engine {
     pub fn set_mic_enabled(&self, enabled: bool) {
         // LiveKit spawns tokio tasks internally; UI threads have no runtime.
         let _rt = self.rt.enter();
+        tracing::info!(enabled, "set mic");
         let s = self.state.lock();
         if let Some(mic) = &s.mic {
             if enabled {
@@ -218,15 +221,17 @@ impl Engine {
         let events = self.events.clone();
         self.rt.spawn(async move {
             let result = async {
-                if permissions::status(MediaDevice::Camera) == Access::Undecided {
-                    let _ = events
-                        .send(Event::WaitingForPermission(MediaDevice::Camera))
-                        .await;
+                if !camera::synthetic() {
+                    if permissions::status(MediaDevice::Camera) == Access::Undecided {
+                        let _ = events
+                            .send(Event::WaitingForPermission(MediaDevice::Camera))
+                            .await;
+                    }
+                    anyhow::ensure!(
+                        permissions::request(MediaDevice::Camera).await,
+                        "camera access is off. Allow it in System Settings → Privacy & Security → Camera"
+                    );
                 }
-                anyhow::ensure!(
-                    permissions::request(MediaDevice::Camera).await,
-                    "camera access is off. Allow it in System Settings → Privacy & Security → Camera"
-                );
                 let room = state.lock().room.clone().context("not in a call")?;
                 let camera = camera::Camera::start(&room, preview).await?;
                 // The call may have ended while the camera was starting.
@@ -333,6 +338,22 @@ impl Engine {
     }
 }
 
+/// Runs `f` inside an Objective-C autorelease pool on Apple platforms.
+///
+/// libwebrtc's Objective-C frame wrappers are autoreleased. Our own threads
+/// (tokio workers, the synthetic camera) have no pool that ever drains, so
+/// without this every video frame, and the IOSurface behind it, leaks.
+pub(crate) fn autorelease_pool<R>(f: impl FnOnce() -> R) -> R {
+    #[cfg(target_os = "macos")]
+    {
+        objc2::rc::autoreleasepool(|_| f())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        f()
+    }
+}
+
 impl Drop for Engine {
     fn drop(&mut self) {
         self.disconnect();
@@ -406,7 +427,11 @@ async fn connect(
     options.dynacast = true;
     let (room, mut room_events) = Room::connect(&join.url, &join.token, options).await?;
     let room = Arc::new(room);
-    tracing::info!(room = %room.name(), "connected");
+    tracing::info!(
+        room = %room.name(),
+        identity = %room.local_participant().identity(),
+        "connected"
+    );
 
     {
         let mut s = state.lock();
@@ -457,6 +482,22 @@ async fn connect(
     }
 
     while let Some(event) = room_events.recv().await {
+        if let RoomEvent::TrackMuted {
+            participant,
+            publication,
+        }
+        | RoomEvent::TrackUnmuted {
+            participant,
+            publication,
+        } = &event
+        {
+            tracing::debug!(
+                participant = %participant.identity(),
+                track = %publication.sid(),
+                muted = publication.is_muted(),
+                "track mute changed"
+            );
+        }
         track_publications(&state, &event);
         if let Some(event) = translate(event) {
             let disconnected = matches!(event, Event::Disconnected { .. });

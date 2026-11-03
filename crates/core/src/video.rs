@@ -32,7 +32,7 @@ pub(crate) fn attach(
     let mut stream = NativeVideoStream::new(track.rtc_track());
     let task = rt.spawn(async move {
         while let Some(frame) = stream.next().await {
-            sink.on_frame(&frame);
+            crate::autorelease_pool(|| sink.on_frame(&frame));
         }
     });
     VideoSubscription { task }

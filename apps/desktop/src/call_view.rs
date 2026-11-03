@@ -172,6 +172,9 @@ impl CallView {
             Event::Connected { room, .. } => {
                 self.status = Status::Connected { room };
                 self.waiting_for = None;
+                if self.args.camera && self.camera == Camera::Off {
+                    self.toggle_camera(cx);
+                }
             }
             Event::WaitingForPermission(device) => self.waiting_for = Some(device),
             Event::CameraChanged { enabled } => {

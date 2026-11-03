@@ -3,6 +3,9 @@
 //! macOS: AVFoundation delivers full-range NV12 `CVPixelBuffer`s, which go to
 //! WebRTC as native buffers (VideoToolbox encodes them without a CPU copy) and,
 //! unchanged, to the self-view sink (GPUI draws them directly).
+//!
+//! `QUIPCALL_FAKE_CAMERA=1` swaps the device for a synthetic 720p30 pattern
+//! that takes the same path, for headless tests and measurements.
 
 use std::sync::Arc;
 
@@ -16,6 +19,11 @@ use crate::FrameSink;
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
+
+/// Whether the synthetic camera is in use (no device, no permission prompt).
+pub(crate) fn synthetic() -> bool {
+    std::env::var_os("QUIPCALL_FAKE_CAMERA").is_some()
+}
 
 pub(crate) struct Camera {
     _capture: platform::Capture,
@@ -95,8 +103,8 @@ mod platform {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Instant;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
 
     use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
     use livekit::webrtc::prelude::{BoxVideoBuffer, VideoFrame, VideoRotation};
@@ -112,12 +120,40 @@ mod platform {
     use objc2_core_foundation::{CFRetained, CFString};
     use objc2_core_media::CMSampleBuffer;
     use objc2_core_video::{
-        CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth,
-        kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+        CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+        CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVPixelBufferPixelFormatTypeKey,
+        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVReturnSuccess,
     };
     use objc2_foundation::{NSDictionary, NSNumber, NSString};
 
     use super::*;
+    use crate::pixel_buffer::PixelBufferPool;
+
+    /// Keeps capture running; dropping it stops the camera.
+    pub(crate) struct Capture {
+        _guard: Box<dyn Send>,
+    }
+
+    impl Capture {
+        pub(crate) fn start(
+            source: NativeVideoSource,
+            preview: Option<Arc<dyn FrameSink>>,
+        ) -> anyhow::Result<Self> {
+            let handler = Handler {
+                source,
+                preview,
+                started: Instant::now(),
+                frames: AtomicU64::new(0),
+            };
+            let guard: Box<dyn Send> = if synthetic() {
+                Box::new(SyntheticCapture::start(handler)?)
+            } else {
+                Box::new(DeviceCapture::start(handler)?)
+            };
+            Ok(Self { _guard: guard })
+        }
+    }
 
     /// Called on the capture queue for every frame.
     struct Handler {
@@ -175,7 +211,8 @@ mod platform {
             ) {
                 // SAFETY: a valid sample buffer from AVFoundation.
                 if let Some(pixel_buffer) = unsafe { sample_buffer.image_buffer() } {
-                    self.ivars().on_pixel_buffer(pixel_buffer);
+                    // GCD drains pools eventually; per frame keeps it tight.
+                    crate::autorelease_pool(|| self.ivars().on_pixel_buffer(pixel_buffer));
                 }
             }
         }
@@ -189,7 +226,7 @@ mod platform {
         }
     }
 
-    pub(crate) struct Capture {
+    struct DeviceCapture {
         session: Retained<AVCaptureSession>,
         _delegate: Retained<Delegate>,
         _queue: DispatchRetained<DispatchQueue>,
@@ -197,13 +234,10 @@ mod platform {
 
     // SAFETY: AVCaptureSession is documented as thread-safe for start/stop; we
     // only call `stopRunning` (on drop) besides setup.
-    unsafe impl Send for Capture {}
+    unsafe impl Send for DeviceCapture {}
 
-    impl Capture {
-        pub(crate) fn start(
-            source: NativeVideoSource,
-            preview: Option<Arc<dyn FrameSink>>,
-        ) -> anyhow::Result<Self> {
+    impl DeviceCapture {
+        fn start(handler: Handler) -> anyhow::Result<Self> {
             // SAFETY: plain AVFoundation setup calls with valid arguments. The
             // delegate and queue are kept alive by `Capture`.
             unsafe {
@@ -228,12 +262,7 @@ mod platform {
                 output.setAlwaysDiscardsLateVideoFrames(true);
 
                 let queue = DispatchQueue::new("quipcall.camera", DispatchQueueAttr::SERIAL);
-                let delegate = Delegate::new(Handler {
-                    source,
-                    preview,
-                    started: Instant::now(),
-                    frames: AtomicU64::new(0),
-                });
+                let delegate = Delegate::new(handler);
                 output.setSampleBufferDelegate_queue(
                     Some(ProtocolObject::from_ref(&*delegate)),
                     Some(&queue),
@@ -261,11 +290,89 @@ mod platform {
         }
     }
 
-    impl Drop for Capture {
+    impl Drop for DeviceCapture {
         fn drop(&mut self) {
             // SAFETY: valid session. Blocks until capture has stopped, after
             // which the delegate gets no more callbacks.
             unsafe { self.session.stopRunning() };
+        }
+    }
+
+    /// A moving 720p30 test pattern, painted into pooled IOSurface buffers so
+    /// it is encoded exactly like camera frames.
+    struct SyntheticCapture {
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl SyntheticCapture {
+        fn start(handler: Handler) -> anyhow::Result<Self> {
+            tracing::info!("using the synthetic camera (QUIPCALL_FAKE_CAMERA)");
+            let pool = PixelBufferPool::new(WIDTH, HEIGHT).context("pixel buffer pool")?;
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread = std::thread::Builder::new()
+                .name("fake-camera".into())
+                .spawn({
+                    let stop = stop.clone();
+                    move || {
+                        let interval = Duration::from_secs(1) / 30;
+                        let mut next = Instant::now();
+                        let mut n = 0;
+                        while !stop.load(Ordering::Relaxed) {
+                            if let Some(pixel_buffer) = pool.take() {
+                                paint(&pixel_buffer, n);
+                                crate::autorelease_pool(|| handler.on_pixel_buffer(pixel_buffer));
+                            }
+                            n += 1;
+                            next += interval;
+                            std::thread::sleep(next.saturating_duration_since(Instant::now()));
+                        }
+                    }
+                })?;
+            Ok(Self {
+                stop,
+                thread: Some(thread),
+            })
+        }
+    }
+
+    impl Drop for SyntheticCapture {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// Horizontal bands that scroll every frame, so the encoder has real
+    /// motion. Painted with row fills, so generating costs next to nothing and
+    /// measurements show the pipeline, not the pattern.
+    fn paint(pixel_buffer: &CVPixelBuffer, n: usize) {
+        let (w, h) = (WIDTH as usize, HEIGHT as usize);
+        // SAFETY: the buffer comes from a 1280x720 420f pool: plane 0 has `h`
+        // rows of at least `w` bytes, plane 1 has `h / 2` rows of `w` bytes.
+        unsafe {
+            if CVPixelBufferLockBaseAddress(pixel_buffer, CVPixelBufferLockFlags(0))
+                != kCVReturnSuccess
+            {
+                return;
+            }
+            let y = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0).cast::<u8>();
+            let y_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
+            let uv = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1).cast::<u8>();
+            let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
+            for row in 0..h {
+                let luma = ((row + n * 4) / 3) as u8;
+                std::ptr::write_bytes(y.add(row * y_stride), luma, w);
+            }
+            for row in 0..h / 2 {
+                let line = std::slice::from_raw_parts_mut(uv.add(row * uv_stride), w);
+                let (pairs, _) = line.as_chunks_mut::<2>();
+                let tint = ((row / 45 + n / 30) % 4) as u8 * 24;
+                pairs.fill([104 + tint, 176 - tint]);
+            }
+            CVPixelBufferUnlockBaseAddress(pixel_buffer, CVPixelBufferLockFlags(0));
         }
     }
 }

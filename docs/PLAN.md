@@ -44,14 +44,19 @@ These are targets. We measure them at the end of Stage 1 and at every milestone,
 - [ ] Desktop: screen share via ScreenCaptureKit (system picker), with frame-rate presets 5/15/30/60 and a text/motion mode. *Implemented with libwebrtc's `DesktopCapturer`; needs a manual test (picker and Screen Recording permission).*
 - [x] ~~Desktop: ask for mic and camera permission up front (AVCaptureDevice `requestAccess`) before opening the audio device. Otherwise a pending prompt blocks WebRTC's audio thread and freezes the call (found in testing).~~ *The header shows "Waiting for … access" while the prompt is open; if the mic is denied, the call continues listen-only.*
 - [x] ~~Desktop: pick the simulcast layer per tile from its on-screen size (the Rust SDK's adaptive stream doesn't report sizes)~~
-- [ ] Desktop: camera capture and publish (AVFoundation → full-range NV12 `CVPixelBuffer` → VideoToolbox H.264, simulcast 720p/360p/180p). *Implemented; needs a first run by a person (camera permission prompt).*
+- [ ] Desktop: camera capture and publish (AVFoundation → full-range NV12 `CVPixelBuffer` → VideoToolbox H.264, simulcast 720p/360p/180p). *Publish path verified with the synthetic camera (`QUIPCALL_FAKE_CAMERA=1`): the web client receives 720p30 H.264 with 0 dropped frames. The AVFoundation capture itself still needs a first run by a person (camera permission prompt).*
 - [ ] Desktop: local self-view for the camera, drawn straight from the capture buffers. Screen share shows the active preset instead of a preview, so we don't spend CPU converting our own screen. *Implemented with the camera; not mirrored yet.*
 - [x] ~~Web: minimal Svelte page that joins the same room with camera, mic, and screen share (with frame-rate picker)~~
 - [x] ~~Zero-copy receive path for hardware-decoded frames~~ *VideoToolbox already outputs full-range NV12, so the decoded `CVPixelBuffer` goes to GPUI as is. Receiving 720p: ~7.5% CPU with H.264 vs ~12.5% with VP8. The web client now publishes H.264 by default.*
 - [ ] Direct ScreenCaptureKit capture (`CVPixelBuffer` → `NativeBuffer` → VideoToolbox), if the libwebrtc capturer uses too much CPU
-- [ ] Measure the footprint and write `docs/FOOTPRINT.md`. *Recorded so far: binary, receiving 720p (H.264 and VP8) with the mic on. Sending camera, screen share, and a 10-person grid still to measure.*
+- [x] ~~Fix: every video frame leaked an IOSurface (libwebrtc's autoreleased Objective-C wrappers on threads without an autorelease pool)~~ *Found while measuring.*
+- [ ] Measure the footprint and write `docs/FOOTPRINT.md`. *Recorded (as physical footprint): receive only ~170 MB / 6%, 1:1 both ways ~189 MB / 9%, 10-person grid ~199 MB / 15%, all within budget. Screen share still to measure (needs the picker, so a person).*
+- [ ] Find out why the mic track sometimes shows as muted on the server right after joining. *Seen twice, not reproduced in 10 scripted runs. Mic toggles and mute changes are logged now.*
+- [ ] GPUI go/no-go. *Recommendation: go (see the notes below the stage).*
 
 **Done when:** a 1:1 call between desktop and web works locally with audio, video, and screen share at a chosen frame rate. Footprint numbers are recorded, and we've made a go/no-go call on GPUI.
+
+**GPUI so far.** For: video frames are drawn straight from `CVPixelBuffer`s with no copy, the whole call stays within the CPU budget, the binary is 25 MB, and Zed proves it on Windows and Linux. Against: about 90 MB of the ~170 MB footprint is GPU memory held by the window, `gpui-pre` is a snapshot of an unstable API (pinned to an exact version), and some basics are missing (no transforms, so no mirrored self-view yet; widgets come from gpui-component). None of these is a blocker, and the alternatives (Tauri/web view, Slint, egui) would need their own zero-copy video path.
 
 ## Stage 2 — Backend core
 
@@ -67,7 +72,7 @@ These are targets. We measure them at the end of Stage 1 and at every milestone,
 ## Stage 3 — Desktop app shell
 
 - [ ] Login, with the session stored in the macOS Keychain
-- [ ] Menu-bar mode: runs in the background, stays connected for presence, small idle footprint
+- [ ] Menu-bar mode: runs in the background, stays connected for presence, small idle footprint. Check that GPUI's GPU memory (~90 MB with the call window open) is released when no window is open.
 - [ ] `core`: call state machine with no UI code
 - [ ] Contacts: add by username, see who's online
 - [ ] Settings: mic, speaker, camera, default screen-share preset

@@ -35,7 +35,12 @@ lk room join --url ws://127.0.0.1:7880 --api-key quipcall-dev \
 
 Web client URL options for test participants: `autojoin=1`, `codec=vp8|vp9|av1|h264` (camera codec, default `h264`), `mic=0` (no microphone, so no beeping fake audio). In dev builds the LiveKit room is available as `window.qcRoom`, so a script can read WebRTC stats over the DevTools protocol (`--remote-debugging-port`).
 
-`QUIPCALL_NO_MIC=1` starts the desktop app without opening any audio device. Use it for headless runs.
+Desktop app options for tests:
+- `QUIPCALL_NO_MIC=1` starts the app without opening any audio device.
+- `QUIPCALL_FAKE_CAMERA=1` replaces the camera with a synthetic 720p30 pattern that goes through the real encode path (no camera, no permission prompt).
+- `--camera` turns the camera on as soon as the call connects.
+
+Measuring: `dev/measure.sh $(pgrep -x quipcall-desktop) 8` samples CPU and the physical footprint (use the footprint, not RSS). For a 10-person call, `lk load-test --room <room> --video-publishers 9 --video-codec h264` adds nine simulated publishers.
 
 To run a second, separate stack next to `make dev` (for example for automated tests), use other ports: LiveKit with a copy of `dev/livekit.yaml`, the server with `QUIPCALL_BIND` and `LIVEKIT_PUBLIC_URL`, Vite with `QUIPCALL_API=http://127.0.0.1:<server port> vite --port <port>`, and the desktop app with `--server`.
 
