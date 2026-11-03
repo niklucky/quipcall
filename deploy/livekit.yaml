@@ -1,0 +1,17 @@
+# LiveKit on the VPS, single node. API keys come from LIVEKIT_KEYS in
+# /opt/quipcall/secrets.env (generated on the box by install.sh).
+port: 7880
+bind_addresses:
+  - 127.0.0.1         # signalling only via nginx: wss://quipcall.com/rtc
+rtc:
+  udp_port: 7882      # all media over one UDP port
+  tcp_port: 7881      # ICE over TCP when a network blocks UDP
+  use_external_ip: false
+  interfaces:
+    includes:
+      - eth0          # the public interface; skip the Docker bridges
+room:
+  empty_timeout: 300
+  departure_timeout: 20
+logging:
+  level: info

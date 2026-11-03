@@ -2,7 +2,7 @@
 include dev/dev.env
 export
 
-.PHONY: dev livekit server web desktop check fmt token
+.PHONY: dev livekit server web desktop check fmt token deploy mac-app release-mac
 
 dev:
 	$(MAKE) -j2 livekit server
@@ -27,6 +27,18 @@ check:
 fmt:
 	cargo fmt --all
 
-# Print a dev join token: make token ROOM=spike ID=alice
+# Print a join token: make token ROOM=spike ID=alice
 token:
-	@curl -s "http://$(QUIPCALL_BIND)/api/dev/token?room=$(or $(ROOM),spike)&identity=$(or $(ID),cli-$$RANDOM)"; echo
+	@curl -s "http://$(QUIPCALL_BIND)/api/join?room=$(or $(ROOM),spike)&identity=$(or $(ID),cli-$$RANDOM)"; echo
+
+# Server, web client and VPS config → https://quipcall.com (docs/DEPLOY.md).
+deploy:
+	deploy/deploy.sh
+
+# The Mac app (Apple Silicon + Intel, ad-hoc signed) → target/mac/Quipcall.zip.
+mac-app:
+	deploy/mac/package.sh
+
+# Build the Mac app and publish it at https://quipcall.com/download/.
+release-mac:
+	deploy/mac/package.sh --upload

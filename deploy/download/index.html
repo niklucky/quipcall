@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quipcall for Mac</title>
+<style>
+  :root { color-scheme: dark; font: 15px/1.55 system-ui, -apple-system, sans-serif; background: #111318; color: #e6e6e6; }
+  body { max-width: 560px; margin: 64px auto; padding: 0 20px; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 32px 0 8px; }
+  p, li { color: #b9c0cc; }
+  .dim { color: #8b93a1; font-size: 13px; }
+  code, pre { font: 13px ui-monospace, Menlo, monospace; }
+  pre { background: #1b1e25; border: 1px solid #2a2e37; border-radius: 8px; padding: 12px 14px; overflow-x: auto; color: #e6e6e6; }
+  a { color: #8ab4ff; }
+  a.button { display: inline-block; margin: 8px 8px 0 0; padding: 8px 16px; border-radius: 999px; background: #2f6feb; color: #fff; text-decoration: none; }
+</style>
+</head>
+<body>
+  <h1>Quipcall for Mac</h1>
+  <p class="dim">Alpha · Apple Silicon and Intel · macOS 12.3 or later (screen sharing needs macOS 14)</p>
+
+  <h2>Install with one line (easiest)</h2>
+  <p>Open Terminal and paste:</p>
+  <pre>curl -fsSL https://quipcall.com/download/install.sh | sh</pre>
+  <p class="dim">Puts Quipcall in Applications and opens it. Run it again to update.</p>
+
+  <h2>Or download it</h2>
+  <a class="button" href="/download/Quipcall-apple-silicon.zip">Apple Silicon (M1 and later)</a>
+  <a class="button" href="/download/Quipcall-intel.zip">Intel</a>
+  <p class="dim">Not sure? Apple menu → About This Mac: “Chip: Apple M…” is Apple Silicon, “Processor: … Intel” is Intel.</p>
+  <ol>
+    <li>Unzip it and drag Quipcall into Applications.</li>
+    <li>The first time, macOS refuses to open it: the alpha isn't notarized by Apple yet.
+      Open <b>System Settings → Privacy &amp; Security</b>, scroll down and click
+      <b>Open Anyway</b> next to Quipcall.</li>
+  </ol>
+
+  <h2>Permissions</h2>
+  <ul>
+    <li>Microphone and camera: macOS asks the first time you use them.</li>
+    <li>Screen sharing: the first time you share, allow Quipcall under
+      <b>System Settings → Privacy &amp; Security → Screen &amp; System Audio Recording</b>,
+      then quit and reopen Quipcall.</li>
+  </ul>
+
+  <h2>Something broke?</h2>
+  <p>Send the log: <code>~/Library/Logs/Quipcall/quipcall.log</code>
+    (in Finder: Go → Go to Folder…, paste the path).</p>
+</body>
+</html>

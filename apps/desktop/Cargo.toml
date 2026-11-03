@@ -10,6 +10,7 @@ snapshot = ["gpui_platform/test-support", "dep:image"]
 
 [dependencies]
 quipcall-core.workspace = true
+quipcall-protocol.workspace = true
 gpui = { package = "gpui-pre", version = "=0.3.11", default-features = false, features = ["font-kit"] }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.11", default-features = false, features = ["font-kit", "runtime_shaders"] }
 anyhow = "1.0.104"
@@ -28,5 +29,5 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFCGTypes", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGPath"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSPathUtilities", "NSString"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer", "CAShapeLayer", "CATransaction", "CATransform3D", "objc2-core-foundation", "objc2-core-graphics"] }

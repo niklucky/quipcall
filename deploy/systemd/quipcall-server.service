@@ -1,0 +1,22 @@
+[Unit]
+Description=Quipcall API server
+After=network-online.target quipcall-livekit.service
+Wants=network-online.target
+
+[Service]
+User=quipcall
+Group=quipcall
+EnvironmentFile=/opt/quipcall/secrets.env
+Environment=QUIPCALL_BIND=127.0.0.1:4600
+Environment=LIVEKIT_PUBLIC_URL=wss://quipcall.com
+Environment=RUST_LOG=quipcall_server=info,tower_http=info
+ExecStart=/opt/quipcall/bin/quipcall-server
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -5262,6 +5262,7 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "parking_lot 0.13.0",
  "quipcall-core",
+ "quipcall-protocol",
  "raw-window-handle",
  "serde",
  "serde_json",

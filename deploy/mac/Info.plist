@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Quipcall</string>
+	<key>CFBundleDisplayName</key>
+	<string>Quipcall</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.quipcall.desktop</string>
+	<key>CFBundleExecutable</key>
+	<string>Quipcall</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@BUILD@</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>@MIN_MACOS@</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.social-networking</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<!-- Stay on the integrated GPU on MacBooks with two. -->
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Quipcall uses the microphone so people in your calls can hear you.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Quipcall uses the camera so people in your calls can see you.</string>
+	<!-- Call links: quipcall://join/<room> -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Quipcall call link</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>quipcall</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

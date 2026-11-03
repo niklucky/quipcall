@@ -14,7 +14,7 @@ Desktop (macOS first, then Windows and Linux) plus a web client.
 ```
                     ┌─────────────────────────── VPS ───────────────────────────┐
                     │                                                           │
-  Desktop (Rust) ───┼─ HTTPS/WS ─▶ Caddy ─▶ quipcall-server (Axum, SQLite)       │
+  Desktop (Rust) ───┼─ HTTPS/WS ─▶ nginx ─▶ quipcall-server (Axum, SQLite)       │
   Web (Svelte)  ────┤                        accounts, contacts, groups, invites│
                     │                        presence + ringing (WebSocket)     │
                     │                        LiveKit tokens, webhooks, transcripts, summaries
@@ -45,7 +45,8 @@ apps/desktop        GPUI app
 apps/server         Axum backend
 apps/web            Svelte web client
 dev/                local LiveKit config
-docs/               plan, architecture, footprint measurements
+deploy/             VPS deploy (nginx, systemd, LiveKit config) and Mac app packaging
+docs/               plan, architecture, footprint measurements, deploy runbook
 ```
 
 ## Media decisions
@@ -70,3 +71,5 @@ docs/               plan, architecture, footprint measurements
 ## Alpha scope
 
 Only me and friends, self-hosted on one VPS. About 10 people per call at most. Android users join through the mobile web client.
+
+Deployed at https://quipcall.com ([DEPLOY.md](DEPLOY.md)). The VPS is shared with other projects and already runs nginx with certbot, so we use those rather than Caddy. LiveKit takes all media on one UDP port (7882) with a TCP fallback (7881), so the firewall story is two ports. The Mac app ships as one build per architecture, ad-hoc signed, until it's worth paying for notarization.

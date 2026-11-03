@@ -91,7 +91,12 @@ fn describe(error: *mut NSError) -> String {
         .unwrap_or_else(|| "unknown error".into())
 }
 
+/// Every capture path starts here. Thumbnails (SCScreenshotManager) and
+/// filter geometry (contentRect, pointPixelScale) need macOS 14.
 async fn shareable_content() -> anyhow::Result<Retained<SCShareableContent>> {
+    if !objc2::available!(macos = 14.0) {
+        anyhow::bail!("screen sharing needs macOS 14 or later");
+    }
     let (tx, rx) = async_channel::bounded(1);
     {
         let handler = RcBlock::new(

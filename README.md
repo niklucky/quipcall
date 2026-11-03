@@ -4,6 +4,7 @@ A small, fast app for video and audio calls, 1:1 and in groups. Native Rust desk
 
 - Plan and progress: [docs/PLAN.md](docs/PLAN.md)
 - Architecture and decisions: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- Deploying (https://quipcall.com) and the Mac app: [docs/DEPLOY.md](docs/DEPLOY.md) — `make deploy`, `make release-mac`
 
 ## Requirements (macOS)
 

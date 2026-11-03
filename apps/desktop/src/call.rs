@@ -183,7 +183,7 @@ impl Call {
             mic_muted: true,
         });
 
-        let join = engine.dev_join(&args.server, &room.id, &identity, &args.name);
+        let join = engine.join(&args.server, &room.id, &identity, &args.name);
         let join_task = cx.spawn(async move |this, cx| {
             let result = join.await;
             let _ = this.update(cx, |call, cx| {

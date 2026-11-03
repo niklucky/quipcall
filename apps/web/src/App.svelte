@@ -10,8 +10,8 @@
   import {
     PRESETS,
     collectTiles,
-    devJoin,
     presetLabel,
+    requestJoin,
     screenShareOptions,
     uniqueIdentity,
     type ScreenSharePreset,
@@ -25,8 +25,9 @@
   // frames without a CPU copy (~40% less CPU than VP8 in our measurements).
   const codec = (params.get('codec') ?? 'h264') as VideoCodec;
   const withMic = params.get('mic') !== '0';
-  let roomName = $state(params.get('room') ?? 'spike');
-  let name = $state(params.get('name') ?? 'Web');
+  const linkedRoom = params.get('room');
+  let roomName = $state(linkedRoom ?? (import.meta.env.DEV ? 'spike' : ''));
+  let name = $state(params.get('name') ?? localStorage.getItem('quipcall.name') ?? '');
 
   let room: Room | undefined;
   let status = $state<'idle' | 'joining' | 'connected'>('idle');
@@ -49,7 +50,9 @@
     error = '';
     status = 'joining';
     try {
-      const { url, token } = await devJoin(roomName, uniqueIdentity(name), name);
+      name = name.trim() || 'Guest';
+      localStorage.setItem('quipcall.name', name);
+      const { url, token } = await requestJoin(roomName.trim(), uniqueIdentity(name), name);
       const r = new Room({
         adaptiveStream: true,
         dynacast: true,
@@ -152,6 +155,10 @@
         {status === 'joining' ? 'Joining…' : 'Join'}
       </button>
       {#if error}<p class="error">{error}</p>{/if}
+      {#if linkedRoom}
+        <a href={`quipcall://join/${encodeURIComponent(linkedRoom)}`}>Open in the Quipcall app</a>
+      {/if}
+      <a class="dim" href="/download/">Get Quipcall for Mac</a>
     </form>
   {:else}
     <header>
@@ -194,6 +201,8 @@
   main { height: 100%; display: flex; flex-direction: column; }
   .join { margin: auto; display: flex; flex-direction: column; gap: 8px; width: 260px; }
   .join h1 { margin: 0 0 8px; font-size: 20px; }
+  .join a { color: #8ab4ff; text-align: center; text-decoration: none; }
+  .join a.dim { color: #9aa3b2; font-size: 12px; }
   header { display: flex; justify-content: space-between; padding: 8px 16px; border-bottom: 1px solid #262a33; }
   .grid { flex: 1; display: grid; gap: 8px; padding: 8px; min-height: 0; grid-auto-rows: 1fr; }
   .tile { position: relative; background: #1b1e25; border-radius: 8px; overflow: hidden; border: 2px solid transparent; min-height: 0; }

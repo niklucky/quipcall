@@ -10,7 +10,7 @@ use axum::{
     routing::get,
 };
 use livekit_api::access_token::{AccessToken, VideoGrants};
-use quipcall_protocol::{ApiError, DevTokenRequest, JoinInfo};
+use quipcall_protocol::{ApiError, JoinInfo, JoinRequest, is_valid_room_id};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
@@ -35,16 +35,14 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
     };
 
-    let mut api = Router::new().route("/health", get(|| async { "ok" }));
-    if config.dev_mode {
-        tracing::warn!("dev mode: /api/dev/token is enabled — never run this in production");
-        api = api.route("/dev/token", get(dev_token));
-    }
+    let api = Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .route("/join", get(join));
 
     let app = Router::new()
         .nest("/api", api)
         .layer(TraceLayer::new_for_http())
-        // Dev: the Vite server runs on a different origin. Tightened in Stage 3.
+        // The Vite dev server runs on another origin. Tightened in Stage 3.
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -54,18 +52,32 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Dev-only: mint a LiveKit token for any room/identity. No auth.
-async fn dev_token(
+/// Mint a LiveKit token for a room. No auth yet: rooms are open to anyone
+/// with the link, like a meeting link (accounts arrive in Stage 3).
+async fn join(
     State(state): State<AppState>,
-    Query(req): Query<DevTokenRequest>,
+    Query(req): Query<JoinRequest>,
 ) -> Result<Json<JoinInfo>, AppError> {
-    if req.room.is_empty() || req.identity.is_empty() {
-        return Err(AppError::bad_request("room and identity are required"));
+    if !is_valid_room_id(&req.room) {
+        return Err(AppError::bad_request(
+            "room must be 1–64 letters, digits, '-', '_' or '.'",
+        ));
     }
+    if !(1..=128).contains(&req.identity.len()) || req.identity.chars().any(char::is_control) {
+        return Err(AppError::bad_request("identity must be 1–128 characters"));
+    }
+    let name = req
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(&req.identity);
+    let name: String = name.chars().filter(|c| !c.is_control()).take(64).collect();
+
     let cfg = &state.config;
     let token = AccessToken::with_api_key(&cfg.livekit_api_key, &cfg.livekit_api_secret)
         .with_identity(&req.identity)
-        .with_name(req.name.as_deref().unwrap_or(&req.identity))
+        .with_name(&name)
         .with_grants(VideoGrants {
             room_join: true,
             room: req.room.clone(),

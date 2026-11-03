@@ -45,10 +45,10 @@ export function screenShareOptions(
   ];
 }
 
-/** Dev-only token endpoint (replaced by real auth in Stage 3). */
-export async function devJoin(room: string, identity: string, name: string) {
+/** A token for `room`. Rooms are open to anyone with the link until Stage 3. */
+export async function requestJoin(room: string, identity: string, name: string) {
   const q = new URLSearchParams({ room, identity, name });
-  const res = await fetch(`/api/dev/token?${q}`);
+  const res = await fetch(`/api/join?${q}`);
   const body = await res.json();
   if (!res.ok) throw new Error(body.error ?? res.statusText);
   return body as { url: string; token: string };

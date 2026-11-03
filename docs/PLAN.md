@@ -7,7 +7,7 @@ How to read this file:
 - Each stage ends with **Done when**: the checks that have to pass before we cross it out.
 - Decisions and the reasoning behind them live in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-**Current focus:** Stage 2 — Call UI (Stage 1 waits on a manual test of camera, speaker and screen share)
+**Current focus:** Stage 2 — Call UI (Stage 1 waits on a manual test of camera, speaker and screen share). An early alpha (Stage 7, partly) runs at https://quipcall.com so friends can test calls.
 
 ---
 
@@ -118,10 +118,14 @@ Design: [UI.md](UI.md).
 
 ## Stage 7 — Alpha deploy to the VPS (friends start testing here)
 
-- [ ] LiveKit on a single node: UDP port, built-in TURN/TLS for strict networks
-- [ ] Caddy (HTTPS), systemd units, server, and static web files
+Started early (2026-11-03), ahead of Stages 3–6: there are no accounts yet, so rooms are open links (`/api/join`). Runbook: [DEPLOY.md](DEPLOY.md).
+
+- [x] ~~LiveKit on a single node: one UDP port (7882), TCP fallback (7881)~~ — calls from outside connect over UDP
+- [ ] Built-in TURN/TLS for strict networks (only 443 open)
+- [x] ~~HTTPS, systemd units, server, and static web files~~ — nginx + Let's Encrypt (the box already runs them for other projects, so not Caddy); `make deploy`
 - [ ] SQLite backups
-- [ ] macOS build: `.app` bundle, signing and notarization (or ad-hoc signing for friends), simple update check
+- [x] ~~macOS build: `.app` bundle, ad-hoc signing for friends~~ — one app per architecture, `curl … | sh` installer, call links (`quipcall://join/<room>`); `make release-mac`
+- [ ] Notarization (Apple Developer ID), so updates keep their permissions; simple update check
 - [ ] Invite codes for friends
 
 **Done when:** friends install the app, sign up, and call each other over the internet, including through strict NAT.

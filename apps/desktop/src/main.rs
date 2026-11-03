@@ -14,6 +14,8 @@ mod theme;
 mod toolbar;
 mod video_mac;
 
+use std::io::IsTerminal as _;
+
 use gpui::{App, AppContext as _, Context, Entity, Global, Subscription, WindowHandle};
 use tracing_subscriber::EnvFilter;
 
@@ -36,11 +38,24 @@ pub struct Args {
     pub regular: bool,
 }
 
+/// The server release builds talk to, baked in at build time:
+/// `QUIPCALL_SERVER=https://quipcall.com cargo build --release` (see deploy/).
+const SERVER: &str = match option_env!("QUIPCALL_SERVER") {
+    Some(url) => url,
+    None => "http://127.0.0.1:8080",
+};
+
+/// Where call links point. Deployed, the web client shares the server's origin.
+const WEB: &str = match (option_env!("QUIPCALL_WEB"), option_env!("QUIPCALL_SERVER")) {
+    (Some(url), _) | (None, Some(url)) => url,
+    (None, None) => "http://127.0.0.1:5173",
+};
+
 fn parse_args() -> Args {
     let mut args = Args {
-        server: "http://127.0.0.1:8080".into(),
-        web: "http://127.0.0.1:5173".into(),
-        name: std::env::var("USER").unwrap_or_else(|_| "desktop".into()),
+        server: SERVER.into(),
+        web: WEB.into(),
+        name: default_name(),
         room: None,
         camera: false,
         regular: false,
@@ -63,6 +78,25 @@ fn parse_args() -> Args {
         }
     }
     args
+}
+
+/// The account's full name ("Jane Appleseed"), else the login name.
+fn default_name() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        let full = objc2_foundation::NSFullUserName().to_string();
+        if !full.trim().is_empty() {
+            return full.trim().to_owned();
+        }
+    }
+    std::env::var("USER").unwrap_or_else(|_| "desktop".into())
+}
+
+/// The room in a call link: `quipcall://join/<room>`.
+fn room_from_link(url: &str) -> Option<String> {
+    let room = url.strip_prefix("quipcall://join/")?;
+    let room = room.split(['/', '?', '#']).next()?;
+    quipcall_protocol::is_valid_room_id(room).then(|| room.to_owned())
 }
 
 fn usage() -> ! {
@@ -117,6 +151,21 @@ impl Shell {
             };
             self.start_call(room, cx);
         }
+    }
+
+    /// Join the room of a call link someone sent.
+    pub fn join_link(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.in_call() {
+            tracing::info!("ignoring link to {id}: already in a call");
+            return;
+        }
+        let saved = self.store.rooms.iter().find(|r| r.id == id);
+        let room = RoomRef {
+            name: saved.map_or_else(|| id.clone(), |r| r.name.clone()),
+            one_time: saved.is_none(),
+            id,
+        };
+        self.start_call(room, cx);
     }
 
     pub fn new_room(&mut self, cx: &mut Context<Self>) {
@@ -177,52 +226,128 @@ impl Shell {
     }
 }
 
+/// Logs go to the terminal, or to ~/Library/Logs/Quipcall/quipcall.log when
+/// started from Finder. Each launch starts a fresh file; the last one is kept.
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "quipcall_desktop=debug,quipcall_core=debug,livekit=info,warn".into());
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    let file = if std::io::stderr().is_terminal() {
+        None
+    } else {
+        log_file()
+    };
+    match file {
+        Some(file) => builder
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .init(),
+        None => builder.init(),
+    }
+    // Panics would otherwise vanish with stderr.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("{info}");
+        default_hook(info);
+    }));
+}
+
+fn log_file() -> Option<std::fs::File> {
+    let dir = std::path::PathBuf::from(std::env::var_os("HOME")?).join("Library/Logs/Quipcall");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("quipcall.log");
+    let _ = std::fs::rename(&path, dir.join("quipcall.previous.log"));
+    std::fs::File::create(path).ok()
+}
+
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            "quipcall_desktop=debug,quipcall_core=debug,livekit=info,warn".into()
-        }))
-        .init();
+    init_logging();
     let args = parse_args();
+    tracing::info!(
+        "quipcall {} ({}), server {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::ARCH,
+        args.server
+    );
 
-    gpui_platform::application()
-        .with_assets(assets::Assets)
-        .run(move |cx: &mut App| {
-            let shell = cx.new(|_| Shell {
-                args: args.clone(),
-                store: Store::load(),
-                call: None,
-                home: None,
-                home_pending: false,
-            });
-            cx.set_global(GlobalShell(shell.clone()));
-            share_picker::bind_keys(cx);
-
-            shell.update(cx, |shell, cx| match shell.args.room.clone() {
-                Some(id) => shell.start_call(
-                    RoomRef {
-                        name: id.clone(),
-                        id,
-                        one_time: false,
-                    },
-                    cx,
-                ),
-                None => shell.open_home(cx),
-            });
-
-            // Quit once home is closed and there's no call. Not merely when no
-            // window is open: switching call modes swaps windows.
-            cx.on_window_closed(|cx, _| {
-                let shell = Shell::global(cx);
-                let s = shell.read(cx);
-                if cx.windows().is_empty() && !s.in_call() && !s.home_pending {
-                    cx.quit();
-                }
-            })
-            .detach();
-
-            #[cfg(feature = "snapshot")]
-            snapshot::start(cx);
-            cx.activate(true);
+    let app = gpui_platform::application().with_assets(assets::Assets);
+    // Call links (`quipcall://join/<room>`) arrive here, before or after launch.
+    let (links_tx, links) = async_channel::unbounded::<String>();
+    app.on_open_urls(move |urls| {
+        for url in urls {
+            let _ = links_tx.try_send(url);
+        }
+    });
+    app.run(move |cx: &mut App| {
+        let shell = cx.new(|_| Shell {
+            args: args.clone(),
+            store: Store::load(),
+            call: None,
+            home: None,
+            home_pending: false,
         });
+        cx.set_global(GlobalShell(shell.clone()));
+        share_picker::bind_keys(cx);
+
+        shell.update(cx, |shell, cx| match shell.args.room.clone() {
+            Some(id) => shell.start_call(
+                RoomRef {
+                    name: id.clone(),
+                    id,
+                    one_time: false,
+                },
+                cx,
+            ),
+            None => shell.open_home(cx),
+        });
+
+        // Quit once home is closed and there's no call. Not merely when no
+        // window is open: switching call modes swaps windows.
+        cx.on_window_closed(|cx, _| {
+            let shell = Shell::global(cx);
+            let s = shell.read(cx);
+            if cx.windows().is_empty() && !s.in_call() && !s.home_pending {
+                cx.quit();
+            }
+        })
+        .detach();
+
+        cx.spawn(async move |cx| {
+            while let Ok(url) = links.recv().await {
+                match room_from_link(&url) {
+                    Some(room) => {
+                        cx.update(|cx| Shell::global(cx).update(cx, |s, cx| s.join_link(room, cx)))
+                    }
+                    None => tracing::warn!("not a call link: {url}"),
+                }
+            }
+        })
+        .detach();
+
+        #[cfg(feature = "snapshot")]
+        snapshot::start(cx);
+        cx.activate(true);
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::room_from_link;
+
+    #[test]
+    fn call_links() {
+        let room = |url| room_from_link(url);
+        assert_eq!(
+            room("quipcall://join/quick-1a2b3c4d").as_deref(),
+            Some("quick-1a2b3c4d")
+        );
+        assert_eq!(
+            room("quipcall://join/room-1-ab12/").as_deref(),
+            Some("room-1-ab12")
+        );
+        assert_eq!(room("quipcall://join/spike?x=1").as_deref(), Some("spike"));
+        assert_eq!(room("quipcall://join/"), None);
+        assert_eq!(room("quipcall://join/a%20b"), None);
+        assert_eq!(room("https://quipcall.com/?room=spike"), None);
+    }
 }

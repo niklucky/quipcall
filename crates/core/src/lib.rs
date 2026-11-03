@@ -132,15 +132,15 @@ impl Engine {
         ))
     }
 
-    /// Fetch a join token from the dev endpoint of a quipcall server.
-    pub fn dev_join(
+    /// Fetch a token for `room` from a quipcall server.
+    pub fn join(
         &self,
         server: &str,
         room: &str,
         identity: &str,
         name: &str,
     ) -> impl Future<Output = anyhow::Result<JoinInfo>> + Send + 'static {
-        let url = format!("{}/api/dev/token", server.trim_end_matches('/'));
+        let url = format!("{}/api/join", server.trim_end_matches('/'));
         let query = [
             ("room", room.to_owned()),
             ("identity", identity.to_owned()),
