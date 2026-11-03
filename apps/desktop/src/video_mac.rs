@@ -1,12 +1,13 @@
-//! Remote video → GPUI `surface()` on macOS.
+//! Video frames → GPUI `surface()` on macOS.
 //!
 //! GPUI's Metal renderer samples `CVPixelBuffer`s directly, but only full-range
-//! NV12 (`420f`). Decoded WebRTC frames are limited-range I420, so each frame is
-//! converted into a pooled, IOSurface-backed buffer: Y gets a range-expansion
-//! lookup, U/V get interleaved and expanded. One pass, no RGB step.
+//! NV12 (`420f`).
 //!
-//! TODO(stage 1): hardware-decoded frames already arrive as `CVPixelBuffer`s;
-//! convert those with VTPixelTransferSession on the GPU instead.
+//! - Frames that already are `420f` `CVPixelBuffer`s (camera self-view,
+//!   VideoToolbox-decoded H.264) are shown as they are: no copy at all.
+//! - Software-decoded frames (VP8/VP9) are limited-range I420. Each one is
+//!   converted into a pooled, IOSurface-backed buffer: Y gets a range-expansion
+//!   lookup, U/V get interleaved and expanded. One pass, no RGB step.
 
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +16,7 @@ use gpui::SharedString;
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+    CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
     CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferPool,
     CVPixelBufferUnlockBaseAddress, kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
     kCVPixelBufferMetalCompatibilityKey, kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
@@ -40,6 +42,8 @@ pub struct SurfaceSink {
     /// Coalescing "please repaint" signal (bounded(1); extra sends are dropped).
     redraw: async_channel::Sender<()>,
     frames: AtomicU64,
+    /// Last frame size as `width << 32 | height`, to log layer switches.
+    size: AtomicU64,
 }
 
 impl SurfaceSink {
@@ -50,21 +54,65 @@ impl SurfaceSink {
             pool: Mutex::new(None),
             redraw,
             frames: AtomicU64::new(0),
+            size: AtomicU64::new(0),
         }
     }
 
     pub fn latest(&self) -> Option<Frame> {
         self.latest.lock().clone()
     }
+
+    fn note_size(&self, width: usize, height: usize) {
+        let packed = (width as u64) << 32 | height as u64;
+        if self.size.swap(packed, Ordering::Relaxed) != packed {
+            tracing::debug!(track = %self.label, width, height, "video size");
+        }
+    }
 }
 
 impl FrameSink for SurfaceSink {
     fn on_frame(&self, frame: &VideoFrame<BoxVideoBuffer>) {
+        if let Some(pixel_buffer) = native_420f(frame) {
+            self.note_size(
+                CVPixelBufferGetWidth(&pixel_buffer),
+                CVPixelBufferGetHeight(&pixel_buffer),
+            );
+            if self.frames.fetch_add(1, Ordering::Relaxed) == 0 {
+                tracing::info!(
+                    track = %self.label,
+                    width = CVPixelBufferGetWidth(&pixel_buffer),
+                    height = CVPixelBufferGetHeight(&pixel_buffer),
+                    "first frame (zero-copy)"
+                );
+            }
+            *self.latest.lock() = Some(Frame(pixel_buffer));
+            let _ = self.redraw.try_send(());
+            return;
+        }
+        self.convert(frame);
+    }
+}
+
+/// The frame's own `CVPixelBuffer`, if it has one GPUI can draw as is.
+fn native_420f(frame: &VideoFrame<BoxVideoBuffer>) -> Option<CFRetained<CVPixelBuffer>> {
+    let native = frame.buffer.as_native()?;
+    let ptr = NonNull::new(native.get_cv_pixel_buffer().cast::<CVPixelBuffer>())?;
+    // SAFETY: the frame holds a reference for as long as we borrow it; we take
+    // our own.
+    let pixel_buffer = unsafe { CFRetained::retain(ptr) };
+    (CVPixelBufferGetPixelFormatType(&pixel_buffer)
+        == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
+        .then_some(pixel_buffer)
+}
+
+impl SurfaceSink {
+    fn convert(&self, frame: &VideoFrame<BoxVideoBuffer>) {
         let i420 = frame.buffer.to_i420();
         let (width, height) = (i420.width(), i420.height());
         if width == 0 || height == 0 {
             return;
         }
+        self.note_size(width as usize, height as usize);
 
         let pixel_buffer = {
             let mut pool = self.pool.lock();
@@ -72,7 +120,6 @@ impl FrameSink for SurfaceSink {
                 .as_ref()
                 .is_none_or(|p| p.width != width || p.height != height)
             {
-                tracing::debug!(track = %self.label, width, height, "remote video size");
                 *pool = Pool::new(width, height);
             }
             let Some(buffer) = pool.as_ref().and_then(Pool::take) else {
@@ -120,7 +167,7 @@ impl FrameSink for SurfaceSink {
 
         *self.latest.lock() = Some(Frame(pixel_buffer));
         if self.frames.fetch_add(1, Ordering::Relaxed) == 0 {
-            tracing::info!(track = %self.label, width, height, "first remote frame");
+            tracing::info!(track = %self.label, width, height, "first frame (converted on CPU)");
         }
         let _ = self.redraw.try_send(());
     }

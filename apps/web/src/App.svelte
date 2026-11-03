@@ -1,5 +1,12 @@
 <script lang="ts">
-  import { Room, RoomEvent, Track, type RemoteTrack, type VideoTrack } from 'livekit-client';
+  import {
+    Room,
+    RoomEvent,
+    Track,
+    type RemoteTrack,
+    type VideoCodec,
+    type VideoTrack,
+  } from 'livekit-client';
   import {
     PRESETS,
     collectTiles,
@@ -11,8 +18,13 @@
     type Tile,
   } from './call';
 
-  // `?room=spike&name=Bot&autojoin=1` — handy for headless test participants.
+  // Test participants: `?room=spike&name=Bot&autojoin=1`, plus `codec=vp8`
+  // (camera codec) and `mic=0` (join without a microphone).
   const params = new URLSearchParams(location.search);
+  // H.264 by default: desktop receivers decode it in hardware and draw the
+  // frames without a CPU copy (~40% less CPU than VP8 in our measurements).
+  const codec = (params.get('codec') ?? 'h264') as VideoCodec;
+  const withMic = params.get('mic') !== '0';
   let roomName = $state(params.get('room') ?? 'spike');
   let name = $state(params.get('name') ?? 'Web');
 
@@ -38,7 +50,13 @@
     status = 'joining';
     try {
       const { url, token } = await devJoin(roomName, uniqueIdentity(name), name);
-      const r = new Room({ adaptiveStream: true, dynacast: true });
+      const r = new Room({
+        adaptiveStream: true,
+        dynacast: true,
+        publishDefaults: { videoCodec: codec },
+      });
+      // Lets headless tests inspect the call over the DevTools protocol.
+      if (import.meta.env.DEV) Object.assign(window, { qcRoom: r });
       r.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
         if (track.kind === Track.Kind.Audio) document.body.appendChild(track.attach());
         refresh();
@@ -68,7 +86,10 @@
       status = 'connected';
       refresh();
       // Ask for devices after connecting so a slow permission prompt doesn't block joining.
-      await r.localParticipant.enableCameraAndMicrophone().catch((e) => (error = `devices: ${e.message}`));
+      const devices = withMic
+        ? r.localParticipant.enableCameraAndMicrophone()
+        : r.localParticipant.setCameraEnabled(true);
+      await devices.catch((e) => (error = `devices: ${e.message}`));
       refresh();
     } catch (e) {
       error = (e as Error).message;

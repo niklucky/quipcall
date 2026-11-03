@@ -40,16 +40,16 @@ These are targets. We measure them at the end of Stage 1 and at every milestone,
 - [x] ~~`crates/core`: room connection, events, and subscribing to remote tracks, with no UI code (own tokio runtime)~~
 - [x] ~~Desktop: GPUI window that connects to a room with a dev token~~
 - [x] ~~Desktop: render remote video. I420 → full-range NV12 `CVPixelBuffer` → GPUI `surface`~~
-- [ ] Desktop: microphone and speaker via `PlatformAudio`, with echo cancellation, noise suppression and auto gain from WebRTC. *Wired up; needs a test where a person can answer the permission prompt.*
+- [ ] Desktop: microphone and speaker via `PlatformAudio`, with echo cancellation, noise suppression and auto gain from WebRTC. *Mic → web verified (audio arrives with signal, no concealment). Speaker playback still needs a human ear.*
 - [ ] Desktop: screen share via ScreenCaptureKit (system picker), with frame-rate presets 5/15/30/60 and a text/motion mode. *Implemented with libwebrtc's `DesktopCapturer`; needs a manual test (picker and Screen Recording permission).*
-- [ ] Desktop: ask for mic and camera permission up front (AVCaptureDevice `requestAccess`) before opening the audio device. Otherwise a pending prompt blocks WebRTC's audio thread and freezes the call (found in testing).
+- [x] ~~Desktop: ask for mic and camera permission up front (AVCaptureDevice `requestAccess`) before opening the audio device. Otherwise a pending prompt blocks WebRTC's audio thread and freezes the call (found in testing).~~ *The header shows "Waiting for … access" while the prompt is open; if the mic is denied, the call continues listen-only.*
 - [x] ~~Desktop: pick the simulcast layer per tile from its on-screen size (the Rust SDK's adaptive stream doesn't report sizes)~~
-- [ ] Desktop: camera capture and publish (AVFoundation)
-- [ ] Desktop: local self-view for camera and screen share
+- [ ] Desktop: camera capture and publish (AVFoundation → full-range NV12 `CVPixelBuffer` → VideoToolbox H.264, simulcast 720p/360p/180p). *Implemented; needs a first run by a person (camera permission prompt).*
+- [ ] Desktop: local self-view for the camera, drawn straight from the capture buffers. Screen share shows the active preset instead of a preview, so we don't spend CPU converting our own screen. *Implemented with the camera; not mirrored yet.*
 - [x] ~~Web: minimal Svelte page that joins the same room with camera, mic, and screen share (with frame-rate picker)~~
-- [ ] Zero-copy receive path for hardware-decoded frames (VideoToolbox `CVPixelBuffer` → full range on the GPU)
+- [x] ~~Zero-copy receive path for hardware-decoded frames~~ *VideoToolbox already outputs full-range NV12, so the decoded `CVPixelBuffer` goes to GPUI as is. Receiving 720p: ~7.5% CPU with H.264 vs ~12.5% with VP8. The web client now publishes H.264 by default.*
 - [ ] Direct ScreenCaptureKit capture (`CVPixelBuffer` → `NativeBuffer` → VideoToolbox), if the libwebrtc capturer uses too much CPU
-- [ ] Measure the footprint and write `docs/FOOTPRINT.md`. *First numbers recorded: 23.9 MB binary, ~110 MB / 8–9% CPU receiving 720p. Sending, screen share, and a 10-person grid still to measure.*
+- [ ] Measure the footprint and write `docs/FOOTPRINT.md`. *Recorded so far: binary, receiving 720p (H.264 and VP8) with the mic on. Sending camera, screen share, and a 10-person grid still to measure.*
 
 **Done when:** a 1:1 call between desktop and web works locally with audio, video, and screen share at a chosen frame rate. Footprint numbers are recorded, and we've made a go/no-go call on GPUI.
 

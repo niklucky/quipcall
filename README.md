@@ -33,10 +33,14 @@ lk room join --url ws://127.0.0.1:7880 --api-key quipcall-dev \
   "http://127.0.0.1:5173/?room=spike&name=Bot&autojoin=1"
 ```
 
+Web client URL options for test participants: `autojoin=1`, `codec=vp8|vp9|av1|h264` (camera codec, default `h264`), `mic=0` (no microphone, so no beeping fake audio). In dev builds the LiveKit room is available as `window.qcRoom`, so a script can read WebRTC stats over the DevTools protocol (`--remote-debugging-port`).
+
 `QUIPCALL_NO_MIC=1` starts the desktop app without opening any audio device. Use it for headless runs.
+
+To run a second, separate stack next to `make dev` (for example for automated tests), use other ports: LiveKit with a copy of `dev/livekit.yaml`, the server with `QUIPCALL_BIND` and `LIVEKIT_PUBLIC_URL`, Vite with `QUIPCALL_API=http://127.0.0.1:<server port> vite --port <port>`, and the desktop app with `--server`.
 
 ## Development notes
 
-- **macOS permissions.** The first time the app opens the microphone, macOS asks for permission, and WebRTC's audio thread **blocks until someone answers**. Run the app from a terminal where you can see the prompt. (A fix for this is on the Stage 1 list.)
+- **macOS permissions.** The app asks for microphone access before joining and for camera access when you turn the camera on, and waits for your answer ("Waiting for … access" in the header). We ask up front because a prompt that WebRTC triggers itself blocks its audio thread and freezes the call. When run from a terminal, macOS attributes the request to the terminal app (for example "Terminal would like to access the camera").
 - **Metal shaders.** GPUI compiles its shaders at runtime (`runtime_shaders` feature), so you don't need Xcode's separate Metal toolchain. Release builds should precompile them: `xcodebuild -downloadComponent MetalToolchain`, then drop the feature.
 - **`-ObjC` link flag.** `apps/desktop/build.rs` adds it. libwebrtc's Objective-C categories are dropped without it.

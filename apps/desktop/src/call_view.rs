@@ -8,7 +8,8 @@ use gpui::{
     rgb,
 };
 use quipcall_core::{
-    Engine, Event, ScreenSharePreset, TrackKey, VideoKind, VideoQuality, VideoSubscription,
+    Engine, Event, MediaDevice, ScreenSharePreset, TrackKey, VideoKind, VideoQuality,
+    VideoSubscription,
 };
 
 use crate::Args;
@@ -20,6 +21,13 @@ enum Status {
     Connected { room: String },
     Left,
     Failed(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Camera {
+    Off,
+    Starting,
+    On,
 }
 
 struct Participant {
@@ -45,6 +53,11 @@ pub struct CallView {
     tiles: Vec<Tile>,
     speakers: Vec<String>,
     mic_enabled: bool,
+    camera: Camera,
+    /// Our own camera, drawn straight from the capture buffers.
+    self_view: Option<Arc<SurfaceSink>>,
+    /// A system permission prompt is open.
+    waiting_for: Option<MediaDevice>,
     screen: Option<ScreenSharePreset>,
     errors: Vec<String>,
     redraw: async_channel::Sender<()>,
@@ -85,6 +98,9 @@ impl CallView {
             tiles: Vec::new(),
             speakers: Vec::new(),
             mic_enabled: false,
+            camera: Camera::Off,
+            self_view: None,
+            waiting_for: None,
             screen: None,
             errors: Vec::new(),
             redraw,
@@ -128,11 +144,45 @@ impl CallView {
         self.speakers.clear();
         self.screen = None;
         self.mic_enabled = false;
+        self.camera = Camera::Off;
+        self.self_view = None;
+        self.waiting_for = None;
+    }
+
+    fn toggle_camera(&mut self, cx: &mut Context<Self>) {
+        match self.camera {
+            Camera::Off => {
+                let sink = Arc::new(SurfaceSink::new("self-view".into(), self.redraw.clone()));
+                self.engine.start_camera(Some(sink.clone()));
+                self.self_view = Some(sink);
+                self.camera = Camera::Starting;
+            }
+            Camera::On => {
+                self.engine.stop_camera();
+                self.self_view = None;
+                self.camera = Camera::Off;
+            }
+            Camera::Starting => {}
+        }
+        cx.notify();
     }
 
     fn on_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
-            Event::Connected { room, .. } => self.status = Status::Connected { room },
+            Event::Connected { room, .. } => {
+                self.status = Status::Connected { room };
+                self.waiting_for = None;
+            }
+            Event::WaitingForPermission(device) => self.waiting_for = Some(device),
+            Event::CameraChanged { enabled } => {
+                self.waiting_for = None;
+                if enabled {
+                    self.camera = Camera::On;
+                } else {
+                    self.camera = Camera::Off;
+                    self.self_view = None;
+                }
+            }
             Event::Disconnected { reason } => {
                 self.reset();
                 self.status = Status::Failed(format!("disconnected: {reason}"));
@@ -166,6 +216,11 @@ impl CallView {
             }
             Event::Error(message) => {
                 tracing::warn!("{message}");
+                self.waiting_for = None;
+                if self.camera == Camera::Starting && message.starts_with("camera") {
+                    self.camera = Camera::Off;
+                    self.self_view = None;
+                }
                 self.errors.push(message);
                 if self.errors.len() > 3 {
                     self.errors.remove(0);
@@ -186,10 +241,10 @@ impl CallView {
     /// Request the simulcast layer that matches each tile's on-screen size, so
     /// a 10-person grid doesn't decode ten 720p streams.
     fn update_tile_qualities(&mut self, window: &Window) {
-        let n = self.tiles.len();
-        if n == 0 {
+        if self.tiles.is_empty() {
             return;
         }
+        let n = self.tile_count();
         let rows = n.div_ceil(grid_columns(n));
         let chrome = 100.0; // header + controls, in points
         let grid_height = (window.viewport_size().height / gpui::px(1.0) - chrome).max(0.0);
@@ -208,8 +263,16 @@ impl CallView {
         }
     }
 
+    fn tile_count(&self) -> usize {
+        self.tiles.len() + usize::from(self.self_view.is_some())
+    }
+
     fn render_header(&self) -> impl IntoElement {
         let status = match &self.status {
+            _ if self.waiting_for.is_some() => format!(
+                "Waiting for {} access. Answer the macOS prompt",
+                self.waiting_for.map_or("", MediaDevice::label)
+            ),
             Status::Joining => "Joining…".to_owned(),
             Status::Connected { room } => format!("In “{room}” as {}", self.args.name),
             Status::Left => "You left the call".to_owned(),
@@ -232,7 +295,7 @@ impl CallView {
     }
 
     fn render_grid(&self) -> impl IntoElement {
-        if self.tiles.is_empty() {
+        if self.tile_count() == 0 {
             return div()
                 .flex_1()
                 .flex()
@@ -241,53 +304,73 @@ impl CallView {
                 .text_color(rgb(0x9aa3b2))
                 .child("No video yet. Open the web client or share a screen from another device.");
         }
-        let n = self.tiles.len();
+        let n = self.tile_count();
         let cols = grid_columns(n);
         let rows = n.div_ceil(cols);
         let speaking: Vec<&str> = self.speakers.iter().map(String::as_str).collect();
+
+        let self_view = self.self_view.as_ref().map(|sink| {
+            let name = if self.camera == Camera::Starting {
+                "You · starting camera…".to_owned()
+            } else {
+                "You".to_owned()
+            };
+            (sink, name, false)
+        });
+        let remote = self.tiles.iter().map(|tile| {
+            let mut name = self.display_name(&tile.key.participant);
+            if tile.kind == VideoKind::Screen {
+                name.push_str(" · screen");
+            }
+            let active = speaking.contains(&tile.key.participant.as_str());
+            (&tile.sink, name, active)
+        });
 
         div()
             .flex_1()
             .flex()
             .flex_wrap()
             .p_2()
-            .children(self.tiles.iter().map(|tile| {
-                let mut name = self.display_name(&tile.key.participant);
-                if tile.kind == VideoKind::Screen {
-                    name.push_str(" · screen");
-                }
-                let active = speaking.contains(&tile.key.participant.as_str());
-                let video = tile
-                    .sink
-                    .latest()
-                    .map(|frame| gpui::surface(frame.0).size_full());
-                div()
-                    .w(relative(1.0 / cols as f32))
-                    .h(relative(1.0 / rows as f32))
-                    .p_1()
-                    .child(
+            .children(
+                self_view
+                    .into_iter()
+                    .chain(remote)
+                    .map(|(sink, name, active)| {
+                        let video = sink
+                            .latest()
+                            .map(|frame| gpui::surface(frame.0).size_full());
                         div()
-                            .relative()
-                            .size_full()
-                            .rounded_md()
-                            .overflow_hidden()
-                            .bg(rgb(0x1b1e25))
-                            .border_2()
-                            .border_color(if active { rgb(0x3fb950) } else { rgb(0x1b1e25) })
-                            .children(video)
+                            .w(relative(1.0 / cols as f32))
+                            .h(relative(1.0 / rows as f32))
+                            .p_1()
                             .child(
                                 div()
-                                    .absolute()
-                                    .bottom_2()
-                                    .left_2()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(gpui::black().opacity(0.55))
-                                    .child(name),
-                            ),
-                    )
-            }))
+                                    .relative()
+                                    .size_full()
+                                    .rounded_md()
+                                    .overflow_hidden()
+                                    .bg(rgb(0x1b1e25))
+                                    .border_2()
+                                    .border_color(if active {
+                                        rgb(0x3fb950)
+                                    } else {
+                                        rgb(0x1b1e25)
+                                    })
+                                    .children(video)
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .bottom_2()
+                                            .left_2()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_sm()
+                                            .bg(gpui::black().opacity(0.55))
+                                            .child(name),
+                                    ),
+                            )
+                    }),
+            )
     }
 
     fn render_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -324,6 +407,15 @@ impl CallView {
             button("mic", mic_label, self.mic_enabled).on_click(cx.listener(|this, _, _, _| {
                 this.engine.set_mic_enabled(!this.mic_enabled);
             })),
+        );
+        let camera_label = match self.camera {
+            Camera::Off => "Camera off",
+            Camera::Starting => "Camera…",
+            Camera::On => "Camera on",
+        };
+        bar = bar.child(
+            button("camera", camera_label, self.camera == Camera::On)
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_camera(cx))),
         );
 
         bar = bar

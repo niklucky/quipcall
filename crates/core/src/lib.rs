@@ -7,6 +7,8 @@
 //! LiveKit needs tokio; the engine owns a small runtime so the UI can use any
 //! executor it likes.
 
+mod camera;
+pub mod permissions;
 mod screen;
 pub mod video;
 
@@ -22,6 +24,7 @@ use quipcall_protocol::{ApiError, JoinInfo};
 
 pub use livekit;
 pub use livekit::track::VideoQuality;
+pub use permissions::{Access, MediaDevice};
 pub use quipcall_protocol as protocol;
 pub use screen::{ContentMode, ScreenSharePreset};
 pub use video::{FrameSink, VideoSubscription};
@@ -64,7 +67,12 @@ pub enum Event {
         key: TrackKey,
     },
     ActiveSpeakers(Vec<String>),
+    /// The OS is showing a permission prompt; the call waits for the answer.
+    WaitingForPermission(MediaDevice),
     MicChanged {
+        enabled: bool,
+    },
+    CameraChanged {
         enabled: bool,
     },
     ScreenShareChanged {
@@ -87,6 +95,9 @@ struct State {
     /// Without it remote audio has nowhere to play.
     audio: Option<PlatformAudio>,
     mic: Option<LocalAudioTrack>,
+    camera: Option<camera::Camera>,
+    /// Set while the camera is being opened, to ignore repeated clicks.
+    camera_starting: bool,
     screen: Option<screen::ScreenShare>,
     /// Remote video publications, for per-tile quality control.
     videos: HashMap<TrackKey, RemoteTrackPublication>,
@@ -158,16 +169,20 @@ impl Engine {
     }
 
     pub fn disconnect(&self) {
-        let (room, screen) = {
+        let (room, screen, camera) = {
             let mut s = self.state.lock();
             s.mic = None;
-            (s.room.take(), s.screen.take())
+            (s.room.take(), s.screen.take(), s.camera.take())
         };
         if let Some(screen) = screen {
             screen.stop();
         }
         let state = self.state.clone();
         self.rt.spawn(async move {
+            // Stopping the camera blocks briefly; keep it off the UI thread.
+            if let Some(camera) = camera {
+                let _ = tokio::task::spawn_blocking(move || drop(camera)).await;
+            }
             if let Some(room) = room {
                 let _ = room.close().await;
             }
@@ -188,6 +203,73 @@ impl Engine {
             }
             let _ = self.events.try_send(Event::MicChanged { enabled });
         }
+    }
+
+    /// Open the camera and publish it. Frames also go to `preview` (self-view).
+    pub fn start_camera(&self, preview: Option<Arc<dyn FrameSink>>) {
+        {
+            let mut s = self.state.lock();
+            if s.camera.is_some() || s.camera_starting {
+                return;
+            }
+            s.camera_starting = true;
+        }
+        let state = self.state.clone();
+        let events = self.events.clone();
+        self.rt.spawn(async move {
+            let result = async {
+                if permissions::status(MediaDevice::Camera) == Access::Undecided {
+                    let _ = events
+                        .send(Event::WaitingForPermission(MediaDevice::Camera))
+                        .await;
+                }
+                anyhow::ensure!(
+                    permissions::request(MediaDevice::Camera).await,
+                    "camera access is off. Allow it in System Settings → Privacy & Security → Camera"
+                );
+                let room = state.lock().room.clone().context("not in a call")?;
+                let camera = camera::Camera::start(&room, preview).await?;
+                // The call may have ended while the camera was starting.
+                let stale = {
+                    let mut s = state.lock();
+                    if s.room.as_ref().is_some_and(|r| Arc::ptr_eq(r, &room)) {
+                        s.camera = Some(camera);
+                        None
+                    } else {
+                        Some(camera)
+                    }
+                };
+                if let Some(camera) = stale {
+                    camera.stop(&room).await;
+                    anyhow::bail!("call ended");
+                }
+                Ok(())
+            }
+            .await;
+            state.lock().camera_starting = false;
+            let event = match result {
+                Ok(()) => Event::CameraChanged { enabled: true },
+                Err(e) => Event::Error(format!("camera: {e:#}")),
+            };
+            let _ = events.send(event).await;
+        });
+    }
+
+    pub fn stop_camera(&self) {
+        let (room, camera) = {
+            let mut s = self.state.lock();
+            (s.room.clone(), s.camera.take())
+        };
+        let events = self.events.clone();
+        self.rt.spawn(async move {
+            if let Some(camera) = camera {
+                match room {
+                    Some(room) => camera.stop(&room).await,
+                    None => drop(camera),
+                }
+            }
+            let _ = events.send(Event::CameraChanged { enabled: false }).await;
+        });
     }
 
     pub fn start_screen_share(&self, preset: ScreenSharePreset) {
@@ -281,6 +363,26 @@ async fn connect(
     // QUIPCALL_NO_MIC=1 skips the audio device entirely (headless tests, CI).
     let use_audio = std::env::var("QUIPCALL_NO_MIC").is_err();
 
+    // Ask before anything opens the mic: an unanswered prompt would block
+    // WebRTC's audio thread. Without access we still play remote audio.
+    let mic_allowed = use_audio && {
+        if permissions::status(MediaDevice::Microphone) == Access::Undecided {
+            events
+                .send(Event::WaitingForPermission(MediaDevice::Microphone))
+                .await?;
+        }
+        permissions::request(MediaDevice::Microphone).await
+    };
+    if use_audio && !mic_allowed {
+        events
+            .send(Event::Error(
+                "microphone access is off, so others can't hear you. Allow it in System \
+                 Settings → Privacy & Security → Microphone, then rejoin"
+                    .into(),
+            ))
+            .await?;
+    }
+
     // The platform ADM has to exist before the peer connections are created.
     let audio = if use_audio {
         let audio = PlatformAudio::new().context("audio device")?;
@@ -327,9 +429,8 @@ async fn connect(
             .await?;
     }
 
-    // Publishing the mic can block on the OS permission prompt the first time;
-    // never let that hold up room events.
-    if let Some(audio) = audio {
+    // Publishing opens the mic and can take a moment; don't hold up room events.
+    if let Some(audio) = audio.filter(|_| mic_allowed) {
         let (room, state, events) = (room.clone(), state.clone(), events.clone());
         tokio::spawn(async move {
             let mic = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());

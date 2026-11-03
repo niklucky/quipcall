@@ -191,6 +191,7 @@ fn spawn_capture_thread(
             let mut frames = FramePump {
                 source,
                 max_width: preset.max_width(),
+                started: Instant::now(),
                 sent: 0,
             };
             capturer.start_capture(None, {
@@ -226,6 +227,7 @@ fn spawn_capture_thread(
 struct FramePump {
     source: NativeVideoSource,
     max_width: u32,
+    started: Instant,
     sent: u64,
 }
 
@@ -261,7 +263,7 @@ impl FramePump {
 
         self.source.capture_frame(&VideoFrame {
             rotation: VideoRotation::VideoRotation0,
-            timestamp_us: 0, // stamped with "now" by the source
+            timestamp_us: self.started.elapsed().as_micros() as i64,
             frame_metadata: None,
             buffer: i420,
         });

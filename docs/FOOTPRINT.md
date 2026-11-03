@@ -14,7 +14,21 @@ Setup: Apple M5 Pro, macOS 27.0, release build. 1100×720 window. Receiving one 
 
 Not measured yet: idle in the menu bar (no shell yet), sending camera, screen share, 10-person grid, audio.
 
+## 2026-11-03 — Stage 1, receive path + mic
+
+Same machine, release build, same window. Microphone on (WebRTC AEC/NS/AGC, Opus + RED), speaker open, receiving one 720p30 camera stream from headless Chrome. `ps` samples every 5 s for 30 s, after the 720p layer was selected.
+
+| Remote codec | Render path | CPU (one core) | RSS |
+|---|---|---|---|
+| H.264 (VideoToolbox decode) | `CVPixelBuffer` handed to GPUI as is (zero-copy) | 6–8.5%, ~7.5% avg | 104–110 MB |
+| VP8 (software decode) | I420 → NV12 conversion on the CPU | 8–14%, ~12.5% avg | 113–116 MB |
+
+Binary: 25.2 MB (was 23.9 MB; +1.3 MB for camera capture and the AVFoundation bindings).
+
+Takeaways:
+- Hardware decode + zero-copy saves ~40% CPU, so everyone publishes camera video as H.264 (desktop always, web by default).
+- Memory barely moves with the codec; most of the ~105 MB is the baseline (libwebrtc, GPUI, fonts). Still to break down.
+
 Ideas to try if we need headroom:
-- Hardware decoding (H.264/HEVC on VideoToolbox) + GPU range conversion, so pixels never go through the CPU.
 - Direct ScreenCaptureKit capture, letting SCK scale on the GPU, for screen share.
 - Check how much RSS comes from the font-kit / text system vs libwebrtc.
