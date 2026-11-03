@@ -1,0 +1,29 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  background: #111318;
+  color: #e6e6e6;
+}
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+button {
+  font: inherit;
+  color: inherit;
+  background: #2a2e37;
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+button:hover { opacity: 0.85; }
+button.active { background: #2f6feb; }
+button.danger { background: #8b2a2a; }
+input {
+  font: inherit;
+  color: inherit;
+  background: #1b1e25;
+  border: 1px solid #2a2e37;
+  border-radius: 6px;
+  padding: 6px 10px;
+}

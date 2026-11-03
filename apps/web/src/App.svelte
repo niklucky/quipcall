@@ -1,0 +1,190 @@
+<script lang="ts">
+  import { Room, RoomEvent, Track, type RemoteTrack, type VideoTrack } from 'livekit-client';
+  import {
+    PRESETS,
+    collectTiles,
+    devJoin,
+    presetLabel,
+    screenShareOptions,
+    uniqueIdentity,
+    type ScreenSharePreset,
+    type Tile,
+  } from './call';
+
+  // `?room=spike&name=Bot&autojoin=1` — handy for headless test participants.
+  const params = new URLSearchParams(location.search);
+  let roomName = $state(params.get('room') ?? 'spike');
+  let name = $state(params.get('name') ?? 'Web');
+
+  let room: Room | undefined;
+  let status = $state<'idle' | 'joining' | 'connected'>('idle');
+  let error = $state('');
+  // LiveKit objects must not be deep-proxied by Svelte, hence $state.raw.
+  let tiles = $state.raw<Tile[]>([]);
+  let micOn = $state(false);
+  let camOn = $state(false);
+  let sharing = $state<ScreenSharePreset | null>(null);
+
+  const refresh = () => {
+    if (!room) return;
+    tiles = collectTiles(room);
+    micOn = room.localParticipant.isMicrophoneEnabled;
+    camOn = room.localParticipant.isCameraEnabled;
+    if (!room.localParticipant.isScreenShareEnabled) sharing = null;
+  };
+
+  async function join() {
+    error = '';
+    status = 'joining';
+    try {
+      const { url, token } = await devJoin(roomName, uniqueIdentity(name), name);
+      const r = new Room({ adaptiveStream: true, dynacast: true });
+      r.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
+        if (track.kind === Track.Kind.Audio) document.body.appendChild(track.attach());
+        refresh();
+      })
+        .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
+          track.detach().forEach((el) => el.remove());
+          refresh();
+        })
+        .on(RoomEvent.Disconnected, () => {
+          room = undefined;
+          tiles = [];
+          status = 'idle';
+        });
+      for (const ev of [
+        RoomEvent.ParticipantConnected,
+        RoomEvent.ParticipantDisconnected,
+        RoomEvent.LocalTrackPublished,
+        RoomEvent.LocalTrackUnpublished,
+        RoomEvent.TrackMuted,
+        RoomEvent.TrackUnmuted,
+        RoomEvent.ActiveSpeakersChanged,
+      ]) {
+        r.on(ev, refresh);
+      }
+      await r.connect(url, token);
+      room = r;
+      status = 'connected';
+      refresh();
+      // Ask for devices after connecting so a slow permission prompt doesn't block joining.
+      await r.localParticipant.enableCameraAndMicrophone().catch((e) => (error = `devices: ${e.message}`));
+      refresh();
+    } catch (e) {
+      error = (e as Error).message;
+      status = 'idle';
+    }
+  }
+
+  async function leave() {
+    await room?.disconnect();
+  }
+
+  async function toggleMic() {
+    await room?.localParticipant.setMicrophoneEnabled(!micOn);
+    refresh();
+  }
+
+  async function toggleCam() {
+    await room?.localParticipant.setCameraEnabled(!camOn);
+    refresh();
+  }
+
+  async function share(preset: ScreenSharePreset) {
+    if (!room) return;
+    try {
+      if (sharing) await room.localParticipant.setScreenShareEnabled(false);
+      const [capture, publish] = screenShareOptions(preset);
+      await room.localParticipant.setScreenShareEnabled(true, capture, publish);
+      sharing = preset;
+    } catch (e) {
+      error = `screen share: ${(e as Error).message}`;
+    }
+    refresh();
+  }
+
+  async function stopShare() {
+    await room?.localParticipant.setScreenShareEnabled(false);
+    sharing = null;
+    refresh();
+  }
+
+  function attach(track: VideoTrack) {
+    return (el: HTMLVideoElement) => {
+      track.attach(el);
+      return () => track.detach(el);
+    };
+  }
+
+  const cols = $derived(Math.max(1, Math.ceil(Math.sqrt(tiles.length))));
+
+  if (params.get('autojoin') === '1') join();
+</script>
+
+<main>
+  {#if status !== 'connected'}
+    <form class="join" onsubmit={(e) => { e.preventDefault(); join(); }}>
+      <h1>Quipcall</h1>
+      <input bind:value={roomName} placeholder="Room" />
+      <input bind:value={name} placeholder="Your name" />
+      <button class="active" disabled={status === 'joining'}>
+        {status === 'joining' ? 'Joining…' : 'Join'}
+      </button>
+      {#if error}<p class="error">{error}</p>{/if}
+    </form>
+  {:else}
+    <header>
+      <span>In “{roomName}” as {name}</span>
+      {#if error}<span class="error">{error}</span>{/if}
+    </header>
+    <section class="grid" style:grid-template-columns="repeat({cols}, 1fr)">
+      {#each tiles as tile (tile.id)}
+        <div class="tile" class:speaking={tile.speaking}>
+          {#if tile.track}
+            <video
+              {@attach attach(tile.track)}
+              autoplay
+              playsinline
+              muted
+              class:mirror={tile.isLocal && !tile.isScreen}
+              class:contain={tile.isScreen}
+            ></video>
+          {/if}
+          <span class="label">{tile.name}{tile.isLocal ? ' (you)' : ''}{tile.isScreen ? ' · screen' : ''}</span>
+        </div>
+      {/each}
+    </section>
+    <footer>
+      <button class:active={micOn} onclick={toggleMic}>{micOn ? 'Mic on' : 'Mic off'}</button>
+      <button class:active={camOn} onclick={toggleCam}>{camOn ? 'Camera on' : 'Camera off'}</button>
+      <span class="muted">Share:</span>
+      {#each PRESETS as preset (preset.fps)}
+        <button class:active={sharing?.fps === preset.fps} onclick={() => share(preset)}>
+          {presetLabel(preset)}
+        </button>
+      {/each}
+      {#if sharing}<button onclick={stopShare}>Stop sharing</button>{/if}
+      <button class="danger" onclick={leave}>Leave</button>
+    </footer>
+  {/if}
+</main>
+
+<style>
+  main { height: 100%; display: flex; flex-direction: column; }
+  .join { margin: auto; display: flex; flex-direction: column; gap: 8px; width: 260px; }
+  .join h1 { margin: 0 0 8px; font-size: 20px; }
+  header { display: flex; justify-content: space-between; padding: 8px 16px; border-bottom: 1px solid #262a33; }
+  .grid { flex: 1; display: grid; gap: 8px; padding: 8px; min-height: 0; grid-auto-rows: 1fr; }
+  .tile { position: relative; background: #1b1e25; border-radius: 8px; overflow: hidden; border: 2px solid transparent; min-height: 0; }
+  .tile.speaking { border-color: #3fb950; }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  video.contain { object-fit: contain; }
+  video.mirror { transform: scaleX(-1); }
+  .label { position: absolute; left: 8px; bottom: 8px; padding: 2px 8px; border-radius: 4px; background: rgb(0 0 0 / 55%); }
+  footer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center; padding: 12px; }
+  .muted { color: #9aa3b2; margin-left: 12px; }
+  .error { color: #ff7b72; }
+  @media (max-width: 640px) {
+    .grid { grid-template-columns: 1fr !important; }
+  }
+</style>

@@ -1,0 +1,12 @@
+# Local development LiveKit server. Dev-only credentials — never reuse on the VPS.
+port: 7880
+bind_addresses:
+  - 127.0.0.1   # use 0.0.0.0 to test from a phone on your LAN
+rtc:
+  tcp_port: 7881
+  udp_port: 7882   # single UDP port, multiplexed
+  use_external_ip: false
+keys:
+  quipcall-dev: quipcall-dev-secret-0123456789abcdef
+logging:
+  level: info

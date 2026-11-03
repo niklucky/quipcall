@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = ["crates/protocol", "crates/core", "apps/server", "apps/desktop"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+quipcall-protocol = { path = "crates/protocol" }
+quipcall-core = { path = "crates/core" }
+
+[profile.dev.package."*"]
+# Dependencies (libwebrtc glue, GPUI, yuv conversion) are painfully slow unoptimized.
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

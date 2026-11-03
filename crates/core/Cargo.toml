@@ -1,0 +1,16 @@
+[package]
+name = "quipcall-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+async-channel = "2.5.0"
+futures-util = "0.3.34"
+livekit = { version = "0.10.0", features = ["native-tls"] }
+parking_lot = "0.13.0"
+quipcall-protocol.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tracing = "0.1.44"
