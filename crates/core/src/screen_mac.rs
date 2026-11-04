@@ -8,6 +8,10 @@
 //!   ScreenCaptureKit does the scaling on the GPU.
 //!
 //! Needs the Screen Recording permission (see [`crate::permissions`]).
+//!
+//! `QUIPCALL_FAKE_SCREEN=1` (or `=WIDTHxHEIGHT`, default 1920x1200) shares a
+//! moving test pattern instead, for headless tests: nothing on screen is
+//! captured and no permission is needed.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -32,6 +36,8 @@ use objc2_screen_capture_kit::{
 };
 use parking_lot::Mutex;
 
+use crate::FrameSink;
+use crate::pixel_buffer::{PixelBufferPool, paint_test_pattern};
 use crate::screen::{ScreenSharePreset, SourceId};
 
 /// A preview image, drawable as is (`gpui::surface`).
@@ -285,6 +291,8 @@ type LastFrame = Mutex<Option<(Thumbnail, Instant)>>;
 
 struct Handler {
     source: NativeVideoSource,
+    /// Your own preview of the share (gets every frame, same buffers).
+    preview: Option<Arc<dyn FrameSink>>,
     started: Instant,
     frames: AtomicU64,
     last: Arc<LastFrame>,
@@ -300,22 +308,36 @@ impl Handler {
                 "first screen frame"
             );
         }
-        send(&self.source, self.started, pixel_buffer);
+        send(
+            &self.source,
+            self.preview.as_deref(),
+            self.started,
+            pixel_buffer,
+        );
     }
 }
 
-fn send(source: &NativeVideoSource, started: Instant, pixel_buffer: CFRetained<CVPixelBuffer>) {
+fn send(
+    source: &NativeVideoSource,
+    preview: Option<&dyn FrameSink>,
+    started: Instant,
+    pixel_buffer: CFRetained<CVPixelBuffer>,
+) {
     // SAFETY: we pass an owned (+1) reference; WebRTC's wrapper retains it and
     // releases ours.
     let native = unsafe {
         NativeBuffer::from_cv_pixel_buffer(CFRetained::into_raw(pixel_buffer).as_ptr().cast())
     };
-    source.capture_frame(&VideoFrame {
+    let frame = VideoFrame {
         rotation: VideoRotation::VideoRotation0,
         timestamp_us: started.elapsed().as_micros() as i64,
         frame_metadata: None,
         buffer: Box::new(native) as BoxVideoBuffer,
-    });
+    };
+    source.capture_frame(&frame);
+    if let Some(preview) = preview {
+        preview.on_frame(&frame);
+    }
 }
 
 define_class!(
@@ -392,15 +414,24 @@ impl Drop for Capture {
     }
 }
 
+/// Starts capturing `id`; frames go to `video` and to `preview`. Dropping the
+/// result stops capturing.
 pub(crate) async fn start(
     id: SourceId,
     preset: ScreenSharePreset,
     video: NativeVideoSource,
+    preview: Option<Arc<dyn FrameSink>>,
     on_stop: impl FnOnce() + Send + 'static,
-) -> anyhow::Result<Capture> {
+) -> anyhow::Result<Box<dyn Send>> {
+    if let Some((width, height)) = synthetic_size() {
+        let _ = (id, on_stop);
+        return Ok(Box::new(Synthetic::start(
+            width, height, preset, video, preview,
+        )?));
+    }
     let capture = {
         let content = shareable_content().await?;
-        setup(&content, id, preset, video, Box::new(on_stop))?
+        setup(&content, id, preset, video, preview, Box::new(on_stop))?
     };
 
     let (tx, rx) = async_channel::bounded(1);
@@ -423,7 +454,7 @@ pub(crate) async fn start(
     if let Err(e) = rx.recv().await.context("screen capture didn't start")? {
         anyhow::bail!("{e}");
     }
-    Ok(capture)
+    Ok(Box::new(capture))
 }
 
 /// Builds the stream for `id` (not started yet).
@@ -432,6 +463,7 @@ fn setup(
     id: SourceId,
     preset: ScreenSharePreset,
     video: NativeVideoSource,
+    preview: Option<Arc<dyn FrameSink>>,
     on_stop: Box<dyn FnOnce() + Send>,
 ) -> anyhow::Result<Capture> {
     // SAFETY: reading immutable snapshots, then configuring fresh objects.
@@ -487,6 +519,7 @@ fn setup(
     let started = Instant::now();
     let output = Output::alloc().set_ivars(Handler {
         source: video.clone(),
+        preview: preview.clone(),
         started,
         frames: AtomicU64::new(0),
         last: last.clone(),
@@ -518,7 +551,7 @@ fn setup(
     };
 
     let keepalive_stop = Arc::new(AtomicBool::new(false));
-    spawn_keepalive(video, started, last, keepalive_stop.clone());
+    spawn_keepalive(video, preview, started, last, keepalive_stop.clone());
     Ok(Capture {
         stream,
         _output: output,
@@ -528,9 +561,11 @@ fn setup(
     })
 }
 
-/// Re-sends the last frame once a second while the screen is still.
+/// Re-sends the last frame once a second while the screen is still. The
+/// preview gets it too: it may have skipped the newest frame to save repaints.
 fn spawn_keepalive(
     video: NativeVideoSource,
+    preview: Option<Arc<dyn FrameSink>>,
     started: Instant,
     last: Arc<LastFrame>,
     stop: Arc<AtomicBool>,
@@ -551,8 +586,96 @@ fn spawn_keepalive(
                     }
                 };
                 if let Some(pixel_buffer) = stale {
-                    crate::autorelease_pool(|| send(&video, started, pixel_buffer));
+                    crate::autorelease_pool(|| {
+                        send(&video, preview.as_deref(), started, pixel_buffer)
+                    });
                 }
             }
         });
+}
+
+// ---- synthetic source (tests) ---------------------------------------------
+
+/// The size of the synthetic screen, if `QUIPCALL_FAKE_SCREEN` asks for one.
+fn synthetic_size() -> Option<(u32, u32)> {
+    let value = std::env::var("QUIPCALL_FAKE_SCREEN").ok()?;
+    let size = value
+        .split_once('x')
+        .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+        .filter(|&(w, h)| (16..=8192).contains(&w) && (16..=8192).contains(&h));
+    Some(size.map_or((1920, 1200), |(w, h)| (w & !1, h & !1)))
+}
+
+/// A moving test pattern at the preset's frame rate, sent down the same path
+/// as captured frames (preview and keepalive included).
+struct Synthetic {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Synthetic {
+    fn start(
+        width: u32,
+        height: u32,
+        preset: ScreenSharePreset,
+        video: NativeVideoSource,
+        preview: Option<Arc<dyn FrameSink>>,
+    ) -> anyhow::Result<Self> {
+        tracing::info!(
+            width,
+            height,
+            fps = preset.fps,
+            "sharing the synthetic screen (QUIPCALL_FAKE_SCREEN)"
+        );
+        let pool = PixelBufferPool::new(width, height).context("pixel buffer pool")?;
+        let started = Instant::now();
+        let last: Arc<LastFrame> = Arc::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        spawn_keepalive(
+            video.clone(),
+            preview.clone(),
+            started,
+            last.clone(),
+            stop.clone(),
+        );
+        let handler = Handler {
+            source: video,
+            preview,
+            started,
+            frames: AtomicU64::new(0),
+            last,
+        };
+        let thread = std::thread::Builder::new()
+            .name("fake-screen".into())
+            .spawn({
+                let stop = stop.clone();
+                move || {
+                    let interval = Duration::from_secs(1) / preset.fps.max(1);
+                    let mut next = Instant::now();
+                    let mut n = 0;
+                    while !stop.load(Ordering::Relaxed) {
+                        if let Some(pixel_buffer) = pool.take() {
+                            paint_test_pattern(&pixel_buffer, n, [160, 100]);
+                            crate::autorelease_pool(|| handler.push(pixel_buffer));
+                        }
+                        n += 1;
+                        next += interval;
+                        std::thread::sleep(next.saturating_duration_since(Instant::now()));
+                    }
+                }
+            })?;
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for Synthetic {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }

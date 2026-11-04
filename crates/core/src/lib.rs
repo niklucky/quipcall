@@ -300,7 +300,13 @@ impl Engine {
     }
 
     /// Share `source` (required on macOS, where our own picker chooses it).
-    pub fn start_screen_share(&self, source: Option<SourceId>, preset: ScreenSharePreset) {
+    /// Captured frames also go to `preview`, so you can see what you share.
+    pub fn start_screen_share(
+        &self,
+        source: Option<SourceId>,
+        preset: ScreenSharePreset,
+        preview: Option<Arc<dyn FrameSink>>,
+    ) {
         let state = self.state.clone();
         let events = self.events.clone();
         let handle = self.rt.handle().clone();
@@ -317,9 +323,15 @@ impl Engine {
                         handle.spawn(stop_screen_share(state, events));
                     }
                 };
-                let share =
-                    screen::ScreenShare::start(&room, source, preset, events.clone(), on_fail)
-                        .await?;
+                let share = screen::ScreenShare::start(
+                    &room,
+                    source,
+                    preset,
+                    preview,
+                    events.clone(),
+                    on_fail,
+                )
+                .await?;
                 state.lock().screen = Some(share);
                 anyhow::Ok(())
             }

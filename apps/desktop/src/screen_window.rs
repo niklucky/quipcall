@@ -1,11 +1,14 @@
 //! Someone else's screen share, floating as a rounded rectangle.
+//! Double-click it (or use the button that shows on hover) for fullscreen.
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, MouseButton, ObjectFit, PinchEvent, Pixels, Point, ScrollEvent,
-    Subscription, Window, WindowBounds, WindowHandle, div, hsla, px, rgb, size,
+    App, ClickEvent, Context, Entity, MouseButton, MouseDownEvent, ObjectFit, PinchEvent, Pixels,
+    Point, ScrollEvent, Subscription, Window, WindowBounds, WindowHandle, div, hsla, px, rgb, size,
+    svg,
 };
 
+use crate::assets::Icon;
 use crate::bubble::floating_options;
 use crate::call::{Call, Screen};
 use crate::handle::{self, Resizable};
@@ -35,6 +38,7 @@ pub fn open(
 }
 
 pub struct ScreenWindow {
+    call: Entity<Call>,
     screen: Entity<Screen>,
     width: f32,
     hovered: bool,
@@ -56,6 +60,7 @@ impl ScreenWindow {
             cx.observe(&call, |_, _, cx| cx.notify()),
         ];
         Self {
+            call,
             screen,
             width,
             hovered: false,
@@ -84,6 +89,17 @@ impl ScreenWindow {
             cx,
         );
         cx.notify();
+    }
+}
+
+impl ScreenWindow {
+    fn fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.screen.read(cx).key.clone();
+        let display = window.display(cx).map(|d| d.id());
+        let bounds = window.bounds();
+        self.call.update(cx, |c, cx| {
+            c.open_fullscreen(key, display, Some(bounds), cx)
+        });
     }
 }
 
@@ -140,6 +156,32 @@ impl Render for ScreenWindow {
                         .text_color(rgb(TEXT))
                         .child(format!("{} · screen", screen.owner)),
                 )
+                .child(
+                    div()
+                        .id("fullscreen")
+                        .absolute()
+                        .top_2()
+                        .right_2()
+                        .size(px(28.0))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(hsla(0.0, 0.0, 0.0, 0.55))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(hsla(0.0, 0.0, 0.2, 0.75)))
+                        // Don't let the window start moving instead.
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.fullscreen(window, cx)
+                        }))
+                        .child(
+                            svg()
+                                .path(Icon::Maximize.path())
+                                .size(px(14.0))
+                                .text_color(rgb(0xffffff)),
+                        ),
+                )
             })
             .children(handle)
             .children(tracker)
@@ -147,7 +189,16 @@ impl Render for ScreenWindow {
                 this.hovered = *hovered;
                 cx.notify();
             }))
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if event.click_count >= 2 {
+                        this.fullscreen(window, cx);
+                    } else {
+                        window.start_window_move();
+                    }
+                }),
+            )
             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                 let dy = event.delta.pixel_delta(px(16.0)).y / px(1.0);
                 this.resize_to(this.width - dy * 2.0, mac::Anchor::Center, window, cx);

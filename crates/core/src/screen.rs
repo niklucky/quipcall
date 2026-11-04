@@ -11,7 +11,9 @@ use livekit::prelude::*;
 use livekit::webrtc::prelude::{RtcVideoSource, VideoResolution};
 use livekit::webrtc::video_source::native::NativeVideoSource;
 
-use crate::Event;
+use std::sync::Arc;
+
+use crate::{Event, FrameSink};
 
 /// A screen or window you can share.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -115,10 +117,12 @@ pub(crate) struct ScreenShare {
 impl ScreenShare {
     /// `on_fail` runs (on a capture thread) if capturing stops on its own:
     /// the window closed, the display went away, permission was revoked.
+    /// `preview` gets the captured frames too (macOS only for now).
     pub(crate) async fn start(
         room: &Room,
         source: Option<SourceId>,
         preset: ScreenSharePreset,
+        preview: Option<Arc<dyn FrameSink>>,
         events: async_channel::Sender<Event>,
         on_fail: impl FnOnce() + Send + 'static,
     ) -> anyhow::Result<Self> {
@@ -136,11 +140,11 @@ impl ScreenShare {
         let capture: Box<dyn Send> = {
             let _ = events;
             let source = source.context("choose a screen or window to share")?;
-            Box::new(crate::screen_mac::start(source, preset, video, on_fail).await?)
+            crate::screen_mac::start(source, preset, video, preview, on_fail).await?
         };
         #[cfg(not(target_os = "macos"))]
         let capture: Box<dyn Send> = {
-            let _ = source;
+            let _ = (source, preview);
             Box::new(generic::start(video, preset, events, on_fail)?)
         };
 

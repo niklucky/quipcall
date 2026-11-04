@@ -1,6 +1,7 @@
 mod assets;
 mod bubble;
 mod call;
+mod fullscreen;
 mod handle;
 mod home;
 mod mac;
@@ -288,6 +289,7 @@ fn main() {
         });
         cx.set_global(GlobalShell(shell.clone()));
         share_picker::bind_keys(cx);
+        fullscreen::bind_keys(cx);
         mac::log_window_events();
 
         shell.update(cx, |shell, cx| match shell.args.room.clone() {

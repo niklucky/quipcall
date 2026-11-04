@@ -120,15 +120,13 @@ mod platform {
     use objc2_core_foundation::{CFRetained, CFString};
     use objc2_core_media::CMSampleBuffer;
     use objc2_core_video::{
-        CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
-        CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
-        CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVPixelBufferPixelFormatTypeKey,
-        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVReturnSuccess,
+        CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth,
+        kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
     };
     use objc2_foundation::{NSDictionary, NSNumber, NSString};
 
     use super::*;
-    use crate::pixel_buffer::PixelBufferPool;
+    use crate::pixel_buffer::{PixelBufferPool, paint_test_pattern};
 
     /// Keeps capture running; dropping it stops the camera.
     pub(crate) struct Capture {
@@ -320,7 +318,7 @@ mod platform {
                         let mut n = 0;
                         while !stop.load(Ordering::Relaxed) {
                             if let Some(pixel_buffer) = pool.take() {
-                                paint(&pixel_buffer, n);
+                                paint_test_pattern(&pixel_buffer, n, [104, 176]);
                                 crate::autorelease_pool(|| handler.on_pixel_buffer(pixel_buffer));
                             }
                             n += 1;
@@ -342,37 +340,6 @@ mod platform {
             if let Some(thread) = self.thread.take() {
                 let _ = thread.join();
             }
-        }
-    }
-
-    /// Horizontal bands that scroll every frame, so the encoder has real
-    /// motion. Painted with row fills, so generating costs next to nothing and
-    /// measurements show the pipeline, not the pattern.
-    fn paint(pixel_buffer: &CVPixelBuffer, n: usize) {
-        let (w, h) = (WIDTH as usize, HEIGHT as usize);
-        // SAFETY: the buffer comes from a 1280x720 420f pool: plane 0 has `h`
-        // rows of at least `w` bytes, plane 1 has `h / 2` rows of `w` bytes.
-        unsafe {
-            if CVPixelBufferLockBaseAddress(pixel_buffer, CVPixelBufferLockFlags(0))
-                != kCVReturnSuccess
-            {
-                return;
-            }
-            let y = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0).cast::<u8>();
-            let y_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
-            let uv = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1).cast::<u8>();
-            let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
-            for row in 0..h {
-                let luma = ((row + n * 4) / 3) as u8;
-                std::ptr::write_bytes(y.add(row * y_stride), luma, w);
-            }
-            for row in 0..h / 2 {
-                let line = std::slice::from_raw_parts_mut(uv.add(row * uv_stride), w);
-                let (pairs, _) = line.as_chunks_mut::<2>();
-                let tint = ((row / 45 + n / 30) % 4) as u8 * 24;
-                pairs.fill([104 + tint, 176 - tint]);
-            }
-            CVPixelBufferUnlockBaseAddress(pixel_buffer, CVPixelBufferLockFlags(0));
         }
     }
 }

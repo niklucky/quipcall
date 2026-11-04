@@ -73,3 +73,18 @@ Ideas to try if we need headroom:
 - Direct ScreenCaptureKit capture, letting SCK scale on the GPU, for screen share.
 - Find out what the ~90 MB of GPU memory is (drawables at 2× scale, glyph/path atlases, MSAA textures for paths) and whether GPUI lets us shrink it.
 - Check whether that GPU memory goes away when the window closes (matters for the menu-bar idle budget).
+
+## 2026-11-04 — Stage 2, your own share preview
+
+Release build, alone in a room, `QUIPCALL_NO_MIC=1`, sharing the synthetic 1920×1200 screen (`QUIPCALL_FAKE_SCREEN`) at 30 fps · motion in minimal mode. The preview draws the capture's own IOSurfaces and repaints at most 15 times a second. "No preview" is the same build with the preview sink left out. Samples every 5 s for 30 s.
+
+| Scenario | CPU (one core) | Footprint |
+|---|---|---|
+| Sharing, no camera, no preview | ~1.3% | ~49 MB |
+| Sharing, no camera, preview | ~3.4% | ~136 MB |
+| Sharing + synthetic camera, no preview | ~5.5% | ~148 MB |
+| Sharing + synthetic camera, preview | ~5.5% | ~150 MB |
+
+The preview itself is cheap: with any video already on screen (your camera, or anyone's) it adds about 2 MB and no measurable CPU. The ~88 MB jump without a camera is GPUI's GPU memory ("owned unmapped (graphics)" in `vmmap`): macOS releases it a few seconds after the last window stops drawing, and any repainting video keeps it. Your own camera circle alone holds the same 88.5 MB. So only an audio-only call where you share pays for it, and that is the GPU-memory item below, not the preview.
+
+Two desktops can share at the same time (synthetic screens), each receiving the other's share, and a web participant sees both.

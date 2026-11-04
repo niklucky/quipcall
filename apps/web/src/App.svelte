@@ -140,6 +140,20 @@
     };
   }
 
+  // Screen shares go fullscreen on a double-click or the ⤢ button; Esc leaves.
+  // iPhone Safari can only do that for the video element itself.
+  function fullscreen(tile: HTMLElement) {
+    if (document.fullscreenElement) {
+      document.exitFullscreen();
+      return;
+    }
+    const video = tile.querySelector('video') as
+      | (HTMLVideoElement & { webkitEnterFullscreen?: () => void })
+      | null;
+    if (tile.requestFullscreen) tile.requestFullscreen().catch(() => {});
+    else video?.webkitEnterFullscreen?.();
+  }
+
   const cols = $derived(Math.max(1, Math.ceil(Math.sqrt(tiles.length))));
 
   if (params.get('autojoin') === '1') join();
@@ -167,7 +181,12 @@
     </header>
     <section class="grid" style:grid-template-columns="repeat({cols}, 1fr)">
       {#each tiles as tile (tile.id)}
-        <div class="tile" class:speaking={tile.speaking}>
+        <div
+          class="tile"
+          class:speaking={tile.speaking}
+          role="figure"
+          ondblclick={tile.isScreen ? (e) => fullscreen(e.currentTarget) : undefined}
+        >
           {#if tile.track}
             <video
               {@attach attach(tile.track)}
@@ -179,6 +198,13 @@
             ></video>
           {/if}
           <span class="label">{tile.name}{tile.isLocal ? ' (you)' : ''}{tile.isScreen ? ' · screen' : ''}</span>
+          {#if tile.isScreen && !tile.isLocal}
+            <button
+              class="expand"
+              title="Fullscreen"
+              aria-label="Fullscreen"
+              onclick={(e) => fullscreen(e.currentTarget.parentElement!)}>⤢</button>
+          {/if}
         </div>
       {/each}
     </section>
@@ -211,6 +237,9 @@
   video.contain { object-fit: contain; }
   video.mirror { transform: scaleX(-1); }
   .label { position: absolute; left: 8px; bottom: 8px; padding: 2px 8px; border-radius: 4px; background: rgb(0 0 0 / 55%); }
+  .expand { position: absolute; top: 8px; right: 8px; padding: 2px 8px; border: 0; border-radius: 4px; background: rgb(0 0 0 / 55%); color: #fff; font-size: 16px; }
+  .tile:fullscreen { border: 0; border-radius: 0; background: #000; }
+  .tile:fullscreen video { object-fit: contain; }
   footer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center; padding: 12px; }
   .muted { color: #9aa3b2; margin-left: 12px; }
   .error { color: #ff7b72; }

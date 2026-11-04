@@ -23,6 +23,8 @@ Read README.md first. Plan: docs/PLAN.md. Decisions: docs/ARCHITECTURE.md.
 - `QUIPCALL_NO_MIC=1` starts the app without opening an audio device.
 - `--features snapshot` with `QUIPCALL_SNAPSHOT_DIR` saves a PNG of every window. The AppKit circle clip and blur don't show in it.
 - `QUIPCALL_SCRIPT="4:regular 8:leave"` presses buttons on a timer (`src/snapshot.rs`).
+- `QUIPCALL_FAKE_SCREEN=1` (or `=1600x900`) with the `share-own` script action shares a test pattern instead of anything on screen. Two app instances can share at once this way.
+- Without a terminal the app logs to `~/Library/Logs/Quipcall/`, which is the user's log. Run test instances under `script -q <logfile> <app> …` to keep them out of it.
 - Headless web participant: Chrome with `--headless=new --use-fake-device-for-media-stream --use-fake-ui-for-media-stream`, opening `?room=X&autojoin=1&mic=0`. The room is `window.qcRoom`, and its stats can be read over the DevTools protocol.
 - Measure memory with `dev/measure.sh <pid>`, which reports the physical footprint, not RSS. RSS once hid a 3 GB IOSurface leak.
 

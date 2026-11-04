@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
-    App, AppContext as _, Bounds, ClipboardItem, Context, Entity, EventEmitter, Pixels, Task,
-    WindowBounds, WindowHandle, point, px, size,
+    App, AppContext as _, Bounds, ClipboardItem, Context, DisplayId, Entity, EventEmitter, Pixels,
+    Task, WindowBounds, WindowHandle, point, px, size,
 };
 use quipcall_core::{
     Engine, Event, MediaDevice, ScreenSharePreset, SourceId, TrackKey, VideoKind, VideoQuality,
@@ -19,11 +19,16 @@ use quipcall_core::{
 
 use crate::Args;
 use crate::bubble::{self, Bubble};
+use crate::fullscreen::{self, Fullscreen};
 use crate::regular::Regular;
 use crate::screen_window::{self, ScreenWindow};
 use crate::share_picker::{self, SharePicker};
 use crate::toolbar::{self, Toolbar};
 use crate::video_mac::SurfaceSink;
+
+/// Your own screen preview repaints at most this often: enough to see what
+/// you share, without redrawing at 60 fps.
+const PREVIEW_FPS: u32 = 15;
 
 #[derive(Clone, Debug)]
 pub struct RoomRef {
@@ -66,13 +71,20 @@ pub struct Video {
 }
 
 impl Video {
+    /// `max_fps` caps repaints (your own previews); remote video repaints on
+    /// every frame.
     fn new<T: 'static>(
         label: &str,
         key: Option<TrackKey>,
+        max_fps: Option<u32>,
         cx: &mut Context<T>,
     ) -> (Self, Arc<SurfaceSink>) {
         let (tx, rx) = async_channel::bounded::<()>(1);
-        let sink = Arc::new(SurfaceSink::new(label.to_owned().into(), tx));
+        let sink = SurfaceSink::new(label.to_owned().into(), tx);
+        let sink = Arc::new(match max_fps {
+            Some(fps) => sink.with_max_fps(fps),
+            None => sink,
+        });
         let repaint = cx.spawn(async move |this, cx| {
             while rx.recv().await.is_ok() {
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
@@ -96,6 +108,9 @@ pub struct Member {
     pub name: String,
     pub is_local: bool,
     pub video: Option<Video>,
+    /// What you're sharing, while you share (your own member only; other
+    /// people's shares are [`Screen`]s with windows of their own).
+    pub screen: Option<Video>,
     pub speaking: bool,
     pub mic_muted: bool,
 }
@@ -118,6 +133,7 @@ pub struct Ended {
 struct Windows {
     bubbles: HashMap<String, WindowHandle<Bubble>>,
     screens: HashMap<TrackKey, WindowHandle<ScreenWindow>>,
+    fullscreen: HashMap<TrackKey, WindowHandle<Fullscreen>>,
     toolbar: Option<WindowHandle<Toolbar>>,
     regular: Option<WindowHandle<Regular>>,
 }
@@ -130,6 +146,10 @@ pub struct Call {
     pub me: Entity<Member>,
     pub others: Vec<Entity<Member>>,
     pub screens: Vec<Entity<Screen>>,
+    /// Screen shares shown fullscreen, each on the display it was on.
+    fullscreen: HashMap<TrackKey, Option<DisplayId>>,
+    /// Where a share's floating window was before it went fullscreen.
+    screen_bounds: HashMap<TrackKey, Bounds<Pixels>>,
     pub mic_on: bool,
     pub camera: Camera,
     pub sharing: Option<ScreenSharePreset>,
@@ -179,6 +199,7 @@ impl Call {
             name: args.name.clone(),
             is_local: true,
             video: None,
+            screen: None,
             speaking: false,
             mic_muted: true,
         });
@@ -203,6 +224,8 @@ impl Call {
             me,
             others: Vec::new(),
             screens: Vec::new(),
+            fullscreen: HashMap::new(),
+            screen_bounds: HashMap::new(),
             mic_on: false,
             camera: Camera::Off,
             sharing: None,
@@ -262,7 +285,7 @@ impl Call {
             Camera::Off => {
                 let (video, sink) = self
                     .me
-                    .update(cx, |_, cx| Video::new("self-view", None, cx));
+                    .update(cx, |_, cx| Video::new("self-view", None, None, cx));
                 self.engine.start_camera(Some(sink));
                 self.me.update(cx, |me, cx| {
                     me.video = Some(video);
@@ -306,9 +329,48 @@ impl Call {
     }
 
     pub fn share(&mut self, source: SourceId, preset: ScreenSharePreset, cx: &mut Context<Self>) {
-        self.engine.start_screen_share(Some(source), preset);
+        // Captured frames go straight to your circle, which turns into a
+        // preview of the share: the same IOSurfaces, no copy.
+        self.me.update(cx, |me, cx| {
+            let (video, sink) = Video::new("self-screen", None, Some(PREVIEW_FPS), cx);
+            self.engine
+                .start_screen_share(Some(source), preset, Some(sink));
+            me.screen = Some(video);
+            cx.notify();
+        });
         self.share_preset = preset;
         cx.notify();
+    }
+
+    pub fn is_fullscreen(&self, key: &TrackKey) -> bool {
+        self.fullscreen.contains_key(key)
+    }
+
+    /// Show a screen share fullscreen on `display`. `floating` is where its
+    /// floating window is, to put it back there afterwards.
+    pub fn open_fullscreen(
+        &mut self,
+        key: TrackKey,
+        display: Option<DisplayId>,
+        floating: Option<Bounds<Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.fullscreen.contains_key(&key) {
+            return;
+        }
+        if let Some(bounds) = floating {
+            self.screen_bounds.insert(key.clone(), bounds);
+        }
+        self.fullscreen.insert(key, display);
+        cx.notify();
+        schedule_sync(&cx.entity(), cx);
+    }
+
+    pub fn close_fullscreen(&mut self, key: &TrackKey, cx: &mut Context<Self>) {
+        if self.fullscreen.remove(key).is_some() {
+            cx.notify();
+            schedule_sync(&cx.entity(), cx);
+        }
     }
 
     pub fn copy_link(&mut self, cx: &mut Context<Self>) {
@@ -397,6 +459,14 @@ impl Call {
         cx.notify();
     }
 
+    fn drop_preview(&mut self, cx: &mut Context<Self>) {
+        self.me.update(cx, |me, cx| {
+            if me.screen.take().is_some() {
+                cx.notify();
+            }
+        });
+    }
+
     fn member(&self, identity: &str, cx: &App) -> Option<Entity<Member>> {
         self.others
             .iter()
@@ -434,6 +504,7 @@ impl Call {
                         name,
                         is_local: false,
                         video: None,
+                        screen: None,
                         speaking: false,
                         mic_muted: false,
                     });
@@ -454,7 +525,7 @@ impl Call {
                         let engine = &self.engine;
                         member.update(cx, |m, cx| {
                             let (mut video, sink) =
-                                Video::new(&format!("{}/camera", m.identity), Some(key), cx);
+                                Video::new(&format!("{}/camera", m.identity), Some(key), None, cx);
                             video._subscription = Some(engine.attach_video(&track, sink));
                             m.video = Some(video);
                             cx.notify();
@@ -471,6 +542,7 @@ impl Call {
                         let (mut video, sink) = Video::new(
                             &format!("{}/screen", key.participant),
                             Some(key.clone()),
+                            None,
                             cx,
                         );
                         video._subscription = Some(engine.attach_video(&track, sink));
@@ -533,9 +605,18 @@ impl Call {
             }
             Event::ScreenShareChanged { active, preset } => {
                 self.sharing = if active { preset } else { None };
+                if !active {
+                    self.drop_preview(cx);
+                }
             }
             Event::Error(message) => {
                 self.waiting_for = None;
+                // A failed start leaves nothing shared (a previous share is
+                // stopped before the new one starts).
+                if message.starts_with("screen share") {
+                    self.sharing = None;
+                    self.drop_preview(cx);
+                }
                 if self.camera == Camera::Starting && message.starts_with("camera") {
                     self.camera = Camera::Off;
                     self.me.update(cx, |me, cx| {
@@ -562,7 +643,13 @@ fn schedule_sync(call: &Entity<Call>, cx: &mut App) {
 }
 
 fn sync_windows(call: &Entity<Call>, cx: &mut App) {
-    let (minimal, regular, members, screens, mut windows) = {
+    // Forget fullscreen and placement of shares that have ended.
+    call.update(cx, |c, cx| {
+        let live: Vec<TrackKey> = c.screens.iter().map(|s| s.read(cx).key.clone()).collect();
+        c.fullscreen.retain(|key, _| live.contains(key));
+        c.screen_bounds.retain(|key, _| live.contains(key));
+    });
+    let (minimal, regular, members, screens, fullscreen, screen_bounds, mut windows) = {
         let c = call.read(cx);
         let live = c.status != Status::Ended;
         let minimal = live && c.mode == Mode::Minimal;
@@ -572,12 +659,34 @@ fn sync_windows(call: &Entity<Call>, cx: &mut App) {
         } else {
             Vec::new()
         };
+        // A share shown fullscreen has no floating window meanwhile.
         let screens: Vec<Entity<Screen>> = if minimal {
-            c.screens.clone()
+            c.screens
+                .iter()
+                .filter(|s| !c.is_fullscreen(&s.read(cx).key))
+                .cloned()
+                .collect()
         } else {
             Vec::new()
         };
-        (minimal, regular, members, screens, Windows::default())
+        // Fullscreen works from both modes.
+        let fullscreen: Vec<(Entity<Screen>, Option<DisplayId>)> = if live {
+            c.screens
+                .iter()
+                .filter_map(|s| Some((s.clone(), *c.fullscreen.get(&s.read(cx).key)?)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        (
+            minimal,
+            regular,
+            members,
+            screens,
+            fullscreen,
+            c.screen_bounds.clone(),
+            Windows::default(),
+        )
     };
     call.update(cx, |c, _| std::mem::swap(&mut windows, &mut c.windows));
 
@@ -627,18 +736,42 @@ fn sync_windows(call: &Entity<Call>, cx: &mut App) {
             continue;
         }
         let offset = px(32.0) * windows.screens.len() as f32;
-        let bounds = Bounds::new(
-            point(
-                area.origin.x + px(48.0) + offset,
-                area.origin.y + px(48.0) + offset,
-            ),
-            size(
-                px(screen_window::WIDTH),
-                px(screen_window::WIDTH * 9.0 / 16.0),
-            ),
-        );
+        let bounds = screen_bounds.get(&key).copied().unwrap_or_else(|| {
+            Bounds::new(
+                point(
+                    area.origin.x + px(48.0) + offset,
+                    area.origin.y + px(48.0) + offset,
+                ),
+                size(
+                    px(screen_window::WIDTH),
+                    px(screen_window::WIDTH * 9.0 / 16.0),
+                ),
+            )
+        });
         if let Some(handle) = screen_window::open(call.clone(), screen.clone(), bounds, cx) {
             windows.screens.insert(key, handle);
+        }
+    }
+
+    // Fullscreen shares.
+    let wanted: Vec<TrackKey> = fullscreen
+        .iter()
+        .map(|(s, _)| s.read(cx).key.clone())
+        .collect();
+    windows.fullscreen.retain(|key, handle| {
+        let keep = wanted.contains(key);
+        if !keep {
+            close(handle, cx);
+        }
+        keep
+    });
+    for (screen, display) in &fullscreen {
+        let key = screen.read(cx).key.clone();
+        if windows.fullscreen.contains_key(&key) {
+            continue;
+        }
+        if let Some(handle) = fullscreen::open(call.clone(), screen.clone(), *display, cx) {
+            windows.fullscreen.insert(key, handle);
         }
     }
 
@@ -673,9 +806,10 @@ fn sync_windows(call: &Entity<Call>, cx: &mut App) {
     }
 
     tracing::debug!(
-        "call windows: {} circles, {} screen shares, toolbar {}, tiles {}",
+        "call windows: {} circles, {} screen shares ({} fullscreen), toolbar {}, tiles {}",
         windows.bubbles.len(),
         windows.screens.len(),
+        windows.fullscreen.len(),
         windows.toolbar.is_some(),
         windows.regular.is_some(),
     );

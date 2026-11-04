@@ -28,19 +28,37 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 /// The visible shape of a floating window.
 #[derive(Clone, Debug)]
 pub enum Mask {
-    /// Rounded rectangle with this corner radius.
+    /// The whole window, as a rounded rectangle with this corner radius.
     Rounded(f64),
-    /// The union of these circles, each `(x, y, diameter)` with `(x, y)` the
-    /// top-left of its bounding box in window coordinates.
-    Circles(Vec<(f64, f64, f64)>),
+    /// The union of these shapes (which must not overlap a rectangle with
+    /// a circle: their outlines run in opposite directions).
+    Shapes(Vec<Shape>),
+}
+
+/// Part of a [`Mask`], in window coordinates (origin top-left).
+#[derive(Clone, Copy, Debug)]
+pub enum Shape {
+    /// `(x, y)` is the top-left of its bounding box.
+    Circle { x: f32, y: f32, diameter: f32 },
+    Rect {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radius: f32,
+    },
 }
 
 impl Mask {
     /// A circle filling a `diameter`-sized window, plus an optional knob.
     pub fn circle(diameter: f32, knob: Option<(f32, f32, f32)>) -> Self {
-        let mut circles = vec![(0.0, 0.0, diameter as f64)];
-        circles.extend(knob.map(|(x, y, d)| (x as f64, y as f64, d as f64)));
-        Mask::Circles(circles)
+        let mut shapes = vec![Shape::Circle {
+            x: 0.0,
+            y: 0.0,
+            diameter,
+        }];
+        shapes.extend(knob.map(|(x, y, diameter)| Shape::Circle { x, y, diameter }));
+        Mask::Shapes(shapes)
     }
 }
 
@@ -52,6 +70,9 @@ pub enum Anchor {
     TopLeft,
     /// The toolbar grows upwards from where it sits.
     BottomCenter,
+    /// Your circle turning into a screen preview: it sits in the
+    /// bottom-right corner by default, so it grows away from it.
+    BottomRight,
 }
 
 fn ns_window(window: &Window) -> Option<Retained<NSWindow>> {
@@ -82,14 +103,38 @@ fn apply_mask(window: &NSWindow, mask: &Mask) {
             layer.setCornerRadius(*radius);
             layer.setMasksToBounds(true);
         }
-        Mask::Circles(circles) => {
+        Mask::Shapes(shapes) => {
             let height = content.frame().size.height;
             let path = CGMutablePath::new();
-            for &(x, y, d) in circles {
-                // Layer coordinates have their origin at the bottom-left.
-                let rect = CGRect::new(CGPoint::new(x, height - y - d), CGSize::new(d, d));
+            // Layer coordinates have their origin at the bottom-left.
+            let flip = |x: f32, y: f32, w: f32, h: f32| {
+                let (x, y, w, h) = (x as f64, y as f64, w as f64, h as f64);
+                CGRect::new(CGPoint::new(x, height - y - h), CGSize::new(w, h))
+            };
+            for shape in shapes {
                 // SAFETY: valid path, no transform.
-                unsafe { CGMutablePath::add_ellipse_in_rect(Some(&path), std::ptr::null(), rect) };
+                unsafe {
+                    match *shape {
+                        Shape::Circle { x, y, diameter } => CGMutablePath::add_ellipse_in_rect(
+                            Some(&path),
+                            std::ptr::null(),
+                            flip(x, y, diameter, diameter),
+                        ),
+                        Shape::Rect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            radius,
+                        } => CGMutablePath::add_rounded_rect(
+                            Some(&path),
+                            std::ptr::null(),
+                            flip(x, y, width, height),
+                            radius as f64,
+                            radius as f64,
+                        ),
+                    }
+                }
             }
             let shape = CAShapeLayer::new();
             shape.setFrame(layer.bounds());
@@ -140,7 +185,10 @@ pub fn set_mask(window: &Window, mask: Mask, cx: &App) {
         .detach();
 }
 
-/// Resize to `size`, keeping `anchor` where it is, and re-apply `mask`.
+/// Resize to `size`, keeping `anchor` where it is, and re-apply `mask`. A
+/// window that was fully on its screen stays on it, except while a resize
+/// handle is dragged: moving the corner under the cursor would feed back into
+/// the drag.
 ///
 /// Deferred to the next run-loop turn: AppKit calls straight back into GPUI
 /// when a window's frame changes, which must not happen mid-event.
@@ -163,11 +211,33 @@ pub fn resize(window: &Window, size: Size<f32>, mask: Mask, anchor: Anchor, cx: 
                     frame.origin.x + (frame.size.width - w) / 2.0,
                     frame.origin.y,
                 ),
+                Anchor::BottomRight => (frame.origin.x + frame.size.width - w, frame.origin.y),
             };
-            ns.setFrame_display(NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)), true);
+            let mut target = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+            if !matches!(anchor, Anchor::TopLeft)
+                && let Some(visible) = ns.screen().map(|s| s.visibleFrame())
+                && contains(visible, frame)
+            {
+                target.origin.x = target.origin.x.clamp(
+                    visible.origin.x,
+                    (visible.origin.x + visible.size.width - w).max(visible.origin.x),
+                );
+                target.origin.y = target.origin.y.clamp(
+                    visible.origin.y,
+                    (visible.origin.y + visible.size.height - h).max(visible.origin.y),
+                );
+            }
+            ns.setFrame_display(target, true);
             apply_mask(&ns, &mask);
         })
         .detach();
+}
+
+fn contains(outer: NSRect, inner: NSRect) -> bool {
+    inner.origin.x >= outer.origin.x
+        && inner.origin.y >= outer.origin.y
+        && inner.origin.x + inner.size.width <= outer.origin.x + outer.size.width
+        && inner.origin.y + inner.size.height <= outer.origin.y + outer.size.height
 }
 
 /// Log what macOS does to our app and windows: deactivated, hidden, covered,

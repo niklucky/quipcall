@@ -7,7 +7,10 @@
 //!   (quick call from home), `mic`, `camera`, `share` (opens the picker),
 //!   `knobs` (every circle acts as hovered, to see the resize knob),
 //!   `share-own` / `share-own-60` (shares one of Quipcall's own windows with
-//!   that preset, so tests never capture anything else on screen).
+//!   that preset, so tests never capture anything else on screen; with
+//!   `QUIPCALL_FAKE_SCREEN` set, a synthetic test pattern instead),
+//!   `stop-share` (never opens the picker), `fullscreen` (the first screen
+//!   share from someone else goes fullscreen, or back).
 
 use std::time::Duration;
 
@@ -94,6 +97,14 @@ fn act(action: &str, cx: &mut App) {
             .find(|p| p.fps == fps)
             .unwrap_or(quipcall_core::ScreenSharePreset::PRESETS[1]);
         let shell = Shell::global(cx);
+        if std::env::var_os("QUIPCALL_FAKE_SCREEN").is_some() {
+            // The source is ignored: the test pattern is shared instead.
+            if let Some(call) = shell.read(cx).call() {
+                let source = quipcall_core::SourceId::Display(0);
+                call.update(cx, |c, cx| c.share(source, preset, cx));
+            }
+            return;
+        }
         cx.spawn(async move |cx| match quipcall_core::own_window().await {
             Ok(Some(source)) => {
                 cx.update(|cx| {
@@ -124,6 +135,16 @@ fn act(action: &str, cx: &mut App) {
         "mic" => c.toggle_mic(cx),
         "camera" => c.toggle_camera(cx),
         "share" => c.toggle_share(cx),
+        "stop-share" => {
+            if c.sharing.is_some() {
+                c.toggle_share(cx)
+            }
+        }
+        "fullscreen" => match c.screens.first().map(|s| s.read(cx).key.clone()) {
+            Some(key) if c.is_fullscreen(&key) => c.close_fullscreen(&key, cx),
+            Some(key) => c.open_fullscreen(key, None, None, cx),
+            None => tracing::warn!("script: nobody is sharing"),
+        },
         other => tracing::warn!(action = other, "script: unknown action"),
     });
 }
