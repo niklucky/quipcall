@@ -408,6 +408,11 @@ impl Call {
         cx.notify();
     }
 
+    /// Resolves once the server knows you left (see [`Call::leave`]).
+    pub fn closed(&self) -> impl Future<Output = ()> + use<> {
+        self.engine.closed()
+    }
+
     pub fn leave(&mut self, cx: &mut Context<Self>) {
         if self.status == Status::Ended {
             return;
@@ -710,12 +715,7 @@ fn sync_windows(call: &Entity<Call>, cx: &mut App) {
             continue;
         }
         let slot = windows.bubbles.len();
-        let diameter = if member.read(cx).is_local {
-            bubble::SELF_SIZE
-        } else {
-            bubble::OTHER_SIZE
-        };
-        let bounds = bubble_slot(area, slot, diameter);
+        let bounds = bubble_slot(area, slot, bubble::SIZE);
         if let Some(handle) = bubble::open(call.clone(), member.clone(), bounds, cx) {
             windows.bubbles.insert(identity, handle);
         }
@@ -837,7 +837,7 @@ fn visible_area(cx: &App) -> Bounds<Pixels> {
 /// column to the left. Slot 0 (you) sits in the bottom-right corner.
 fn bubble_slot(area: Bounds<Pixels>, slot: usize, diameter: f32) -> WindowBounds {
     let margin = 28.0;
-    let cell = bubble::SELF_SIZE + 16.0;
+    let cell = bubble::SIZE + 16.0;
     let usable = (area.size.height / px(1.0) - 2.0 * margin).max(cell);
     let per_column = ((usable / cell) as usize).max(1);
     let (col, row) = (slot / per_column, slot % per_column);

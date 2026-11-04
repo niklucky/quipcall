@@ -28,37 +28,19 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 /// The visible shape of a floating window.
 #[derive(Clone, Debug)]
 pub enum Mask {
-    /// The whole window, as a rounded rectangle with this corner radius.
+    /// Rounded rectangle with this corner radius.
     Rounded(f64),
-    /// The union of these shapes (which must not overlap a rectangle with
-    /// a circle: their outlines run in opposite directions).
-    Shapes(Vec<Shape>),
-}
-
-/// Part of a [`Mask`], in window coordinates (origin top-left).
-#[derive(Clone, Copy, Debug)]
-pub enum Shape {
-    /// `(x, y)` is the top-left of its bounding box.
-    Circle { x: f32, y: f32, diameter: f32 },
-    Rect {
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        radius: f32,
-    },
+    /// The union of these circles, each `(x, y, diameter)` with `(x, y)` the
+    /// top-left of its bounding box in window coordinates.
+    Circles(Vec<(f64, f64, f64)>),
 }
 
 impl Mask {
     /// A circle filling a `diameter`-sized window, plus an optional knob.
     pub fn circle(diameter: f32, knob: Option<(f32, f32, f32)>) -> Self {
-        let mut shapes = vec![Shape::Circle {
-            x: 0.0,
-            y: 0.0,
-            diameter,
-        }];
-        shapes.extend(knob.map(|(x, y, diameter)| Shape::Circle { x, y, diameter }));
-        Mask::Shapes(shapes)
+        let mut circles = vec![(0.0, 0.0, diameter as f64)];
+        circles.extend(knob.map(|(x, y, d)| (x as f64, y as f64, d as f64)));
+        Mask::Circles(circles)
     }
 }
 
@@ -103,38 +85,14 @@ fn apply_mask(window: &NSWindow, mask: &Mask) {
             layer.setCornerRadius(*radius);
             layer.setMasksToBounds(true);
         }
-        Mask::Shapes(shapes) => {
+        Mask::Circles(circles) => {
             let height = content.frame().size.height;
             let path = CGMutablePath::new();
-            // Layer coordinates have their origin at the bottom-left.
-            let flip = |x: f32, y: f32, w: f32, h: f32| {
-                let (x, y, w, h) = (x as f64, y as f64, w as f64, h as f64);
-                CGRect::new(CGPoint::new(x, height - y - h), CGSize::new(w, h))
-            };
-            for shape in shapes {
+            for &(x, y, d) in circles {
+                // Layer coordinates have their origin at the bottom-left.
+                let rect = CGRect::new(CGPoint::new(x, height - y - d), CGSize::new(d, d));
                 // SAFETY: valid path, no transform.
-                unsafe {
-                    match *shape {
-                        Shape::Circle { x, y, diameter } => CGMutablePath::add_ellipse_in_rect(
-                            Some(&path),
-                            std::ptr::null(),
-                            flip(x, y, diameter, diameter),
-                        ),
-                        Shape::Rect {
-                            x,
-                            y,
-                            width,
-                            height,
-                            radius,
-                        } => CGMutablePath::add_rounded_rect(
-                            Some(&path),
-                            std::ptr::null(),
-                            flip(x, y, width, height),
-                            radius as f64,
-                            radius as f64,
-                        ),
-                    }
-                }
+                unsafe { CGMutablePath::add_ellipse_in_rect(Some(&path), std::ptr::null(), rect) };
             }
             let shape = CAShapeLayer::new();
             shape.setFrame(layer.bounds());

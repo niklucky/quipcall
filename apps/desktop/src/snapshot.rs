@@ -119,6 +119,10 @@ fn act(action: &str, cx: &mut App) {
         .detach();
         return;
     }
+    if action == "quit" {
+        cx.quit();
+        return;
+    }
     let shell = Shell::global(cx);
     if action == "quick" {
         shell.update(cx, |s, cx| s.quick_call(cx));

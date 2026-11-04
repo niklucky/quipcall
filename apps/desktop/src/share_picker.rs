@@ -269,7 +269,9 @@ impl SharePicker {
             )
             .child(div().text_color(rgb(TEXT_DIM)).child(
                 "Turn it on in System Settings → Privacy & Security → Screen & System Audio \
-                 Recording, then restart Quipcall (or the terminal it runs from).",
+                 Recording, then restart Quipcall (or the terminal it runs from). If it's on \
+                 already, that's an older copy of Quipcall: remove it with −, then turn it on \
+                 again.",
             ))
             .child(
                 div()

@@ -64,13 +64,13 @@ Design: [UI.md](UI.md).
 
 - [x] ~~Design: home screen, minimal mode (floating circles + glass toolbar), regular mode~~
 - [x] ~~App structure: one call model shared by several windows; each video view repaints only itself~~
-- [ ] Floating circle: circle-clipped borderless panel above all apps, drag to move, resize (handle, scroll or pinch; 120–480 px), video or avatar, speaking ring, muted badge. *Built; content checked with snapshots. The circle clip, dragging and resizing need a look on a real screen.*
+- [ ] Floating circle: circle-clipped borderless panel above all apps, drag to move, resize (handle, scroll or pinch; 64–480 px, all start at 96), video or avatar, speaking ring, muted badge; on your own circle the badge is a mic button. *Built; content checked with snapshots. The circle clip, dragging and resizing need a look on a real screen.*
 - [x] ~~Resize knob on hover: a dark knob with arrows on the circle's rim at 45° (the window mask grows to include it while you hover); screen shares get it in the corner~~
 - [x] ~~Share picker: a window with live thumbnails of screens and windows, frame-rate presets, Share / Cancel (Esc, Enter, double-click)~~ *Explains the Screen Recording permission when it's off.*
 - [x] ~~Fix: the expand button quit the app~~ *Switching modes closed every window before opening the new one, and the app quit when no window was left. Windows now close a tick later, and the app only quits when there's no call and no home window.*
 - [ ] Glass toolbar: Lucide icons; mic, camera, screen share with fps presets, copy link, invite, expand, leave; draggable. *Built; the blur and clicks need a look on a real screen.*
 - [ ] Other participants as circles, screen shares as floating rectangles, sensible placement for new circles. *Circles verified with 10 people; screen-share windows checked with snapshots (synthetic screens), dragging and resizing them not yet.*
-- [ ] Your own share as a preview: your circle turns into a rounded rectangle of what you share (same IOSurfaces, ≤ 15 fps repaints), with your camera in a circle beside it; also a tile in regular mode. *Built; checked with snapshots and logs using the synthetic screen and camera. The window shape and resizing need a look on a real screen.*
+- [ ] Your own share as a preview: your circle turns into a rounded rectangle of what you share (same IOSurfaces, ≤ 15 fps repaints), with your circle (camera or initials, mic button) in its top-right corner; also a tile in regular mode. *Built; checked with snapshots and logs using the synthetic screen and camera. The window shape and resizing need a look on a real screen.*
 - [ ] Fullscreen for someone's share: double-click it or press ⤢ (floating window), double-click its tile (regular mode); Esc, a double-click or ⤡ goes back. Web: double-click or ⤢ on a share tile. *Built; a scripted run entered native fullscreen and came back to the floating window. Clicks and Esc need a test by hand. Web fullscreen verified in headless Chrome.*
 - [x] ~~Several people sharing at once~~ *Already worked (one share per person). Verified: two desktops sharing at the same time each receive the other's share, and a web participant sees both.*
 - [x] ~~Synthetic screen for tests: `QUIPCALL_FAKE_SCREEN=1` (or `=WIDTHxHEIGHT`) shares a test pattern through the real publish path, so tests never capture the screen~~
@@ -78,6 +78,8 @@ Design: [UI.md](UI.md).
 - [ ] Home window: rooms (persistent and one-time) and call history, stored locally until Stage 3. *Built and rendered; rooms get generated names ("Room 1") until there's a text field to rename them.*
 - [ ] Text field for naming rooms (adapt GPUI's `input.rs` example)
 - [ ] Mirror your own circle
+- [ ] Mic button on your own circle (also on your screen preview). *Built; checked with snapshots, needs a click.*
+- [x] ~~Fix: after leaving, you stayed in the room as a ghost for 15–40 s, so rejoining showed you twice~~ *The engine's runtime was dropped with the call, cancelling the goodbye to LiveKit mid-way. It now finishes on a thread of its own, and quitting mid-call leaves first. Both checked in LiveKit's log (`CLIENT_REQUEST_LEAVE`).*
 - [x] ~~Footprint with 10 circles open~~ *~207 MB, ~23% CPU with 10 circles + toolbar while sending the camera. Memory is the same as one grid window; CPU is higher because every circle draws itself.*
 
 **Done when:** a 3+ person call runs in minimal mode with movable, resizable circles and the glass toolbar; switching to regular mode and back works; home lists rooms and history; footprint with 10 circles is recorded.
@@ -129,7 +131,8 @@ Started early (2026-11-03), ahead of Stages 3–6: there are no accounts yet, so
 - [x] ~~HTTPS, systemd units, server, and static web files~~ — nginx + Let's Encrypt (the box already runs them for other projects, so not Caddy); `make deploy`
 - [ ] SQLite backups
 - [x] ~~macOS build: `.app` bundle, ad-hoc signing for friends~~ — one app per architecture, `curl … | sh` installer, call links (`quipcall://join/<room>`); `make release-mac`
-- [ ] Notarization (Apple Developer ID), so updates keep their permissions; simple update check
+- [ ] Updates keep their permissions: releases are signed with one self-signed certificate (`deploy/mac/signing.sh`), so macOS's requirement for the app stays the same across builds. *Built; needs two releases in a row to confirm.*
+- [ ] Notarization (Apple Developer ID), so a downloaded zip opens without the manual "Open"; simple update check
 - [ ] Invite codes for friends
 - [x] ~~Fix: crash on join on Macs with a Touch Bar~~ — floating windows are created borderless (patched GPUI) instead of switching style afterwards
 - [ ] Bug: on a friend's Intel Mac (macOS 15.6, two displays, Touch Bar) all call windows vanished after he started a screen share, though the app kept running and the share worked. Not reproducible here; the app now logs window visibility, waiting for a log

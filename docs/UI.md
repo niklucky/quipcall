@@ -42,10 +42,11 @@ A small window (about 380 × 560):
 
 - Every participant, you included, is a **floating circle** above all apps and on every Space. Circles never take focus away from what you're doing.
 - A circle shows the person's camera, or their avatar (initials on a colour picked from their name) when the camera is off.
-- **Move** a circle by dragging it. **Resize** by scrolling or pinching over it, or drag the knob with arrows that sits on its rim while you hover, from 120 to 480 px. Your circle starts at 200 px, everyone else's at 160 px.
-- A soft ring shows who is speaking; a small badge shows a muted mic.
+- **Move** a circle by dragging it. **Resize** by scrolling or pinching over it, or drag the knob with arrows that sits on its rim while you hover, from 64 to 480 px. Every circle starts at 96 px.
+- A soft ring shows who is speaking; a small badge shows a muted mic. Hovering someone's circle shows their name.
+- On **your own circle** the mic badge is a button: click it to mute or unmute. It shows while you're muted, and while you hover otherwise.
 - Someone else's **screen share** floats as a rounded rectangle you can move and resize the same way. **Double-click** it, or press ⤢ on it, to watch it **fullscreen**: macOS fullscreen in its own Space, with the circles and toolbar still on top. Esc, a double-click or ⤡ brings the floating window back where it was.
-- While **you share**, your own circle turns into a live **preview** of what you share: a rounded rectangle in the shape of the screen or window. With your camera on, a smaller circle with it sits on the preview's left. Stop sharing and it's a circle again.
+- While **you share**, your own circle turns into a live **preview** of what you share: a rounded rectangle in the shape of the screen or window. Your circle (camera or initials, with its mic button) sits in the preview's top-right corner, at your circle's size, up to 60% of the preview's height. Stop sharing and it's a circle again.
 - **Several people can share at once**: each share gets its own floating window (one share per person).
 - The **glass toolbar** has: mic · camera · screen share · copy call link · invite · expand to regular mode · leave. Drag it by its empty space.
 - **Screen share** opens a picker window with live thumbnails of your screens and windows and the frame-rate presets (5 / 15 fps for text, 30 / 60 fps for motion). Double-click a thumbnail or press Enter to share. Clicking the share button again stops sharing.
@@ -56,10 +57,10 @@ One ordinary window with video tiles and the same toolbar at the bottom. The col
 
 ## Decisions so far (easy to change)
 
-- Your circle starts at 200 px, others at 160 px (so ten people still fit along the screen edge).
+- Every circle starts at 96 px, yours too.
 - Other people's circles show their video when their camera is on (avatars otherwise).
 - Screen shares are rounded rectangles, not circles.
-- Your own share shows as a preview in place of your circle, repainted at up to 15 fps. Your camera goes beside it, not on it: only the window mask can make video round, and it can't cut a circle out of the middle of the preview.
+- Your own share shows as a preview in place of your circle, repainted at up to 15 fps, 320 px along its longer edge to start with.
 - Fullscreen is the native kind (its own Space), so you can still swipe back to your apps while watching.
 - *Invite* copies the call link until accounts and contacts exist; then it lets you pick people to ring.
 - Rooms and history are stored on this Mac until the backend exists; then they move to the server so everyone in a room sees it.
@@ -73,6 +74,7 @@ One ordinary window with video tiles and the same toolbar at the bottom. The col
 
 - Each circle and the toolbar is its own borderless, transparent, non-activating panel (GPUI `WindowKind::PopUp`): above other apps, on all Spaces, never steals focus.
 - macOS clips each window's layer to a circle (corner radius = half the size), so video is clipped by the compositor with no extra CPU or GPU work on our side.
+- The one circle inside a window, your camera on your screen preview, can't use that. GPUI clips video only to rectangles, so it's drawn as about 25 horizontal bands, each clipped to the circle's width, under an opaque 3 px ring that hides the steps (`round_video` in `bubble.rs`).
 - Glass is the system blur behind the window (GPUI's `Blurred` background, an `NSVisualEffectView`).
 - No widget library (we dropped the gpui-component plan): the look is custom, and every dependency costs footprint.
 - Icons: [Lucide](https://lucide.dev) (ISC licence), embedded as SVG.
