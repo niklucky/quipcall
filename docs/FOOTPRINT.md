@@ -99,3 +99,5 @@ Same setup, sharing at 30 fps with the synthetic camera on: the previous build (
 | Camera inside the preview | ~5.8–6.5% | ~152–155 MB |
 
 The difference is within the run-to-run spread: about half a percent of CPU and 3 MB at most. All circles now start at 96 px instead of 200 / 160, so they decode the lowest simulcast layer more often.
+
+The bands themselves, isolated: the same build drawing your camera square (one draw) against round (~25 draws), three alternating runs of each, 18 samples: 5.0% against 4.9% CPU, footprint 143–147 MB in both. Nothing measurable. Your circle on the preview stays 96 px whatever size your own circle is, so the band count doesn't grow with it.

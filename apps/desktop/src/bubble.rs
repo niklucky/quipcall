@@ -42,8 +42,9 @@ const PREVIEW_RADIUS: f32 = 10.0;
 const PREVIEW_ASPECT: f32 = 1.6;
 /// Distance of the preview's knob from its bottom-right corner.
 const KNOB_INSET: f32 = 16.0;
-/// Your circle on the preview: as big as your circle is, but at most this
-/// share of the preview's height.
+/// Your circle on the preview: [`SIZE`] whatever size your own circle had,
+/// but at most this share of the preview's height. A fixed size also keeps
+/// your camera at ~25 draws a frame: [`round_video`] needs more as it grows.
 const AVATAR_MAX: f32 = 0.6;
 const AVATAR_MIN: f32 = 40.0;
 const AVATAR_INSET: f32 = 8.0;
@@ -187,7 +188,7 @@ impl Bubble {
             (edge * aspect, edge)
         };
         let (w, h) = (w.round(), h.round());
-        let d = self.diameter.min((h * AVATAR_MAX).round()).max(AVATAR_MIN);
+        let d = SIZE.min((h * AVATAR_MAX).round()).max(AVATAR_MIN);
         Layout {
             size: size(w, h),
             avatar: (w - AVATAR_INSET - d, AVATAR_INSET, d),

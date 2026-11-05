@@ -202,15 +202,22 @@ impl Engine {
     }
 
     pub fn disconnect(&self) {
-        let (room, screen, camera) = {
+        // Everything of this call leaves the state now, the audio device too:
+        // a call connected before the goodbye below finishes has its own.
+        let (room, audio, screen, camera) = {
             let mut s = self.state.lock();
             s.mic = None;
-            (s.room.take(), s.screen.take(), s.camera.take())
+            // Forget goodbyes already said. `peek` would only see ones
+            // something awaited, so poll them.
+            s.closing.retain(|c| c.clone().now_or_never().is_none());
+            (
+                s.room.take(),
+                s.audio.take(),
+                s.screen.take(),
+                s.camera.take(),
+            )
         };
-        if let Some(screen) = screen {
-            drop(screen);
-        }
-        let state = self.state.clone();
+        drop(screen);
         let closing = self.rt().spawn(async move {
             // Say goodbye first: until the server hears it, everyone else
             // (and you, if you rejoin) sees you in the room for another 20 s.
@@ -222,7 +229,7 @@ impl Engine {
                 let _ = tokio::task::spawn_blocking(move || drop(camera)).await;
             }
             // Release the audio device only after the room is gone.
-            state.lock().audio = None;
+            drop(audio);
         });
         let closing = closing.map(|_| ()).boxed().shared();
         self.state.lock().closing.push(closing);
@@ -687,4 +694,29 @@ fn translate(event: RoomEvent) -> Option<Event> {
         },
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Goodbyes already said don't pile up, even if nothing awaited them.
+    #[test]
+    fn finished_goodbyes_are_forgotten() {
+        let (engine, _events) = Engine::new().unwrap();
+        engine.disconnect();
+        // Wait for the goodbye task itself; awaiting `closed()` would hide
+        // the bug this is about.
+        let metrics = engine.rt().metrics();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while metrics.num_alive_tasks() > 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "goodbye never finished"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        engine.disconnect();
+        assert_eq!(engine.state.lock().closing.len(), 1);
+    }
 }
