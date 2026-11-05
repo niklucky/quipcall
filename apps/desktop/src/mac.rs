@@ -52,6 +52,9 @@ pub enum Anchor {
     TopLeft,
     /// The toolbar grows upwards from where it sits.
     BottomCenter,
+    /// Your circle turning into a screen preview: it sits in the
+    /// bottom-right corner by default, so it grows away from it.
+    BottomRight,
 }
 
 fn ns_window(window: &Window) -> Option<Retained<NSWindow>> {
@@ -140,7 +143,10 @@ pub fn set_mask(window: &Window, mask: Mask, cx: &App) {
         .detach();
 }
 
-/// Resize to `size`, keeping `anchor` where it is, and re-apply `mask`.
+/// Resize to `size`, keeping `anchor` where it is, and re-apply `mask`. A
+/// window that was fully on its screen stays on it, except while a resize
+/// handle is dragged: moving the corner under the cursor would feed back into
+/// the drag.
 ///
 /// Deferred to the next run-loop turn: AppKit calls straight back into GPUI
 /// when a window's frame changes, which must not happen mid-event.
@@ -163,11 +169,33 @@ pub fn resize(window: &Window, size: Size<f32>, mask: Mask, anchor: Anchor, cx: 
                     frame.origin.x + (frame.size.width - w) / 2.0,
                     frame.origin.y,
                 ),
+                Anchor::BottomRight => (frame.origin.x + frame.size.width - w, frame.origin.y),
             };
-            ns.setFrame_display(NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)), true);
+            let mut target = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+            if !matches!(anchor, Anchor::TopLeft)
+                && let Some(visible) = ns.screen().map(|s| s.visibleFrame())
+                && contains(visible, frame)
+            {
+                target.origin.x = target.origin.x.clamp(
+                    visible.origin.x,
+                    (visible.origin.x + visible.size.width - w).max(visible.origin.x),
+                );
+                target.origin.y = target.origin.y.clamp(
+                    visible.origin.y,
+                    (visible.origin.y + visible.size.height - h).max(visible.origin.y),
+                );
+            }
+            ns.setFrame_display(target, true);
             apply_mask(&ns, &mask);
         })
         .detach();
+}
+
+fn contains(outer: NSRect, inner: NSRect) -> bool {
+    inner.origin.x >= outer.origin.x
+        && inner.origin.y >= outer.origin.y
+        && inner.origin.x + inner.size.width <= outer.origin.x + outer.size.width
+        && inner.origin.y + inner.size.height <= outer.origin.y + outer.size.height
 }
 
 /// Log what macOS does to our app and windows: deactivated, hidden, covered,

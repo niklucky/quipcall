@@ -73,3 +73,31 @@ Ideas to try if we need headroom:
 - Direct ScreenCaptureKit capture, letting SCK scale on the GPU, for screen share.
 - Find out what the ~90 MB of GPU memory is (drawables at 2× scale, glyph/path atlases, MSAA textures for paths) and whether GPUI lets us shrink it.
 - Check whether that GPU memory goes away when the window closes (matters for the menu-bar idle budget).
+
+## 2026-11-04 — Stage 2, your own share preview
+
+Release build, alone in a room, `QUIPCALL_NO_MIC=1`, sharing the synthetic 1920×1200 screen (`QUIPCALL_FAKE_SCREEN`) at 30 fps · motion in minimal mode. The preview draws the capture's own IOSurfaces and repaints at most 15 times a second. "No preview" is the same build with the preview sink left out. Samples every 5 s for 30 s.
+
+| Scenario | CPU (one core) | Footprint |
+|---|---|---|
+| Sharing, no camera, no preview | ~1.3% | ~49 MB |
+| Sharing, no camera, preview | ~3.4% | ~136 MB |
+| Sharing + synthetic camera, no preview | ~5.5% | ~148 MB |
+| Sharing + synthetic camera, preview | ~5.5% | ~150 MB |
+
+The preview itself is cheap: with any video already on screen (your camera, or anyone's) it adds about 2 MB and no measurable CPU. The ~88 MB jump without a camera is GPUI's GPU memory ("owned unmapped (graphics)" in `vmmap`): macOS releases it a few seconds after the last window stops drawing, and any repainting video keeps it. Your own camera circle alone holds the same 88.5 MB. So only an audio-only call where you share pays for it, and that is the GPU-memory item below, not the preview.
+
+Two desktops can share at the same time (synthetic screens), each receiving the other's share, and a web participant sees both.
+
+## 2026-11-05 — Stage 2, your camera inside the preview
+
+Same setup, sharing at 30 fps with the synthetic camera on: the previous build (camera circle beside the preview, rounded by the window mask) against this one (camera inside the preview's corner, drawn as ~25 bands clipped to a circle under an opaque ring). Samples every 5 s; two runs of the old build, one of the new (the display went to sleep during the second).
+
+| Build | CPU (one core) | Footprint |
+|---|---|---|
+| Camera beside the preview | ~5.5–6.0% | ~147–152 MB |
+| Camera inside the preview | ~5.8–6.5% | ~152–155 MB |
+
+The difference is within the run-to-run spread: about half a percent of CPU and 3 MB at most. All circles now start at 96 px instead of 200 / 160, so they decode the lowest simulcast layer more often.
+
+The bands themselves, isolated: the same build drawing your camera square (one draw) against round (~25 draws), three alternating runs of each, 18 samples: 5.0% against 4.9% CPU, footprint 143–147 MB in both. Nothing measurable. Your circle on the preview stays 96 px whatever size your own circle is, so the band count doesn't grow with it.

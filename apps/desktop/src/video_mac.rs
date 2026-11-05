@@ -11,6 +11,7 @@
 
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use gpui::SharedString;
 use objc2_core_foundation::CFRetained;
@@ -40,6 +41,12 @@ pub struct SurfaceSink {
     pool: Mutex<Option<PixelBufferPool>>,
     /// Coalescing "please repaint" signal (bounded(1); extra sends are dropped).
     redraw: async_channel::Sender<()>,
+    /// Repaint at most this often (zero: every frame). Frames in between are
+    /// still kept, so the next repaint shows the newest one.
+    min_interval: Duration,
+    created: Instant,
+    /// When the last repaint was asked for, in µs since `created`.
+    last_redraw: AtomicU64,
     frames: AtomicU64,
     /// Last frame size as `width << 32 | height`, to log layer switches.
     size: AtomicU64,
@@ -52,13 +59,41 @@ impl SurfaceSink {
             latest: Mutex::new(None),
             pool: Mutex::new(None),
             redraw,
+            min_interval: Duration::ZERO,
+            created: Instant::now(),
+            last_redraw: AtomicU64::new(0),
             frames: AtomicU64::new(0),
             size: AtomicU64::new(0),
         }
     }
 
+    /// Repaint at most `fps` times a second, however fast frames arrive.
+    pub fn with_max_fps(mut self, fps: u32) -> Self {
+        self.min_interval = Duration::from_secs(1) / fps.max(1);
+        self
+    }
+
     pub fn latest(&self) -> Option<Frame> {
         self.latest.lock().clone()
+    }
+
+    /// Width / height of the last frame, once one has arrived.
+    pub fn aspect(&self) -> Option<f32> {
+        let packed = self.size.load(Ordering::Relaxed);
+        let (width, height) = ((packed >> 32) as f32, (packed & 0xffff_ffff) as f32);
+        (width > 0.0 && height > 0.0).then(|| width / height)
+    }
+
+    fn request_redraw(&self) {
+        if !self.min_interval.is_zero() {
+            let now = self.created.elapsed().as_micros() as u64;
+            let last = self.last_redraw.load(Ordering::Relaxed);
+            if last != 0 && now.saturating_sub(last) < self.min_interval.as_micros() as u64 {
+                return;
+            }
+            self.last_redraw.store(now.max(1), Ordering::Relaxed);
+        }
+        let _ = self.redraw.try_send(());
     }
 
     fn note_size(&self, width: usize, height: usize) {
@@ -85,7 +120,7 @@ impl FrameSink for SurfaceSink {
                 );
             }
             *self.latest.lock() = Some(Frame(pixel_buffer));
-            let _ = self.redraw.try_send(());
+            self.request_redraw();
             return;
         }
         self.convert(frame);
@@ -168,7 +203,7 @@ impl SurfaceSink {
         if self.frames.fetch_add(1, Ordering::Relaxed) == 0 {
             tracing::info!(track = %self.label, width, height, "first frame (converted on CPU)");
         }
-        let _ = self.redraw.try_send(());
+        self.request_redraw();
     }
 }
 

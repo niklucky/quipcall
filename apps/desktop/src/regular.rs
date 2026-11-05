@@ -1,13 +1,15 @@
 //! Regular mode: one ordinary window with a tile per person and screen share.
+//! Double-click someone's screen share for fullscreen.
 
 use std::collections::HashMap;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Background, Bounds, Context, Entity, EntityId, FontWeight, ObjectFit,
-    Subscription, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div, hsla,
-    px, relative, rgb, size,
+    AnyElement, App, Background, Bounds, ClickEvent, Context, Entity, EntityId, FontWeight,
+    ObjectFit, Subscription, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions,
+    div, hsla, px, relative, rgb, size,
 };
+use quipcall_core::TrackKey;
 
 use crate::call::{Call, Mode};
 use crate::theme::{SPEAKING, SURFACE, TEXT, TEXT_DIM, avatar_background, initials};
@@ -82,6 +84,19 @@ struct Tile {
     name: String,
     speaking: bool,
     muted: bool,
+    /// Someone's screen share: double-click for fullscreen.
+    share: Option<TrackKey>,
+}
+
+fn screen_content(frame: Option<crate::video_mac::Frame>) -> AnyElement {
+    frame
+        .map(|f| {
+            gpui::surface(f.0)
+                .object_fit(ObjectFit::Contain)
+                .size_full()
+                .into_any_element()
+        })
+        .unwrap_or_else(|| div().into_any_element())
 }
 
 impl Render for Regular {
@@ -96,7 +111,16 @@ impl Render for Regular {
             )
         };
 
-        let n = (members.len() + screens.len()).max(1);
+        // While you share, what you share gets a tile too.
+        let my_screen = self
+            .call
+            .read(cx)
+            .me
+            .read(cx)
+            .screen
+            .as_ref()
+            .map(|v| v.sink.latest());
+        let n = (members.len() + screens.len() + my_screen.is_some() as usize).max(1);
         let cols = ((n as f32).sqrt().ceil() as usize).max(1);
         let rows = n.div_ceil(cols);
         let chrome = 120.0; // title area + controls, in points
@@ -111,21 +135,26 @@ impl Render for Regular {
         for screen in &screens {
             let s = screen.read(cx);
             tiles.push(Tile {
-                content: s
-                    .video
-                    .sink
-                    .latest()
-                    .map(|f| {
-                        gpui::surface(f.0)
-                            .object_fit(ObjectFit::Contain)
-                            .size_full()
-                            .into_any_element()
-                    })
-                    .unwrap_or_else(|| div().into_any_element()),
+                content: screen_content(s.video.sink.latest()),
                 background: rgb(0x000000).into(),
                 name: format!("{} · screen", s.owner),
                 speaking: false,
                 muted: false,
+                share: Some(s.key.clone()),
+            });
+        }
+        if let Some(frame) = my_screen {
+            let preset = self.call.read(cx).sharing.map(|p| p.label());
+            tiles.push(Tile {
+                content: screen_content(frame),
+                background: rgb(0x000000).into(),
+                name: match preset {
+                    Some(preset) => format!("You're sharing · {preset}"),
+                    None => "Starting to share…".into(),
+                },
+                speaking: false,
+                muted: false,
+                share: None,
             });
         }
         for member in &members {
@@ -164,6 +193,7 @@ impl Render for Regular {
                 },
                 speaking: m.speaking,
                 muted: m.mic_muted,
+                share: None,
             });
         }
 
@@ -183,49 +213,56 @@ impl Render for Regular {
                     .text_color(rgb(TEXT_DIM))
                     .child(room),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_wrap()
-                    .px_2()
-                    .children(tiles.into_iter().map(|t| {
-                        div()
-                            .w(relative(1.0 / cols as f32))
-                            .h(relative(1.0 / rows as f32))
-                            .p_1()
-                            .child(
-                                div()
-                                    .relative()
-                                    .size_full()
-                                    .rounded_xl()
-                                    .overflow_hidden()
-                                    .bg(t.background)
-                                    .border_2()
-                                    .border_color(if t.speaking {
-                                        rgb(SPEAKING)
-                                    } else {
-                                        rgb(SURFACE)
-                                    })
-                                    .child(t.content)
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .bottom_2()
-                                            .left_2()
-                                            .px_2()
-                                            .py_0p5()
-                                            .rounded_md()
-                                            .bg(hsla(0.0, 0.0, 0.0, 0.55))
-                                            .child(if t.muted {
-                                                format!("{} · muted", t.name)
-                                            } else {
-                                                t.name
-                                            }),
-                                    ),
-                            )
-                    })),
-            )
+            .child(div().flex_1().flex().flex_wrap().px_2().children(
+                tiles.into_iter().enumerate().map(|(ix, t)| {
+                    let call = self.call.clone();
+                    div()
+                        .id(("tile", ix))
+                        .w(relative(1.0 / cols as f32))
+                        .h(relative(1.0 / rows as f32))
+                        .p_1()
+                        .when_some(t.share, |el, key| {
+                            el.on_click(move |event: &ClickEvent, window, cx| {
+                                if event.click_count() >= 2 {
+                                    let display = window.display(cx).map(|d| d.id());
+                                    call.update(cx, |c, cx| {
+                                        c.open_fullscreen(key.clone(), display, None, cx)
+                                    });
+                                }
+                            })
+                        })
+                        .child(
+                            div()
+                                .relative()
+                                .size_full()
+                                .rounded_xl()
+                                .overflow_hidden()
+                                .bg(t.background)
+                                .border_2()
+                                .border_color(if t.speaking {
+                                    rgb(SPEAKING)
+                                } else {
+                                    rgb(SURFACE)
+                                })
+                                .child(t.content)
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .bottom_2()
+                                        .left_2()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_md()
+                                        .bg(hsla(0.0, 0.0, 0.0, 0.55))
+                                        .child(if t.muted {
+                                            format!("{} · muted", t.name)
+                                        } else {
+                                            t.name
+                                        }),
+                                ),
+                        )
+                }),
+            ))
             .child(div().flex().justify_center().py_3().child(controls(
                 &self.call,
                 Mode::Regular,

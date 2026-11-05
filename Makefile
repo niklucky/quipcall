@@ -35,7 +35,7 @@ token:
 deploy:
 	deploy/deploy.sh
 
-# The Mac app (Apple Silicon + Intel, ad-hoc signed) → target/mac/Quipcall.zip.
+# The Mac app (Apple Silicon + Intel, signed, see deploy/mac/signing.sh) → target/mac/Quipcall-*.zip.
 mac-app:
 	deploy/mac/package.sh
 

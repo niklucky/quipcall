@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build Quipcall.app for Apple Silicon and for Intel, ad-hoc signed and zipped:
+# Build Quipcall.app for Apple Silicon and for Intel, signed and zipped:
 # target/mac/Quipcall-apple-silicon.zip and target/mac/Quipcall-intel.zip.
 # One app per architecture: a universal binary would be ~60 MB, over budget.
 #
@@ -7,6 +7,8 @@
 #   deploy/mac/package.sh --upload   build and publish at https://quipcall.com/download/
 #
 # QUIPCALL_SERVER picks the server the app talks to (default https://quipcall.com).
+# The signing identity lives in QUIPCALL_SIGNING_KEYCHAIN (made on first use,
+# see signing.sh).
 set -eu
 cd "$(dirname "$0")/../.."
 
@@ -15,6 +17,10 @@ export QUIPCALL_SERVER=${QUIPCALL_SERVER:-https://quipcall.com}
 # ScreenCaptureKit arrived in 12.3. Below 10.14.4 the linker would also point
 # Swift overlays (libswiftCoreMedia) at @rpath, which doesn't exist in the app.
 export MACOSX_DEPLOYMENT_TARGET=12.3
+
+KEYCHAIN=${QUIPCALL_SIGNING_KEYCHAIN:-$HOME/Library/Keychains/quipcall-signing.keychain-db}
+[ -f "$KEYCHAIN" ] || deploy/mac/signing.sh "$KEYCHAIN"
+security unlock-keychain -p "" "$KEYCHAIN"
 
 VERSION=$(cargo pkgid -p quipcall-desktop | sed 's/.*@//')
 BUILD=$(git rev-list --count HEAD)
@@ -39,8 +45,14 @@ for pair in aarch64-apple-darwin:apple-silicon x86_64-apple-darwin:intel; do
 		exit 1
 	fi
 
-	# Ad-hoc: no Apple Developer ID yet, so Gatekeeper needs one manual "Open".
-	codesign --force --sign - "$app"
+	# The same certificate every build, so macOS keeps the app's permissions
+	# across updates. It isn't a Developer ID: Gatekeeper still needs one
+	# manual "Open" for a downloaded zip.
+	codesign --force --keychain "$KEYCHAIN" --sign "Quipcall Signing" "$app"
+	codesign -d -r- "$app" 2>&1 | grep -q 'certificate leaf' || {
+		echo "error: $app isn't signed with the Quipcall certificate" >&2
+		exit 1
+	}
 	ditto -c -k --keepParent "$app" "$OUT/Quipcall-$name.zip"
 done
 

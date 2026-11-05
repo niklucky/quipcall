@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
+use futures_util::FutureExt as _;
 use livekit::options::TrackPublishOptions;
 use livekit::prelude::*;
 use livekit::{AudioProcessingOptions, PlatformAudio};
@@ -95,10 +96,14 @@ pub enum Event {
 }
 
 pub struct Engine {
-    rt: tokio::runtime::Runtime,
+    /// `None` only while dropping, when it moves to a thread of its own.
+    rt: Option<tokio::runtime::Runtime>,
     state: Arc<Mutex<State>>,
     events: async_channel::Sender<Event>,
 }
+
+/// How long leaving may take once the engine is dropped.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Default)]
 struct State {
@@ -113,7 +118,11 @@ struct State {
     screen: Option<screen::ScreenShare>,
     /// Remote video publications, for per-tile quality control.
     videos: HashMap<TrackKey, RemoteTrackPublication>,
+    /// `disconnect` saying goodbye to the server; see [`Engine::closed`].
+    closing: Vec<Closing>,
 }
+
+type Closing = futures_util::future::Shared<futures_util::future::BoxFuture<'static, ()>>;
 
 impl Engine {
     pub fn new() -> anyhow::Result<(Self, async_channel::Receiver<Event>)> {
@@ -125,7 +134,7 @@ impl Engine {
         let (events, rx) = async_channel::unbounded();
         Ok((
             Self {
-                rt,
+                rt: Some(rt),
                 state: Default::default(),
                 events,
             },
@@ -147,7 +156,7 @@ impl Engine {
             ("identity", identity.to_owned()),
             ("name", name.to_owned()),
         ];
-        let handle = self.rt.handle().clone();
+        let handle = self.rt().handle().clone();
         async move {
             handle
                 .spawn(async move {
@@ -183,7 +192,7 @@ impl Engine {
     pub fn connect(&self, join: JoinInfo) {
         let state = self.state.clone();
         let events = self.events.clone();
-        self.rt.spawn(async move {
+        self.rt().spawn(async move {
             if let Err(e) = connect(state, events.clone(), join).await {
                 let _ = events
                     .send(Event::Error(format!("connect failed: {e:#}")))
@@ -193,31 +202,53 @@ impl Engine {
     }
 
     pub fn disconnect(&self) {
-        let (room, screen, camera) = {
+        // Everything of this call leaves the state now, the audio device too:
+        // a call connected before the goodbye below finishes has its own.
+        let (room, audio, screen, camera) = {
             let mut s = self.state.lock();
             s.mic = None;
-            (s.room.take(), s.screen.take(), s.camera.take())
+            // Forget goodbyes already said. `peek` would only see ones
+            // something awaited, so poll them.
+            s.closing.retain(|c| c.clone().now_or_never().is_none());
+            (
+                s.room.take(),
+                s.audio.take(),
+                s.screen.take(),
+                s.camera.take(),
+            )
         };
-        if let Some(screen) = screen {
-            drop(screen);
-        }
-        let state = self.state.clone();
-        self.rt.spawn(async move {
+        drop(screen);
+        let closing = self.rt().spawn(async move {
+            // Say goodbye first: until the server hears it, everyone else
+            // (and you, if you rejoin) sees you in the room for another 20 s.
+            if let Some(room) = room {
+                let _ = room.close().await;
+            }
             // Stopping the camera blocks briefly; keep it off the UI thread.
             if let Some(camera) = camera {
                 let _ = tokio::task::spawn_blocking(move || drop(camera)).await;
             }
-            if let Some(room) = room {
-                let _ = room.close().await;
-            }
             // Release the audio device only after the room is gone.
-            state.lock().audio = None;
+            drop(audio);
         });
+        let closing = closing.map(|_| ()).boxed().shared();
+        self.state.lock().closing.push(closing);
+    }
+
+    /// Resolves once every `disconnect` so far has finished: the server knows
+    /// you left. Works from any executor, e.g. while the app quits.
+    pub fn closed(&self) -> impl std::future::Future<Output = ()> + Send + use<> {
+        let closing = self.state.lock().closing.clone();
+        futures_util::future::join_all(closing).map(|_| ())
+    }
+
+    fn rt(&self) -> &tokio::runtime::Runtime {
+        self.rt.as_ref().expect("engine runtime")
     }
 
     pub fn set_mic_enabled(&self, enabled: bool) {
         // LiveKit spawns tokio tasks internally; UI threads have no runtime.
-        let _rt = self.rt.enter();
+        let _rt = self.rt().enter();
         tracing::info!(enabled, "set mic");
         let s = self.state.lock();
         if let Some(mic) = &s.mic {
@@ -241,7 +272,7 @@ impl Engine {
         }
         let state = self.state.clone();
         let events = self.events.clone();
-        self.rt.spawn(async move {
+        self.rt().spawn(async move {
             let result = async {
                 if !camera::synthetic() {
                     if permissions::status(MediaDevice::Camera) == Access::Undecided {
@@ -288,7 +319,7 @@ impl Engine {
             (s.room.clone(), s.camera.take())
         };
         let events = self.events.clone();
-        self.rt.spawn(async move {
+        self.rt().spawn(async move {
             if let Some(camera) = camera {
                 match room {
                     Some(room) => camera.stop(&room).await,
@@ -300,11 +331,17 @@ impl Engine {
     }
 
     /// Share `source` (required on macOS, where our own picker chooses it).
-    pub fn start_screen_share(&self, source: Option<SourceId>, preset: ScreenSharePreset) {
+    /// Captured frames also go to `preview`, so you can see what you share.
+    pub fn start_screen_share(
+        &self,
+        source: Option<SourceId>,
+        preset: ScreenSharePreset,
+        preview: Option<Arc<dyn FrameSink>>,
+    ) {
         let state = self.state.clone();
         let events = self.events.clone();
-        let handle = self.rt.handle().clone();
-        self.rt.spawn(async move {
+        let handle = self.rt().handle().clone();
+        self.rt().spawn(async move {
             let result = async {
                 let room = state.lock().room.clone().context("not in a call")?;
                 let previous = state.lock().screen.take();
@@ -317,9 +354,15 @@ impl Engine {
                         handle.spawn(stop_screen_share(state, events));
                     }
                 };
-                let share =
-                    screen::ScreenShare::start(&room, source, preset, events.clone(), on_fail)
-                        .await?;
+                let share = screen::ScreenShare::start(
+                    &room,
+                    source,
+                    preset,
+                    preview,
+                    events.clone(),
+                    on_fail,
+                )
+                .await?;
                 state.lock().screen = Some(share);
                 anyhow::Ok(())
             }
@@ -336,14 +379,14 @@ impl Engine {
     }
 
     pub fn stop_screen_share(&self) {
-        self.rt
+        self.rt()
             .spawn(stop_screen_share(self.state.clone(), self.events.clone()));
     }
 
     /// Pick the simulcast layer for a remote video. The UI calls this from the
     /// tile's on-screen size; LiveKit's Rust SDK doesn't do adaptive sizing itself.
     pub fn set_video_quality(&self, key: &TrackKey, quality: VideoQuality) {
-        let _rt = self.rt.enter();
+        let _rt = self.rt().enter();
         if let Some(publication) = self.state.lock().videos.get(key)
             && publication.simulcasted()
         {
@@ -358,7 +401,7 @@ impl Engine {
         track: &RemoteVideoTrack,
         sink: Arc<dyn FrameSink>,
     ) -> VideoSubscription {
-        video::attach(self.rt.handle(), track, sink)
+        video::attach(self.rt().handle(), track, sink)
     }
 }
 
@@ -381,6 +424,23 @@ pub(crate) fn autorelease_pool<R>(f: impl FnOnce() -> R) -> R {
 impl Drop for Engine {
     fn drop(&mut self) {
         self.disconnect();
+        // Dropping the runtime would cancel the goodbye mid-way. Let it
+        // finish on a thread of its own, then drop the runtime there.
+        let closed = self.closed();
+        if let Some(rt) = self.rt.take() {
+            let spawned = std::thread::Builder::new()
+                .name("quipcall-close".into())
+                .spawn(move || {
+                    let closed =
+                        rt.block_on(async { tokio::time::timeout(CLOSE_TIMEOUT, closed).await });
+                    if closed.is_err() {
+                        tracing::warn!("leaving the room timed out");
+                    }
+                });
+            if let Err(e) = spawned {
+                tracing::warn!("leave the room: {e}");
+            }
+        }
     }
 }
 
@@ -634,4 +694,29 @@ fn translate(event: RoomEvent) -> Option<Event> {
         },
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Goodbyes already said don't pile up, even if nothing awaited them.
+    #[test]
+    fn finished_goodbyes_are_forgotten() {
+        let (engine, _events) = Engine::new().unwrap();
+        engine.disconnect();
+        // Wait for the goodbye task itself; awaiting `closed()` would hide
+        // the bug this is about.
+        let metrics = engine.rt().metrics();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while metrics.num_alive_tasks() > 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "goodbye never finished"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        engine.disconnect();
+        assert_eq!(engine.state.lock().closing.len(), 1);
+    }
 }

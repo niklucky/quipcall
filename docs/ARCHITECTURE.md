@@ -53,7 +53,7 @@ docs/               plan, architecture, footprint measurements, deploy runbook
 
 - **Rendering video (macOS).** GPUI's `surface()` draws full-range NV12 `CVPixelBuffer`s directly on the GPU. Hardware-decoded H.264 already arrives in that format and is drawn with no copy; software-decoded frames are converted into pooled IOSurface buffers.
 - **Codec.** H.264 everywhere (camera and screen share) so every Mac encodes and decodes in hardware. VP9 for screen text cost ~460 MB and ~24% CPU at 2560 px, against ~175 MB and ~11% for H.264.
-- **Screen share (macOS).** Our own picker (live thumbnails from ScreenCaptureKit), then ScreenCaptureKit captures straight into IOSurface buffers at the preset's frame rate and VideoToolbox encodes them, no CPU copy. Needs the Screen Recording permission once. Our own floating windows are left out of the share. Presets:
+- **Screen share (macOS).** Our own picker (live thumbnails from ScreenCaptureKit), then ScreenCaptureKit captures straight into IOSurface buffers at the preset's frame rate and VideoToolbox encodes them, no CPU copy. Needs the Screen Recording permission once. Our own floating windows are left out of the share. Your own preview of the share draws the same IOSurfaces (no copy) and repaints at most 15 times a second. Everyone in a call can share at the same time: each share is its own track. Presets:
   - *Text*: 5 or 15 fps, up to 2560 px; when bandwidth drops, keep resolution and lower the frame rate.
   - *Motion*: 30 or 60 fps, up to 1920 px; when bandwidth drops, keep the frame rate and lower resolution.
 - **Bandwidth.** Simulcast + adaptive stream (each video is received at the size it's shown) + dynacast (layers nobody watches aren't encoded) + pausing tiles that aren't visible.
@@ -72,4 +72,4 @@ docs/               plan, architecture, footprint measurements, deploy runbook
 
 Only me and friends, self-hosted on one VPS. About 10 people per call at most. Android users join through the mobile web client.
 
-Deployed at https://quipcall.com ([DEPLOY.md](DEPLOY.md)). The VPS is shared with other projects and already runs nginx with certbot, so we use those rather than Caddy. LiveKit takes all media on one UDP port (7882) with a TCP fallback (7881), so the firewall story is two ports. The Mac app ships as one build per architecture, ad-hoc signed, until it's worth paying for notarization.
+Deployed at https://quipcall.com ([DEPLOY.md](DEPLOY.md)). The VPS is shared with other projects and already runs nginx with certbot, so we use those rather than Caddy. LiveKit takes all media on one UDP port (7882) with a TCP fallback (7881), so the firewall story is two ports. The Mac app ships as one build per architecture, signed with a self-signed certificate (so updates keep their permissions) until it's worth paying for notarization.

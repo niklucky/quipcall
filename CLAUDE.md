@@ -23,6 +23,8 @@ Read README.md first. Plan: docs/PLAN.md. Decisions: docs/ARCHITECTURE.md.
 - `QUIPCALL_NO_MIC=1` starts the app without opening an audio device.
 - `--features snapshot` with `QUIPCALL_SNAPSHOT_DIR` saves a PNG of every window. The AppKit circle clip and blur don't show in it.
 - `QUIPCALL_SCRIPT="4:regular 8:leave"` presses buttons on a timer (`src/snapshot.rs`).
+- `QUIPCALL_FAKE_SCREEN=1` (or `=1600x900`) with the `share-own` script action shares a test pattern instead of anything on screen. Two app instances can share at once this way.
+- Without a terminal the app logs to `~/Library/Logs/Quipcall/`, which is the user's log. Run test instances under `script -q <logfile> <app> …` to keep them out of it.
 - Headless web participant: Chrome with `--headless=new --use-fake-device-for-media-stream --use-fake-ui-for-media-stream`, opening `?room=X&autojoin=1&mic=0`. The room is `window.qcRoom`, and its stats can be read over the DevTools protocol.
 - Measure memory with `dev/measure.sh <pid>`, which reports the physical footprint, not RSS. RSS once hid a 3 GB IOSurface leak.
 
@@ -32,6 +34,6 @@ Read README.md first. Plan: docs/PLAN.md. Decisions: docs/ARCHITECTURE.md.
 - Never change a window's style mask at runtime: it crashes Macs with a Touch Bar. Floating windows are created borderless through the patched GPUI in `vendor/`.
 - Defer AppKit frame changes with a `foreground_executor` spawn. Defer opening a window from inside an entity update with `cx.defer`, or GPUI panics.
 - Keep the camera on H.264 with zero-copy rendering: it uses about 40% less CPU than VP8.
-- Mac builds need `MACOSX_DEPLOYMENT_TARGET=12.3`. Below that, the Swift libraries link via `@rpath` and the app won't start. Builds are ad-hoc signed, so macOS asks for permissions again after every build.
+- Mac builds need `MACOSX_DEPLOYMENT_TARGET=12.3`. Below that, the Swift libraries link via `@rpath` and the app won't start. Dev builds are ad-hoc signed, so macOS asks for permissions again after every build. Releases are signed with the certificate in `~/Library/Keychains/quipcall-signing.keychain-db` so they keep them; never delete or regenerate it.
 - GPUI compiles its shaders at runtime (the `runtime_shaders` feature), so no Metal toolchain is needed. `apps/desktop/build.rs` adds `-ObjC`; without it, libwebrtc's Objective-C categories are dropped.
 - This Mac's network runs a fake-IP proxy, so local `dig` gives wrong answers. Resolve names from the VPS instead.

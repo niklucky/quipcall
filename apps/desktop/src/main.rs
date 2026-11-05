@@ -1,6 +1,7 @@
 mod assets;
 mod bubble;
 mod call;
+mod fullscreen;
 mod handle;
 mod home;
 mod mac;
@@ -113,6 +114,7 @@ pub struct Shell {
     call: Option<(Entity<Call>, Subscription)>,
     home: Option<WindowHandle<Home>>,
     home_pending: bool,
+    quitting: bool,
 }
 
 struct GlobalShell(Entity<Shell>);
@@ -209,9 +211,23 @@ impl Shell {
         cx.notify();
     }
 
+    /// Quitting mid-call: leave properly, or the server shows a ghost of you
+    /// in the room for another 20 s. Resolves once it has heard you leave.
+    fn leave_for_quit(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<impl Future<Output = ()> + use<>> {
+        self.quitting = true;
+        let call = self.call()?;
+        Some(call.update(cx, |call, cx| {
+            call.leave(cx);
+            call.closed()
+        }))
+    }
+
     /// Deferred: the home window reads the shell while it's being built.
     fn open_home(&mut self, cx: &mut Context<Self>) {
-        if self.home.is_some() || self.home_pending {
+        if self.home.is_some() || self.home_pending || self.quitting {
             return;
         }
         self.home_pending = true;
@@ -285,9 +301,11 @@ fn main() {
             call: None,
             home: None,
             home_pending: false,
+            quitting: false,
         });
         cx.set_global(GlobalShell(shell.clone()));
         share_picker::bind_keys(cx);
+        fullscreen::bind_keys(cx);
         mac::log_window_events();
 
         shell.update(cx, |shell, cx| match shell.args.room.clone() {
@@ -309,6 +327,18 @@ fn main() {
             let s = shell.read(cx);
             if cx.windows().is_empty() && !s.in_call() && !s.home_pending {
                 cx.quit();
+            }
+        })
+        .detach();
+
+        // GPUI gives this 200 ms; saying goodbye takes a round trip at most.
+        cx.on_app_quit(|cx| {
+            let closed = Shell::global(cx).update(cx, |shell, cx| shell.leave_for_quit(cx));
+            async move {
+                if let Some(closed) = closed {
+                    closed.await;
+                    tracing::info!("left the call before quitting");
+                }
             }
         })
         .detach();

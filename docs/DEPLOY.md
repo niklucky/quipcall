@@ -42,11 +42,11 @@ Guard rails, because the box is shared:
 
 ## Mac app
 
-`deploy/mac/package.sh` builds one app per architecture (Apple Silicon and Intel), ad-hoc signs them and zips them. Two slices in one binary would be about 60 MB, over the 40 MB bundle budget. Release builds have `https://quipcall.com` baked in (`QUIPCALL_SERVER` at build time), and `MACOSX_DEPLOYMENT_TARGET=12.3`, the release ScreenCaptureKit appeared in. Below 10.14.4 the linker would also point the Swift overlay `libswiftCoreMedia` at `@rpath`, and the Intel app wouldn't launch. The script refuses to package a binary that links anything outside macOS.
+`deploy/mac/package.sh` builds one app per architecture (Apple Silicon and Intel), signs them and zips them. Two slices in one binary would be about 60 MB, over the 40 MB bundle budget. Release builds have `https://quipcall.com` baked in (`QUIPCALL_SERVER` at build time), and `MACOSX_DEPLOYMENT_TARGET=12.3`, the release ScreenCaptureKit appeared in. Below 10.14.4 the linker would also point the Swift overlay `libswiftCoreMedia` at `@rpath`, and the Intel app wouldn't launch. The script refuses to package a binary that links anything outside macOS.
 
 Friends install with `curl -fsSL https://quipcall.com/download/install.sh | sh`, which picks the right architecture. A file downloaded with curl isn't quarantined, so Gatekeeper doesn't block the unnotarized app. Downloading the zip in a browser works too, but needs System Settings → Privacy & Security → Open Anyway once.
 
-Ad-hoc signing ties macOS permissions to the exact build: after an update, the app asks for the microphone and camera again, and Screen Recording has to be re-enabled. Notarization (Apple Developer ID) fixes both. It's still open in Stage 7.
+macOS remembers the app's permissions (microphone, camera, Screen Recording) by its signature. Ad-hoc signatures tied them to one exact build, so every update lost them, while System Settings went on showing the old build as allowed. Releases are now signed with a self-signed certificate that stays the same across builds. `deploy/mac/signing.sh` makes it on the first `make mac-app`, in `~/Library/Keychains/quipcall-signing.keychain-db` (no password, not in the keychain search list). **Back that file up**: a new certificate means everyone grants permissions once more. The first release signed this way also needs that once, coming from ad-hoc. The certificate isn't a Developer ID, so a zip downloaded in a browser still needs one manual "Open"; notarization would fix that (Stage 7).
 
 The app logs to `~/Library/Logs/Quipcall/quipcall.log` when started from Finder (the previous run is kept as `quipcall.previous.log`).
 

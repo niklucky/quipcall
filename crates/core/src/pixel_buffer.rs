@@ -7,9 +7,11 @@ use std::ptr::{self, NonNull};
 
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_video::{
-    CVPixelBuffer, CVPixelBufferPool, kCVPixelBufferHeightKey,
-    kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
-    kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
+    CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+    CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+    CVPixelBufferLockFlags, CVPixelBufferPool, CVPixelBufferUnlockBaseAddress,
+    kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
+    kCVPixelBufferMetalCompatibilityKey, kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
     kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVReturnSuccess,
 };
 
@@ -78,5 +80,41 @@ impl PixelBufferPool {
         }
         // SAFETY: a successful Create call transfers ownership.
         Some(unsafe { CFRetained::from_raw(NonNull::new_unchecked(out)) })
+    }
+}
+
+/// Test pattern for the synthetic camera and screen: horizontal bands that
+/// scroll every frame (`n`), so the encoder has real motion, tinted around the
+/// `[cb, cr]` chroma pair. Painted with row fills, so generating costs next to
+/// nothing and measurements show the pipeline, not the pattern.
+pub(crate) fn paint_test_pattern(pixel_buffer: &CVPixelBuffer, n: usize, chroma: [u8; 2]) {
+    let (w, h) = (
+        CVPixelBufferGetWidth(pixel_buffer),
+        CVPixelBufferGetHeight(pixel_buffer),
+    );
+    // SAFETY: the buffer comes from a 420f pool (see `PixelBufferPool`): plane
+    // 0 has `h` rows of at least `w` bytes, plane 1 has `h / 2` rows of at
+    // least `w` bytes (`w / 2` CbCr pairs).
+    unsafe {
+        if CVPixelBufferLockBaseAddress(pixel_buffer, CVPixelBufferLockFlags(0)) != kCVReturnSuccess
+        {
+            return;
+        }
+        let y = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0).cast::<u8>();
+        let y_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
+        let uv = CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1).cast::<u8>();
+        let uv_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
+        for row in 0..h {
+            let luma = ((row + n * 4) / 3) as u8;
+            std::ptr::write_bytes(y.add(row * y_stride), luma, w);
+        }
+        let [cb, cr] = chroma;
+        for row in 0..h / 2 {
+            let line = std::slice::from_raw_parts_mut(uv.add(row * uv_stride), w & !1);
+            let (pairs, _) = line.as_chunks_mut::<2>();
+            let tint = ((row / 45 + n / 30) % 4) as u8 * 24;
+            pairs.fill([cb.saturating_add(tint), cr.saturating_sub(tint)]);
+        }
+        CVPixelBufferUnlockBaseAddress(pixel_buffer, CVPixelBufferLockFlags(0));
     }
 }
