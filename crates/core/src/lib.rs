@@ -34,7 +34,7 @@ pub use permissions::{Access, MediaDevice};
 pub use quipcall_protocol as protocol;
 pub use screen::{ContentMode, ScreenSharePreset, SourceId};
 #[cfg(target_os = "macos")]
-pub use screen_mac::{NoPermission, ShareSource, Thumbnail, list_sources, own_window};
+pub use screen_mac::{NoPermission, ShareSource, ShareSourceUpdate, Thumbnail, own_window};
 pub use video::{FrameSink, VideoSubscription};
 
 /// Stable identifier of a remote track inside the UI.
@@ -328,6 +328,35 @@ impl Engine {
             }
             let _ = events.send(Event::CameraChanged { enabled: false }).await;
         });
+    }
+
+    /// Lists share choices first, then delivers previews as they arrive. Native
+    /// screen APIs may block even before calling their completion handlers, so
+    /// keep the entire operation off both the UI and media executor threads.
+    /// Dropping the receiver cancels loading; a new picker gets its own stream.
+    #[cfg(target_os = "macos")]
+    pub fn screen_sources(
+        &self,
+        thumb_width: u32,
+    ) -> async_channel::Receiver<anyhow::Result<ShareSourceUpdate>> {
+        let (tx, rx) = async_channel::bounded(8);
+        let runtime = self.rt().handle().clone();
+        self.rt().spawn_blocking(move || {
+            crate::autorelease_pool(|| {
+                runtime.block_on(async {
+                    tokio::select! {
+                        biased;
+                        _ = tx.closed() => {},
+                        result = screen_mac::list_sources(thumb_width, &tx) => {
+                            if let Err(error) = result {
+                                let _ = tx.send(Err(error)).await;
+                            }
+                        }
+                    }
+                });
+            });
+        });
+        rx
     }
 
     /// Share `source` (required on macOS, where our own picker chooses it).
