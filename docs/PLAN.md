@@ -134,7 +134,7 @@ Started early (2026-11-03), ahead of Stages 3–6: there are no accounts yet, so
 - [ ] Updates keep their permissions: releases are signed with one self-signed certificate (`deploy/mac/signing.sh`), so macOS's requirement for the app stays the same across builds. *Built; needs two releases in a row to confirm.*
 - [ ] Notarization (Apple Developer ID), so a downloaded zip opens without the manual "Open"; simple update check
 - [ ] Invite codes for friends
-- [x] ~~Fix: crash on join on Macs with a Touch Bar~~ — floating windows are created borderless (patched GPUI) instead of switching style afterwards
+- [x] ~~Fix: crash on join on Macs with a Touch Bar~~ — floating windows are created borderless (patched GPUI) instead of switching style afterwards; the accessibility content view also keeps its class when home closes so Touch Bar observers survive the transition
 - [ ] Bug: on a friend's Intel Mac (macOS 15.6, two displays, Touch Bar) all call windows vanished after he started a screen share, though the app kept running and the share worked. Not reproducible here; the app now logs window visibility, waiting for a log
 
 **Done when:** friends install the app, sign up, and call each other over the internet, including through strict NAT.
