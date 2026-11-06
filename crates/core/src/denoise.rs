@@ -32,6 +32,10 @@ pub const FRAME: usize = 480;
 
 /// A Mac that needs longer than this per 10 ms frame keeps WebRTC's suppressor.
 const MAX_FRAME_COST: Duration = Duration::from_millis(3);
+/// A gap in the microphone's frames this long means it was muted or a new
+/// call started: the model restarts. Frames normally come every 10 ms, at
+/// worst a few at once.
+const RESTART_AFTER: Duration = Duration::from_millis(100);
 
 /// What cleans the microphone during a call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,9 +75,9 @@ impl Strength {
         input_gain_db: 0.0,
     };
 
-    /// What calls use: the voice stays as steady as with WebRTC's own
-    /// suppressor; barks, rustles and clicks drop by 8-12 dB while you talk
-    /// and 15-30 dB in pauses. `dev/denoise-eval.py` compares the options.
+    /// What calls use: noise drops by at most 12 dB while you talk and by up
+    /// to 30 dB in pauses; the voice dips a little more than with WebRTC's
+    /// own suppressor. `dev/denoise-eval.py` compares the options.
     pub const CALLS: Strength = Strength {
         limit_db: Some(12.0),
         pause_limit_db: Some(30.0),
@@ -81,28 +85,38 @@ impl Strength {
         input_gain_db: 12.0,
     };
 
-    /// [`Self::CALLS`], or the limits in `QUIPCALL_DENOISE_LIMIT`: `none`,
-    /// `<dB>`, or `<dB>/<dB in pauses>`.
+    /// [`Self::CALLS`], or the limits in `QUIPCALL_DENOISE_LIMIT`.
     fn for_calls() -> Strength {
         let Ok(value) = std::env::var("QUIPCALL_DENOISE_LIMIT") else {
             return Self::CALLS;
         };
-        if value == "none" {
-            return Strength {
-                limit_db: None,
-                pause_limit_db: None,
-                ..Self::CALLS
-            };
-        }
-        let mut parts = value.split('/').map(str::parse::<f32>);
-        match (parts.next(), parts.next()) {
-            (Some(Ok(limit)), pause) => Strength {
-                limit_db: Some(limit),
-                pause_limit_db: pause.and_then(Result::ok),
+        match parse_limits(&value) {
+            Some((limit_db, pause_limit_db)) => Strength {
+                limit_db,
+                pause_limit_db,
                 ..Self::CALLS
             },
-            _ => Self::CALLS,
+            None => {
+                tracing::warn!(value, "QUIPCALL_DENOISE_LIMIT: not none, <dB> or <dB>/<dB>");
+                Self::CALLS
+            }
         }
+    }
+}
+
+/// `none`, `<dB>` or `<dB>/<dB in pauses>`, each finite and not negative.
+fn parse_limits(value: &str) -> Option<(Option<f32>, Option<f32>)> {
+    if value == "none" {
+        return Some((None, None));
+    }
+    let db = |s: &str| {
+        s.parse::<f32>()
+            .ok()
+            .filter(|db| db.is_finite() && *db >= 0.0)
+    };
+    match value.split_once('/') {
+        None => Some((Some(db(value)?), None)),
+        Some((limit, pause)) => Some((Some(db(limit)?), Some(db(pause)?))),
     }
 }
 
@@ -120,7 +134,22 @@ pub struct Denoiser {
     quiet_frames: u32,
     /// The limit in force, between the voice's and the pause's (dB).
     limit_db: f32,
+    /// Frames of output still to silence after [`Denoiser::restart`].
+    stale_frames: usize,
+    /// For [`HISS`].
+    seed: u32,
 }
+
+/// DeepFilterNet skips frames quieter than this (mean square in the model,
+/// -70 dBFS) and leaves its state as it was. After stretches of that (digital
+/// silence: a hardware mute, a studio recording), it held a quiet voice down
+/// for seconds. Such frames get a faint hiss instead ([`HISS`]), which keeps
+/// the model running; it removes the hiss again. A real microphone's own
+/// noise sits far above this, so calls otherwise never see the hiss: under a
+/// voice, it made the model trim the voice.
+const SILENT: f32 = 1e-7;
+/// The hiss, as the peak of uniform noise: -60 dBFS in the model.
+const HISS: f32 = 1.73e-3;
 
 /// The model hears a voice when it rates a frame's speech-to-noise ratio
 /// above this (dB). In noisy pauses it rarely does: 90% of frames sit below
@@ -162,6 +191,8 @@ impl Denoiser {
             strength: Strength::MODEL_DEFAULT,
             quiet_frames: 0,
             limit_db: 0.0,
+            stale_frames: 0,
+            seed: 0x2545_f491,
         })
     }
 
@@ -176,12 +207,25 @@ impl Denoiser {
         self.quiet_frames = 0;
         self.set_limit(strength.limit_db);
         self.df.min_db_thresh = strength.noise_only_below_db;
-        let gain = 10f32.powf(strength.input_gain_db / 20.0);
+        let gain_db = strength.input_gain_db;
+        let gain = 10f32.powf(if gain_db.is_finite() { gain_db } else { 0.0 } / 20.0);
         self.scale_in = gain / 32768.0;
         self.scale_out = 32768.0 / gain;
     }
 
+    /// Start over after a gap in the audio (unmuting, a new call). The model
+    /// still holds the end of the last stretch for [`Self::delay`], so that
+    /// much output is silenced; its other state settles within a second.
+    /// (DeepFilterNet's own `init` would leave its buffers misaligned.)
+    pub fn restart(&mut self) {
+        self.stale_frames = self.delay().div_ceil(FRAME) + 1;
+        self.quiet_frames = 0;
+        self.set_limit(self.strength.limit_db);
+    }
+
+    /// `None`, or a value that isn't finite: no limit.
     fn set_limit(&mut self, limit_db: Option<f32>) {
+        let limit_db = limit_db.filter(|db| db.is_finite()).map(|db| db.max(0.0));
         self.limit_db = limit_db.unwrap_or(f32::INFINITY);
         self.df.atten_lim = limit_db.map(|db| 10f32.powf(-db / 20.0));
     }
@@ -211,12 +255,26 @@ impl Denoiser {
     /// speech-to-noise ratio (dB).
     pub fn process(&mut self, samples: &mut [f32]) -> anyhow::Result<f32> {
         anyhow::ensure!(samples.len() == FRAME, "frame of {} samples", samples.len());
+        let mut power = 0.0;
         for (dst, src) in self.input.iter_mut().zip(samples.iter()) {
             *dst = src * self.scale_in;
+            power += *dst * *dst;
+        }
+        if power / (FRAME as f32) < SILENT {
+            for dst in self.input.iter_mut() {
+                self.seed ^= self.seed << 13;
+                self.seed ^= self.seed >> 17;
+                self.seed ^= self.seed << 5;
+                *dst += (self.seed as f32 / u32::MAX as f32 * 2.0 - 1.0) * HISS;
+            }
         }
         let lsnr = self.df.process(self.input.view(), self.output.view_mut())?;
         for (dst, src) in samples.iter_mut().zip(self.output.iter()) {
             *dst = (src * self.scale_out).clamp(-32768.0, 32767.0);
+        }
+        if self.stale_frames > 0 {
+            self.stale_frames -= 1;
+            samples.fill(0.0);
         }
         self.follow_pauses(lsnr);
         Ok(lsnr)
@@ -235,6 +293,10 @@ struct Live {
     /// The WebRTC audio processor this filter serves; a second one passes
     /// through rather than mixing two streams into one model state.
     stream: usize,
+    /// When the last frame came; a longer gap restarts the model.
+    last_frame: Option<Instant>,
+    /// The model failed; frames pass through until `prepare` frees it.
+    failed: bool,
     warned: bool,
     frames: u64,
     levels: Levels,
@@ -249,7 +311,13 @@ pub fn prepare() -> Mode {
     let mode = match std::env::var("QUIPCALL_DENOISE").as_deref() {
         Ok("webrtc") => Mode::WebRtc,
         Ok("off") => Mode::Off,
-        _ if UNAVAILABLE.load(Ordering::Relaxed) => Mode::WebRtc,
+        _ if UNAVAILABLE.load(Ordering::Relaxed) => {
+            // A model that failed during a call is freed here, off the audio
+            // thread.
+            let failed = FILTER.lock().take();
+            drop(failed);
+            Mode::WebRtc
+        }
         _ => {
             // The audio thread only try-locks, so holding this while loading
             // just lets frames through unfiltered.
@@ -265,8 +333,10 @@ pub fn prepare() -> Mode {
             }
             match filter.as_mut() {
                 Some(live) => {
-                    // A new call may bring a new audio processor.
+                    // A new call may bring a new audio processor, and the
+                    // model still holds the end of the last call.
                     live.stream = 0;
+                    live.last_frame = None;
                     let strength = Strength::for_calls();
                     live.denoiser.set_strength(strength);
                     tracing::info!(?strength, "noise suppression strength");
@@ -318,6 +388,8 @@ fn load() -> anyhow::Result<Live> {
     Ok(Live {
         denoiser,
         stream: 0,
+        last_frame: None,
+        failed: false,
         warned: false,
         frames: 0,
         busy: Duration::ZERO,
@@ -381,7 +453,7 @@ unsafe extern "C" fn process(
     let Some(mut filter) = FILTER.try_lock() else {
         return;
     };
-    let Some(live) = filter.as_mut() else {
+    let Some(live) = filter.as_mut().filter(|live| !live.failed) else {
         return;
     };
     let stream = stream as usize;
@@ -405,16 +477,26 @@ unsafe extern "C" fn process(
     let first = unsafe { std::slice::from_raw_parts_mut(channels[0], num_frames) };
     live.levels.add(first);
     let start = Instant::now();
+    // Frames stop while muted (WebRTC skips this hook) and between calls.
+    if live
+        .last_frame
+        .is_none_or(|last| start.duration_since(last) > RESTART_AFTER)
+    {
+        live.denoiser.restart();
+    }
+    live.last_frame = Some(start);
     let failure = match catch_unwind(AssertUnwindSafe(|| live.denoiser.process(first))) {
         Ok(Ok(_)) => None,
         Ok(Err(e)) => Some(format!("{e:#}")),
         Err(_) => Some("the model panicked".into()),
     };
     if let Some(failure) = failure {
-        // Unfiltered for the rest of this call; later calls use WebRTC's.
+        // Unfiltered for the rest of this call (its track has WebRTC's
+        // suppressor off); later calls use WebRTC's. Freeing the model here
+        // could take long enough to drop audio, so `prepare` does it.
         tracing::error!("noise suppression stopped: {failure}");
         UNAVAILABLE.store(true, Ordering::Relaxed);
-        *filter = None;
+        live.failed = true;
         return;
     }
     for &other in &channels[1..] {
@@ -451,5 +533,22 @@ unsafe extern "C" fn release(stream: *const c_void) {
         && live.stream == stream as usize
     {
         live.stream = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_limits;
+
+    #[test]
+    fn limits_from_the_environment() {
+        assert_eq!(parse_limits("none"), Some((None, None)));
+        assert_eq!(parse_limits("18"), Some((Some(18.0), None)));
+        assert_eq!(parse_limits("15/30"), Some((Some(15.0), Some(30.0))));
+        for bad in [
+            "", "-3", "NaN", "inf", "12/", "/30", "12/x", "12/30/40", "12/-1",
+        ] {
+            assert_eq!(parse_limits(bad), None, "{bad:?}");
+        }
     }
 }

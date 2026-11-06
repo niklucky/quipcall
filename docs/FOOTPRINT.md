@@ -135,6 +135,8 @@ The hook itself still needs a real call: while it runs, the log shows `noise sup
 
 ## 2026-11-06 — Noise suppression, round 2: volume drops
 
+*Scored with the first version of the bench; round 4 re-scores it after review.*
+
 A real call found our voice "slightly worse than Telemost, as if we try too hard; mostly volume drops". The test bench (`python3 dev/denoise-eval.py`) now uses real voices (LibriVox: English and Russian, male and female) and 12 noise recordings. It builds 22 scenes: noises, a quiet and a loud speaker, a bark in a pause, two people talking at once, and the other side's voice echoing from laptop speakers. It runs every scene through WebRTC's audio processing set up as in a call, with the filter in its hook (`quipcall_test_apm_create` in the webrtc-sys patch), so gain control and echo cancellation are in the measurement.
 
 What caused the drops: **DeepFilterNet takes a quiet voice for noise.** Through the model alone (18 dB limit, no gain control), voice level change and PESQ by speaking level:
@@ -171,6 +173,8 @@ Cost is unchanged: 0.40 ms per 10 ms frame for the model, plus ~0.05 ms for the 
 
 ## 2026-11-06 — Noise suppression, round 3: deeper in pauses
 
+*Scored with the first version of the bench; round 4 re-scores it after review.*
+
 Second real call: "sound is better", but hard rustling stayed faintly audible. In a pause nothing masks the rustle and no voice can be lost, so the limit now deepens there. The model's own speech-to-noise estimate tells voice from pause: in noisy pauses 90% of frames sit below -11 dB. After 0.3 s with no frame above -5 dB, the limit glides from 12 to 30 dB at 0.5 dB per frame. It returns to 12 dB at the next voiced frame. Simulated over the scenes, about 4% of speech frames get the pause limit (mostly where loud rustling buries the voice) and about two thirds of noisy-pause time does.
 
 | | 12 dB (round 2) | 18 dB | **12 dB, 30 dB in pauses** | 15 dB, 30 dB in pauses |
@@ -184,3 +188,35 @@ Second real call: "sound is better", but hard rustling stayed faintly audible. I
 | PESQ | 2.62 | 2.58 | **2.63** | 2.61 |
 
 The voice is as before, and noise in pauses drops twice as far. The bench doesn't score the trade-off: with steady noise (a fan), the background now rises while you talk and fades in pauses. The fade is gradual, and the rise is masked by the voice.
+
+## 2026-11-06 — Noise suppression, round 4: the bench, corrected
+
+Two reviews found flaws in the bench that had flattered some chains:
+- Gain control was still settling when scoring began.
+- The noise average counted scenes without noise.
+- One voice's correlation peak set every scene's delay.
+- Double talk was compared with a different passage.
+
+Now the warm-up is 10 s. Delays come from phase-only correlation and must agree across all four clean voices. Noise is only scored where there is noise. Double talk is compared with the same words without the echo.
+
+It also turned up a model behaviour. DeepFilterNet skips frames below -70 dBFS (in the model) without updating its state, and after stretches of such digital silence it held a quiet voice down for ~12 s (`quiet-ru_f`: +18 dB where RNNoise reaches +29). Those frames now get a faint hiss (-60 dBFS in the model), which keeps it running. A real microphone's own noise is far above that, so calls are otherwise unchanged; hissing every frame instead made the model trim voices.
+
+The LibriVox voices have studio-silent pauses. Once the model hears any floor there, it trims some of a clean voice, so these clean-speech scores (lower than before) are the realistic ones. All 23 scenes:
+
+| | WebRTC | DFN as first shipped | 12 dB | **12 dB, 30 in pauses (calls)** | 15/30 | 18 dB | RNNoise + AGC2 |
+|---|---|---|---|---|---|---|---|
+| Voice dips (dB) | 2.6 | 6.0 | 4.0 | **4.1** | 4.6 | 4.9 | 2.8 |
+| Voice > 6 dB below its level | 2.7% | 10.5% | 4.2% | **5.1%** | 7.4% | 9.1% | 4.3% |
+| Noise cut in pauses (mean) | 10.4 dB | 75.8 dB | 10.8 dB | **20.7 dB** | 22.0 dB | 16.2 dB | 20.0 dB |
+| Chips bag | 12.6 dB | 82.8 dB | 12.3 dB | **25.7 dB** | 25.6 dB | 17.8 dB | 5.8 dB |
+| Clicks | 16.3 dB | 81.2 dB | 17.1 dB | **27.8 dB** | 30.5 dB | 22.7 dB | 15.6 dB |
+| Bark | 10.5 dB | 61.2 dB | 7.5 dB | **10.6 dB** | 11.5 dB | 11.8 dB | 11.8 dB |
+| PESQ (mean) | 2.60 | 1.98 | 2.37 | **2.40** | 2.35 | 2.28 | 2.49 |
+| PESQ, clean female Russian voice | 4.16 | 1.82 | 2.88 | **2.93** | 2.55 | 2.23 | 3.53 |
+| STOI (mean) | 0.89 | 0.82 | 0.87 | **0.87** | 0.86 | 0.85 | 0.87 |
+| Own voice while the other side talks | -4.6 dB | -8.0 dB | -5.8 dB | **-5.1 dB** | -4.8 dB | -6.2 dB | -2.0 dB |
+
+- Against the first shipped version, the calls setting halves the dips and dropouts, and takes 21 dB out of pauses where that removed nearly everything (76 dB). Against WebRTC's suppressor, it takes twice as much out of pauses and far more chips and clicks, at the cost of 1.5 dB more dipping and lower clean-speech quality.
+- Double talk is no longer the outlier it seemed: with the same words as control, the voice drops 5 dB (WebRTC's: 4.6).
+- RNNoise keeps clean speech best but lets chips through, and in the chips scene it mutes the voice outright.
+- The bench scores DeepFilterNet's clean speech below what the second real call reported ("sound is better"). The next call settles which to trust.

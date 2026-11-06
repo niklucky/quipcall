@@ -14,16 +14,19 @@ The first run makes a Python environment in target/denoise-eval/venv (numpy,
 scipy, pesq, pystoi) and downloads about 13 MB of recordings, each checked
 against its hash.
 
-Scores, over the part after a 4 s warm-up (gain control settles):
+Scores, over the part after a 10 s warm-up (gain control settles, even for
+a quiet voice), with each chain's delay measured on the clean scenes:
   level   voice loudness against the clean voice, dB (median)
   dips    how far the voice falls in its quietest 10%, dB: the "volume drops"
           (only where the voice is louder than the noise)
   drops   share of the voice more than 6 dB below its median level, %
-  noise   noise cut in pauses, relative to the voice, dB
+  noise   noise cut where nobody talks, relative to the voice, dB (scenes
+          with noise, where there is some)
   pesq    speech quality against the clean voice (wideband, 1-4.6)
   stoi    intelligibility against the clean voice (0-1)
   after   bark scene: voice level after a loud bark against before, dB
-  overlap echo scene: own voice while the other side talks against alone, dB
+  overlap echo scene: own voice while the other side talks, against the
+          same words in the same scene without the echo, dB
   echo    echo scene: echo left while only the other side talks, dB below voice
 
 Voices (LibriVox, public domain, archive.org/details/<item>):
@@ -58,7 +61,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parent.parent
 DIR = ROOT / "target/denoise-eval"
 RATE = 48000
-WARM = 4 * RATE
+WARM = 10 * RATE
 UA = {"User-Agent": "quipcall-denoise-eval/0.2"}
 
 ARCHIVE = "https://archive.org/download/"
@@ -121,11 +124,16 @@ SCENES = {
     "bark_then_talk-en_f": ("en_f", NORMAL, "bark", None),
     "two_voices-en_m": ("en_m", NORMAL, "en_f2", -6),
     "double_talk-ru_f": ("ru_f", NORMAL, "en_m", None),
+    # The same without the echo, to compare it with.
+    "double_talk_ref-ru_f": ("ru_f", NORMAL, None, None),
 }
+# Scenes whose `noise` is something else to keep or remove: not noise.
+NOT_NOISE = ("two_voices", "double_talk", "double_talk_ref")
+REQUIRED = ("numpy", "scipy", "pesq", "pystoi")
 
 
 def main():
-    ensure_numpy()
+    ensure_deps()
     chains = sys.argv[1] if len(sys.argv) > 1 else None
     sources = fetch()
     build(sources)
@@ -136,20 +144,23 @@ def main():
     print(f"\nListen: {DIR / 'out'}/<scene>/  (mic.wav, clean.wav, <chain>.wav)")
 
 
-def ensure_numpy():
-    """Re-run in target/denoise-eval/venv unless numpy is here."""
-    try:
-        import numpy  # noqa: F401
+def ensure_deps():
+    """Re-run in target/denoise-eval/venv, installing what it lacks."""
+    import importlib.util
+    missing = [m for m in REQUIRED if importlib.util.find_spec(m) is None]
+    if not missing:
         return
-    except ImportError:
-        pass
     venv = DIR / "venv"
+    if Path(sys.prefix).resolve() == venv.resolve():
+        if os.environ.get("QUIPCALL_EVAL_INSTALLED"):
+            raise SystemExit(f"{venv}: still missing {', '.join(missing)} after installing")
+        print(f"Installing {' '.join(REQUIRED)} into {venv}...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", *REQUIRED], check=True)
+        os.environ["QUIPCALL_EVAL_INSTALLED"] = "1"
+        os.execv(sys.executable, [sys.executable, *sys.argv])
     python = venv / "bin/python"
     if not python.exists():
-        print("Making target/denoise-eval/venv (numpy scipy pesq pystoi)...")
         subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
-        subprocess.run([str(venv / "bin/pip"), "install", "-q", "numpy", "scipy", "pesq", "pystoi"],
-                       check=True)
     os.execv(str(python), [str(python), *sys.argv])
 
 
@@ -221,12 +232,12 @@ def at_level(x, dbfs):
 
 
 def speech(sources, voice, dbfs):
-    """4 s of warm-up, then three 5 s turns with pauses between them."""
+    """10 s of warm-up, then three 5 s turns with pauses between them."""
     import numpy as np
     v = sources[voice]
     sec = lambda a, b: v[int(a * RATE):int(b * RATE)]  # noqa: E731
     gap = np.zeros(int(1.5 * RATE), np.float32)
-    parts = [sec(30, 34), sec(36, 41), gap, sec(42, 47), gap, sec(48, 53)]
+    parts = [sec(20, 30), sec(36, 41), gap, sec(42, 47), gap, sec(48, 53)]
     return at_level(np.concatenate(parts), dbfs)
 
 
@@ -279,9 +290,9 @@ def build(sources):
             e = np.convolve(bark ** 2, np.ones(RATE // 2), "same")
             loud = bark[max(0, e.argmax() - RATE // 2):][: int(1.5 * RATE)]
             gap = np.zeros(int(2.5 * RATE), np.float32)
-            parts = [v[30 * RATE:34 * RATE], v[36 * RATE:42 * RATE], gap, v[42 * RATE:48 * RATE]]
+            parts = [v[20 * RATE:30 * RATE], v[36 * RATE:42 * RATE], gap, v[42 * RATE:48 * RATE]]
             clean = at_level(np.concatenate(parts), level)
-            bark_at = 10 * RATE + RATE // 2
+            bark_at = WARM + 6 * RATE + RATE // 2
             mic = clean.copy()
             mic[bark_at:bark_at + len(loud)] += loud / np.abs(loud).max() * 32768 * 0.5
             meta["event"] = [bark_at, bark_at + len(loud)]
@@ -292,28 +303,29 @@ def build(sources):
             other = np.roll(other, RATE)
             clean = clean + mix(clean, other, against)
             mic = clean.copy()
-        elif kind == "double_talk":
+        elif kind in ("double_talk", "double_talk_ref"):
             # The other side's voice from the speakers, echoing into the
-            # microphone, then both talking at once.
-            rng = np.random.default_rng(3)
-            far_voice = at_level(sources[extra][60 * RATE:80 * RATE], -20)
+            # microphone, then both talking at once. The near voice is silent
+            # while only the far side talks (6 s).
             n = len(clean)
-            far = np.zeros(n, np.float32)
-            far[WARM:WARM + 14 * RATE] = far_voice[: 14 * RATE]
-            # Laptop speaker to microphone: direct sound after 40 ms (the
-            # audio path's delay), then a 0.25 s room tail about 10 dB weaker.
-            t = np.arange(int(0.25 * RATE)) / RATE
-            tail = rng.standard_normal(len(t)) * np.exp(-6.9 * t / 0.25) * 0.012
-            rir = np.concatenate([np.zeros(int(0.04 * RATE)), [1.0], tail])
-            echo = np.convolve(far, rir)[:n]
-            # Near voice silent while only the far side talks (6 s).
             clean = clean.copy()
             clean[WARM:WARM + 6 * RATE] = 0
-            echo = mix(clean, echo, -6)
-            mic = clean + echo
+            mic = clean.copy()
             meta["far_only"] = [WARM, WARM + 6 * RATE]
             meta["both"] = [WARM + 6 * RATE, WARM + 14 * RATE]
             meta["near_only"] = [WARM + 14 * RATE, n]
+            if kind == "double_talk":
+                rng = np.random.default_rng(3)
+                far_voice = at_level(sources[extra][60 * RATE:80 * RATE], -20)
+                far = np.zeros(n, np.float32)
+                far[WARM:WARM + 14 * RATE] = far_voice[: 14 * RATE]
+                # Laptop speaker to microphone: direct sound after 40 ms (the
+                # audio path's delay), then a 0.25 s room tail ~9 dB weaker.
+                t = np.arange(int(0.25 * RATE)) / RATE
+                tail = rng.standard_normal(len(t)) * np.exp(-6.9 * t / 0.25) * 0.012
+                rir = np.concatenate([np.zeros(int(0.04 * RATE)), [1.0], tail])
+                mic = clean + mix(clean, np.convolve(far, rir)[:n], -6)
+                meta["reference"] = name.replace("double_talk", "double_talk_ref")
         elif extra:
             mic = clean + mix(clean, noise(sources, extra, len(clean)), against)
         else:
@@ -381,26 +393,37 @@ def levels(x):
 
 
 def lag(clean, out):
-    """Samples by which `out` trails `clean` (≤ 100 ms)."""
+    """Samples by which `out` trails `clean` (≤ 100 ms), by phase-only
+    cross-correlation: plain correlation of speech can peak a pitch period
+    off the true delay."""
     import numpy as np
-    a, b = clean[WARM:WARM + 6 * RATE], out[WARM:WARM + 6 * RATE + RATE // 10]
-    corr = [np.dot(a, b[k:k + len(a)]) for k in range(0, RATE // 10)]
-    return int(np.argmax(corr))
+    a, b = clean[WARM:], out[WARM:len(clean)]
+    n = 1 << (len(a) + len(b)).bit_length()
+    cross = np.fft.rfft(b, n) * np.conj(np.fft.rfft(a, n))
+    cc = np.fft.irfft(cross / (np.abs(cross) + 1e-9), n)
+    return int(np.argmax(cc[:RATE // 10]))
+
+
+def chain_lags(chains):
+    """Each chain's delay: the median over the clean scenes, which must agree."""
+    import numpy as np
+    clean = [s for s in SCENES if s.startswith("clean-")]
+    lags = {}
+    for chain in chains:
+        found = [lag(read_pcm(DIR / f"scenes/{s}/clean.pcm"), read_wav(DIR / f"out/{s}/{chain}.wav"))
+                 for s in clean]
+        lags[chain] = int(np.median(found))
+        if max(found) - min(found) > RATE // 1000:
+            print(f"warning: {chain} delay differs between voices: {found} samples")
+    return lags
 
 
 def score(timing):
     import numpy as np
-    try:
-        from pesq import pesq
-        from pystoi import stoi
-        from scipy.signal import resample_poly
-    except ImportError:
-        pesq = None
-    chains = list(dict.fromkeys(t["chain"] for t in timing))
-    lags = {}
-    for chain in chains:
-        clean = read_pcm(DIR / "scenes/clean-en_f/clean.pcm")
-        lags[chain] = lag(clean, read_wav(DIR / f"out/clean-en_f/{chain}.wav"))
+    from pesq import pesq
+    from pystoi import stoi
+    from scipy.signal import resample_poly
+    lags = chain_lags(list(dict.fromkeys(t["chain"] for t in timing)))
     results = []
     for t in timing:
         scene, chain = t["scene"], t["chain"]
@@ -424,8 +447,10 @@ def score(timing):
              "level": level,
              "dips": level - np.percentile(gain[talking], 10),
              "drops": 100 * np.mean(gain[talking] < level - 6)}
-        if SCENES[scene][2] and pause.sum() > 10:
-            r["noise"] = level + np.median(mic_l[pause]) - np.median(out_l[pause])
+        # Where nobody talks but there is noise to hear.
+        quiet = pause & (levels(mic - clean) > peak - 45)
+        if SCENES[scene][2] and scene.split("-")[0] not in NOT_NOISE and quiet.sum() > 10:
+            r["noise"] = level + np.median(mic_l[quiet]) - np.median(out_l[quiet])
         win = lambda a, b: slice(a // WIN, b // WIN)  # noqa: E731
         if "event" in meta:
             a, b = meta["event"]
@@ -435,25 +460,26 @@ def score(timing):
             after[: b // WIN] = False
             after[(b + 3 * RATE) // WIN:] = False
             r["after"] = np.median(gain[after]) - np.median(gain[before])
-        if "both" in meta:
+        if "reference" in meta:
+            # The same words, same chain, without the echo.
+            ref_out = read_wav(DIR / f"out/{meta['reference']}/{chain}.wav")[lags[chain]:][:n]
             both = np.zeros_like(talking)
             both[win(*meta["both"])] = True
+            r["overlap"] = np.median((out_l - levels(ref_out))[talking & both])
             alone = np.zeros_like(talking)
             alone[win(*meta["near_only"])] = True
-            r["overlap"] = np.median(gain[talking & both]) - np.median(gain[talking & alone])
             far_only = np.zeros_like(talking)
             a, b = meta["far_only"]
             far_only[win(a + 2 * RATE, b)] = True
             voice = np.median(out_l[talking & alone])
             r["echo"] = np.median(out_l[far_only]) - voice
-        if pesq:
-            ref16 = resample_poly(clean[meta["start"]:] / 32768, 1, 3)
-            out16 = resample_poly(out[meta["start"]:] / 32768, 1, 3)
-            try:
-                r["pesq"] = pesq(16000, ref16, out16, "wb")
-            except Exception:
-                pass
-            r["stoi"] = stoi(clean[meta["start"]:], out[meta["start"]:], RATE)
+        ref16 = resample_poly(clean[meta["start"]:] / 32768, 1, 3)
+        out16 = resample_poly(out[meta["start"]:] / 32768, 1, 3)
+        try:
+            r["pesq"] = pesq(16000, ref16, out16, "wb")
+        except Exception as e:
+            print(f"warning: no PESQ for {scene} / {chain}: {e}")
+        r["stoi"] = stoi(clean[meta["start"]:], out[meta["start"]:], RATE)
         results.append({k: (round(float(v), 3) if isinstance(v, (float, np.floating)) else v)
                         for k, v in r.items()})
     return results

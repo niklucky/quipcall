@@ -245,12 +245,13 @@ impl Shell {
 /// Logs go to the terminal, or to ~/Library/Logs/Quipcall/quipcall.log when
 /// started from Finder. Each launch starts a fresh file; the last one is kept.
 fn init_logging() {
-    // DeepFilterNet warns of "clipping" on every frame above full scale. Our
-    // input gain puts loud voices there on purpose, and the model works in
-    // floating point, so nothing clips.
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        "quipcall_desktop=debug,quipcall_core=debug,livekit=info,df=error,warn".into()
-    });
+    // DeepFilterNet warns of "clipping" on every frame above full scale, from
+    // the audio thread. Our input gain puts loud voices there on purpose, and
+    // the model works in floating point, so nothing clips. Silenced whatever
+    // RUST_LOG says.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "quipcall_desktop=debug,quipcall_core=debug,livekit=info,warn".into())
+        .add_directive("df=error".parse().expect("valid directive"));
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
     let file = if std::io::stderr().is_terminal() {
         None
