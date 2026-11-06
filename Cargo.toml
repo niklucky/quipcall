@@ -16,6 +16,11 @@ quipcall-core = { path = "crates/core" }
 # Dependencies (libwebrtc glue, GPUI, yuv conversion) are painfully slow unoptimized.
 opt-level = 2
 
+[profile.dev.package.tract-core]
+# Its debug-only graph check rejects DeepFilterNet's model ("duplicate name"),
+# so debug builds couldn't load it and fell back to WebRTC's suppressor.
+debug-assertions = false
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

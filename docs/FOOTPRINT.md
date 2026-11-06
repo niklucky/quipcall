@@ -191,32 +191,36 @@ The voice is as before, and noise in pauses drops twice as far. The bench doesn'
 
 ## 2026-11-06 — Noise suppression, round 4: the bench, corrected
 
-Two reviews found flaws in the bench that had flattered some chains:
-- Gain control was still settling when scoring began.
+Two rounds of review found flaws in the bench that had flattered some chains:
+- Gain control and the model were still settling when scoring began.
 - The noise average counted scenes without noise.
 - One voice's correlation peak set every scene's delay.
-- Double talk was compared with a different passage.
+- Double talk was compared with a different passage, and then with a control that also dropped the far side's playback.
 
-Now the warm-up is 10 s. Delays come from phase-only correlation and must agree across all four clean voices. Noise is only scored where there is noise. Double talk is compared with the same words without the echo.
+The warm-up is now 40 s: the same 10 s of speech four times, after which a quiet voice's level holds steady. Delays come from phase-only correlation and must agree across all four clean voices. Noise is only scored where there is noise. Double talk is compared with the same words, the far side playing but not echoing.
 
-It also turned up a model behaviour. DeepFilterNet skips frames below -70 dBFS (in the model) without updating its state, and after stretches of such digital silence it held a quiet voice down for ~12 s (`quiet-ru_f`: +18 dB where RNNoise reaches +29). Those frames now get a faint hiss (-60 dBFS in the model), which keeps it running. A real microphone's own noise is far above that, so calls are otherwise unchanged; hissing every frame instead made the model trim voices.
+It also turned up two model behaviours:
+- **Digital silence.** DeepFilterNet skips frames below -70 dBFS (in the model) without updating its state, and after stretches of such digital silence it held a quiet voice down for ~12 s. Those frames now get a faint hiss (-60 dBFS RMS in the model), which keeps it running. A real microphone's own noise is far above that, so calls are otherwise unchanged; hissing every frame instead made the model trim voices.
+- **Debug builds.** tract's debug-only graph check rejects DeepFilterNet's model, so debug builds (`make desktop`) silently fell back to WebRTC's suppressor. Its debug assertions are now off (`Cargo.toml`).
 
 The LibriVox voices have studio-silent pauses. Once the model hears any floor there, it trims some of a clean voice, so these clean-speech scores (lower than before) are the realistic ones. All 23 scenes:
 
 | | WebRTC | DFN as first shipped | 12 dB | **12 dB, 30 in pauses (calls)** | 15/30 | 18 dB | RNNoise + AGC2 |
 |---|---|---|---|---|---|---|---|
-| Voice dips (dB) | 2.6 | 6.0 | 4.0 | **4.1** | 4.6 | 4.9 | 2.8 |
-| Voice > 6 dB below its level | 2.7% | 10.5% | 4.2% | **5.1%** | 7.4% | 9.1% | 4.3% |
-| Noise cut in pauses (mean) | 10.4 dB | 75.8 dB | 10.8 dB | **20.7 dB** | 22.0 dB | 16.2 dB | 20.0 dB |
-| Chips bag | 12.6 dB | 82.8 dB | 12.3 dB | **25.7 dB** | 25.6 dB | 17.8 dB | 5.8 dB |
-| Clicks | 16.3 dB | 81.2 dB | 17.1 dB | **27.8 dB** | 30.5 dB | 22.7 dB | 15.6 dB |
-| Bark | 10.5 dB | 61.2 dB | 7.5 dB | **10.6 dB** | 11.5 dB | 11.8 dB | 11.8 dB |
-| PESQ (mean) | 2.60 | 1.98 | 2.37 | **2.40** | 2.35 | 2.28 | 2.49 |
-| PESQ, clean female Russian voice | 4.16 | 1.82 | 2.88 | **2.93** | 2.55 | 2.23 | 3.53 |
-| STOI (mean) | 0.89 | 0.82 | 0.87 | **0.87** | 0.86 | 0.85 | 0.87 |
-| Own voice while the other side talks | -4.6 dB | -8.0 dB | -5.8 dB | **-5.1 dB** | -4.8 dB | -6.2 dB | -2.0 dB |
+| Voice dips (dB) | 2.9 | 5.9 | 4.3 | **4.4** | 4.8 | 5.0 | 3.6 |
+| Voice > 6 dB below its level | 3.0% | 10.0% | 4.6% | **5.3%** | 7.4% | 8.6% | 5.2% |
+| Noise cut in pauses (mean) | 9.0 dB | 77.8 dB | 10.7 dB | **20.7 dB** | 21.8 dB | 16.0 dB | 23.2 dB |
+| Chips bag | 10.5 dB | 85.7 dB | 11.9 dB | **26.1 dB** | 26.9 dB | 17.1 dB | 1.5 dB |
+| Clicks | 12.9 dB | 79.1 dB | 15.2 dB | **26.6 dB** | 26.5 dB | 21.3 dB | 16.4 dB |
+| Bark | 9.9 dB | 64.5 dB | 8.8 dB | **10.0 dB** | 12.6 dB | 13.1 dB | 12.7 dB |
+| PESQ (mean) | 2.50 | 1.89 | 2.30 | **2.33** | 2.29 | 2.23 | 2.46 |
+| PESQ, the four clean voices | 4.15 | 2.72 | 3.58 | **3.67** | 3.51 | 3.31 | 3.61 |
+| PESQ, quiet female voice (-45 dBFS) | 4.27 | 1.59 | 2.59 | **2.60** | 2.53 | 2.39 | 4.27 |
+| STOI (mean) | 0.87 | 0.82 | 0.87 | **0.87** | 0.86 | 0.85 | 0.86 |
+| Own voice while the other side talks | -1.4 dB | -0.9 dB | -2.3 dB | **-2.3 dB** | -2.4 dB | -2.5 dB | -1.4 dB |
 
-- Against the first shipped version, the calls setting halves the dips and dropouts, and takes 21 dB out of pauses where that removed nearly everything (76 dB). Against WebRTC's suppressor, it takes twice as much out of pauses and far more chips and clicks, at the cost of 1.5 dB more dipping and lower clean-speech quality.
-- Double talk is no longer the outlier it seemed: with the same words as control, the voice drops 5 dB (WebRTC's: 4.6).
-- RNNoise keeps clean speech best but lets chips through, and in the chips scene it mutes the voice outright.
-- The bench scores DeepFilterNet's clean speech below what the second real call reported ("sound is better"). The next call settles which to trust.
+- **Against the first shipped version,** the calls setting more than halves the dropouts and leaves the voice dipping 1.5 dB less. It takes 21 dB out of pauses, where the first version removed nearly everything (78 dB).
+- **Against WebRTC's suppressor,** it takes over twice as much out of pauses, and far more chips and clicks. The cost is 1.5 dB more dipping and lower clean-speech quality; WebRTC's keeps clean speech best.
+- **RNNoise** is close to WebRTC's on the voice and best on steady noise (cafe, traffic, siren), but lets chips and music through, and in the chips scene it mutes the voice outright.
+- **Double talk,** compared like for like, costs the voice about 2 dB: barely more than WebRTC alone.
+- **Open question:** the bench scores DeepFilterNet's clean speech, and quiet voices, below what the second real call reported ("sound is better"). Recordings from the user's own microphone would settle it.

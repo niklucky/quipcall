@@ -148,7 +148,7 @@ pub struct Denoiser {
 /// noise sits far above this, so calls otherwise never see the hiss: under a
 /// voice, it made the model trim the voice.
 const SILENT: f32 = 1e-7;
-/// The hiss, as the peak of uniform noise: -60 dBFS in the model.
+/// The hiss's peak, as uniform noise: -60 dBFS RMS in the model.
 const HISS: f32 = 1.73e-3;
 
 /// The model hears a voice when it rates a frame's speech-to-noise ratio
@@ -214,11 +214,14 @@ impl Denoiser {
     }
 
     /// Start over after a gap in the audio (unmuting, a new call). The model
-    /// still holds the end of the last stretch for [`Self::delay`], so that
-    /// much output is silenced; its other state settles within a second.
-    /// (DeepFilterNet's own `init` would leave its buffers misaligned.)
+    /// still holds the end of the last stretch, so the output is silenced
+    /// until it can't reach it: its deep filter reads `df_order` past
+    /// spectra, each two frames long with the window overlap (6 frames, 60 ms
+    /// here). Its other state settles within a second. (DeepFilterNet's own
+    /// `init` would leave its buffers misaligned.)
     pub fn restart(&mut self) {
-        self.stale_frames = self.delay().div_ceil(FRAME) + 1;
+        let reach = self.df.df_order.max(self.df.lookahead);
+        self.stale_frames = reach + self.df.fft_size.div_ceil(self.df.hop_size) - 1;
         self.quiet_frames = 0;
         self.set_limit(self.strength.limit_db);
     }
@@ -308,20 +311,18 @@ struct Live {
 /// 200 ms). Blocking: run it off the UI and audio threads, and before the
 /// microphone track is created, which fixes WebRTC's own suppression.
 pub fn prepare() -> Mode {
+    // The audio thread only try-locks, so holding this while loading just
+    // lets frames through unfiltered.
+    let mut filter = FILTER.lock();
+    // A model that failed during a call is freed here, off the audio thread,
+    // once the lock is released. Checked under the lock: it may have failed
+    // a moment ago.
+    let failed = filter.take_if(|live| live.failed);
     let mode = match std::env::var("QUIPCALL_DENOISE").as_deref() {
         Ok("webrtc") => Mode::WebRtc,
         Ok("off") => Mode::Off,
-        _ if UNAVAILABLE.load(Ordering::Relaxed) => {
-            // A model that failed during a call is freed here, off the audio
-            // thread.
-            let failed = FILTER.lock().take();
-            drop(failed);
-            Mode::WebRtc
-        }
+        _ if failed.is_some() || UNAVAILABLE.load(Ordering::Relaxed) => Mode::WebRtc,
         _ => {
-            // The audio thread only try-locks, so holding this while loading
-            // just lets frames through unfiltered.
-            let mut filter = FILTER.lock();
             if filter.is_none() {
                 match load() {
                     Ok(live) => *filter = Some(live),
@@ -346,6 +347,8 @@ pub fn prepare() -> Mode {
             }
         }
     };
+    drop(filter);
+    drop(failed);
     // SAFETY: plain setters in our webrtc-sys patch; the callbacks are
     // `extern "C"` functions that live for the whole program.
     unsafe {
@@ -538,7 +541,41 @@ unsafe extern "C" fn release(stream: *const c_void) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_limits;
+    use super::{Denoiser, FRAME, Strength, parse_limits};
+
+    fn rms(frame: &[f32]) -> f32 {
+        (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn restart_drops_the_previous_audio() {
+        let mut denoiser = Denoiser::new().unwrap();
+        denoiser.set_strength(Strength::CALLS);
+        let mut seed = 1u32;
+        let mut frame = [0f32; FRAME];
+        // A voice-like buzz in noise, so both of the model's stages run.
+        for n in 0..300 {
+            for (i, s) in frame.iter_mut().enumerate() {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let t = (n * FRAME + i) as f32 / 48_000.0;
+                let voice: f32 = (1..20)
+                    .map(|h| (std::f32::consts::TAU * 150.0 * h as f32 * t).sin() / h as f32)
+                    .sum();
+                *s = voice * 3000.0 + (seed as f32 / u32::MAX as f32 - 0.5) * 3000.0;
+            }
+            denoiser.process(&mut frame).unwrap();
+        }
+        denoiser.restart();
+        // Silence goes in; nothing above the hiss's remains (about 2) may
+        // come out. Without the restart, frames 1-3 carried 450-1170.
+        for n in 0..20 {
+            frame.fill(0.0);
+            denoiser.process(&mut frame).unwrap();
+            assert!(rms(&frame) < 20.0, "frame {n}: {}", rms(&frame));
+        }
+    }
 
     #[test]
     fn limits_from_the_environment() {

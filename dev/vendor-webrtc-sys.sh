@@ -18,23 +18,24 @@ if current; then
 	exit 0
 fi
 
-# One rebuild at a time: two builds starting together would otherwise
-# delete each other's files.
-waited=0
-until mkdir "$LOCK" 2>/dev/null; do
-	if [ "$waited" -ge 120 ]; then
-		echo "Waited 2 minutes for $LOCK; remove it if no other build is running." >&2
-		exit 1
-	fi
-	sleep 1
-	waited=$((waited + 1))
-done
-tmp=$(mktemp -d vendor/.webrtc-sys.XXXXXX)
-trap 'rm -rf "$tmp"; rmdir "$LOCK"' EXIT
-trap 'exit 1' INT TERM
+# One rebuild at a time, under a lock the OS releases when its holder dies
+# (perl's flock: macOS has no flock(1)). Two builds starting together would
+# otherwise delete each other's files.
+if [ -z "${QUIPCALL_VENDOR_LOCKED:-}" ]; then
+	exec perl -MFcntl=:flock -e '
+		open(my $lock, ">>", shift) or die "lock: $!";
+		flock($lock, LOCK_EX) or die "lock: $!";
+		system(@ARGV);
+		exit($? == -1 ? 1 : ($? & 127 ? 128 + ($? & 127) : $? >> 8));
+	' "$LOCK" env QUIPCALL_VENDOR_LOCKED=1 "$0"
+fi
 if current; then
 	exit 0
 fi
+
+tmp=$(mktemp -d vendor/.webrtc-sys.XXXXXX)
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 1' HUP INT TERM
 
 crate=$(ls ~/.cargo/registry/cache/*/webrtc-sys-$VERSION.crate 2>/dev/null | head -1 || true)
 if [ -z "$crate" ]; then
@@ -43,12 +44,15 @@ if [ -z "$crate" ]; then
 fi
 echo "$SHA256  $crate" | shasum -a 256 -c - >/dev/null
 
-# Build it next to the old one, then swap it in whole.
 mkdir "$tmp/src"
 tar -xzf "$crate" -C "$tmp/src" --strip-components 1
 rm -f "$tmp/src/.cargo_vcs_info.json"
 patch -s -d "$tmp/src" -p1 <"$PATCH"
 echo "$want" >"$tmp/src/.quipcall-patch"
-rm -rf "$DIR"
+# Swap whole trees by renaming, so a run killed here leaves a complete tree,
+# or none (rebuilt next time); the old one goes with $tmp.
+if [ -e "$DIR" ]; then
+	mv "$DIR" "$tmp/old"
+fi
 mv "$tmp/src" "$DIR"
 echo "vendor/webrtc-sys: webrtc-sys $VERSION + $PATCH"

@@ -14,8 +14,9 @@ The first run makes a Python environment in target/denoise-eval/venv (numpy,
 scipy, pesq, pystoi) and downloads about 13 MB of recordings, each checked
 against its hash.
 
-Scores, over the part after a 10 s warm-up (gain control settles, even for
-a quiet voice), with each chain's delay measured on the clean scenes:
+Scores, over the part after a 40 s warm-up (the same 10 s of speech four
+times: gain control and the model settle, even for a quiet voice), with each
+chain's delay measured on the clean scenes:
   level   voice loudness against the clean voice, dB (median)
   dips    how far the voice falls in its quietest 10%, dB: the "volume drops"
           (only where the voice is louder than the noise)
@@ -61,7 +62,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parent.parent
 DIR = ROOT / "target/denoise-eval"
 RATE = 48000
-WARM = 10 * RATE
+WARM = 40 * RATE
 UA = {"User-Agent": "quipcall-denoise-eval/0.2"}
 
 ARCHIVE = "https://archive.org/download/"
@@ -124,7 +125,7 @@ SCENES = {
     "bark_then_talk-en_f": ("en_f", NORMAL, "bark", None),
     "two_voices-en_m": ("en_m", NORMAL, "en_f2", -6),
     "double_talk-ru_f": ("ru_f", NORMAL, "en_m", None),
-    # The same without the echo, to compare it with.
+    # The same, the far side playing but not echoing, to compare it with.
     "double_talk_ref-ru_f": ("ru_f", NORMAL, None, None),
 }
 # Scenes whose `noise` is something else to keep or remove: not noise.
@@ -232,12 +233,12 @@ def at_level(x, dbfs):
 
 
 def speech(sources, voice, dbfs):
-    """10 s of warm-up, then three 5 s turns with pauses between them."""
+    """40 s of warm-up, then three 5 s turns with pauses between them."""
     import numpy as np
     v = sources[voice]
     sec = lambda a, b: v[int(a * RATE):int(b * RATE)]  # noqa: E731
     gap = np.zeros(int(1.5 * RATE), np.float32)
-    parts = [sec(20, 30), sec(36, 41), gap, sec(42, 47), gap, sec(48, 53)]
+    parts = [sec(20, 30)] * 4 + [sec(36, 41), gap, sec(42, 47), gap, sec(48, 53)]
     return at_level(np.concatenate(parts), dbfs)
 
 
@@ -290,7 +291,7 @@ def build(sources):
             e = np.convolve(bark ** 2, np.ones(RATE // 2), "same")
             loud = bark[max(0, e.argmax() - RATE // 2):][: int(1.5 * RATE)]
             gap = np.zeros(int(2.5 * RATE), np.float32)
-            parts = [v[20 * RATE:30 * RATE], v[36 * RATE:42 * RATE], gap, v[42 * RATE:48 * RATE]]
+            parts = [v[20 * RATE:30 * RATE]] * 4 + [v[36 * RATE:42 * RATE], gap, v[42 * RATE:48 * RATE]]
             clean = at_level(np.concatenate(parts), level)
             bark_at = WARM + 6 * RATE + RATE // 2
             mic = clean.copy()
@@ -314,13 +315,15 @@ def build(sources):
             meta["far_only"] = [WARM, WARM + 6 * RATE]
             meta["both"] = [WARM + 6 * RATE, WARM + 14 * RATE]
             meta["near_only"] = [WARM + 14 * RATE, n]
+            # Both play the far side (echo cancellation runs alike); only the
+            # first hears it.
+            far_voice = at_level(sources[SCENES["double_talk-ru_f"][2]][60 * RATE:80 * RATE], -20)
+            far = np.zeros(n, np.float32)
+            far[WARM:WARM + 14 * RATE] = far_voice[: 14 * RATE]
             if kind == "double_talk":
-                rng = np.random.default_rng(3)
-                far_voice = at_level(sources[extra][60 * RATE:80 * RATE], -20)
-                far = np.zeros(n, np.float32)
-                far[WARM:WARM + 14 * RATE] = far_voice[: 14 * RATE]
                 # Laptop speaker to microphone: direct sound after 40 ms (the
                 # audio path's delay), then a 0.25 s room tail ~9 dB weaker.
+                rng = np.random.default_rng(3)
                 t = np.arange(int(0.25 * RATE)) / RATE
                 tail = rng.standard_normal(len(t)) * np.exp(-6.9 * t / 0.25) * 0.012
                 rir = np.concatenate([np.zeros(int(0.04 * RATE)), [1.0], tail])
