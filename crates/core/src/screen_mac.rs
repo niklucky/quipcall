@@ -1,6 +1,6 @@
 //! Screen sharing on macOS with ScreenCaptureKit.
 //!
-//! - [`list_sources`]: screens and windows, each with a small thumbnail, for
+//! - [`list_sources`]: screens and windows, followed by small thumbnails, for
 //!   our own share picker.
 //! - [`Capture`]: frames of one screen or window arrive as full-range NV12
 //!   IOSurface `CVPixelBuffer`s at the preset's frame rate and go to WebRTC
@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
+use futures_util::{StreamExt, stream};
 use livekit::webrtc::prelude::{BoxVideoBuffer, VideoFrame, VideoRotation};
 use livekit::webrtc::video_frame::native::NativeBuffer;
 use livekit::webrtc::video_source::native::NativeVideoSource;
@@ -58,6 +59,17 @@ pub struct ShareSource {
     pub app: Option<String>,
     pub thumbnail: Option<Thumbnail>,
 }
+
+/// Choices are usable before any screenshot has finished. Preview failures
+/// leave the corresponding choice's icon in place.
+pub enum ShareSourceUpdate {
+    Sources(Vec<ShareSource>),
+    Thumbnail(SourceId, Thumbnail),
+}
+
+const CONTENT_TIMEOUT: Duration = Duration::from_secs(10);
+const THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_THUMBNAILS: usize = 4;
 
 /// Screen Recording permission is off (ScreenCaptureKit's "user declined").
 #[derive(Debug)]
@@ -187,10 +199,17 @@ fn own_app(content: &SCShareableContent) -> Option<Retained<SCRunningApplication
         .find(|app| unsafe { app.processID() } == pid)
 }
 
-/// Screens first, then windows (front to back), each with a thumbnail up to
-/// `thumb_width` pixels wide.
-pub async fn list_sources(thumb_width: u32) -> anyhow::Result<Vec<ShareSource>> {
-    let content = shareable_content().await?;
+/// Run on the engine's blocking pool, with its timer runtime entered.
+pub(crate) async fn list_sources(
+    thumb_width: u32,
+    updates: &async_channel::Sender<anyhow::Result<ShareSourceUpdate>>,
+) -> anyhow::Result<()> {
+    if !crate::permissions::screen_recording_allowed() {
+        return Err(NoPermission.into());
+    }
+    let content = tokio::time::timeout(CONTENT_TIMEOUT, shareable_content())
+        .await
+        .context("macOS took too long to list screens and windows; try again")??;
     let pid = std::process::id() as i32;
     let mut sources = Vec::new();
     let mut thumbs = Vec::new();
@@ -209,7 +228,7 @@ pub async fn list_sources(thumb_width: u32) -> anyhow::Result<Vec<ShareSource>> 
                 &ours,
                 &NSArray::new(),
             );
-            thumbs.push(thumbnail(&filter, thumb_width));
+            thumbs.push((SourceId::Display(display.displayID()), filter));
             sources.push(ShareSource {
                 id: SourceId::Display(display.displayID()),
                 title: if many {
@@ -247,7 +266,7 @@ pub async fn list_sources(thumb_width: u32) -> anyhow::Result<Vec<ShareSource>> 
                 SCContentFilter::alloc(),
                 &window,
             );
-            thumbs.push(thumbnail(&filter, thumb_width));
+            thumbs.push((SourceId::Window(window.windowID()), filter));
             sources.push(ShareSource {
                 id: SourceId::Window(window.windowID()),
                 title,
@@ -257,11 +276,51 @@ pub async fn list_sources(thumb_width: u32) -> anyhow::Result<Vec<ShareSource>> 
         }
     }
 
-    // The screenshots were all requested above and run in parallel.
-    for (source, thumb) in sources.iter_mut().zip(thumbs) {
-        source.thumbnail = thumb.recv().await.ok().flatten();
+    tracing::debug!(count = sources.len(), "screen share choices ready");
+    if updates
+        .send(Ok(ShareSourceUpdate::Sources(sources)))
+        .await
+        .is_err()
+    {
+        return Ok(());
     }
-    Ok(sources)
+    // Bound the native screenshot work, and deliver in completion order: one
+    // unresponsive window must not hold up every other preview.
+    let previews = preview_stream(thumbs, THUMBNAIL_TIMEOUT, |filter| {
+        thumbnail(&filter, thumb_width)
+    });
+    futures_util::pin_mut!(previews);
+    while let Some((id, thumbnail)) = previews.next().await {
+        if let Some(thumbnail) = thumbnail
+            && updates
+                .send(Ok(ShareSourceUpdate::Thumbnail(id, thumbnail)))
+                .await
+                .is_err()
+        {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn preview_stream<T, P>(
+    jobs: Vec<(SourceId, T)>,
+    timeout: Duration,
+    capture: impl Fn(T) -> async_channel::Receiver<Option<P>>,
+) -> impl futures_util::Stream<Item = (SourceId, Option<P>)> {
+    stream::iter(jobs)
+        .map(move |(id, job)| {
+            let rx = capture(job);
+            async move {
+                let preview = tokio::time::timeout(timeout, rx.recv())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten();
+                (id, preview)
+            }
+        })
+        .buffer_unordered(MAX_THUMBNAILS)
 }
 
 /// Dev and tests: the largest window of this process, to exercise screen
@@ -677,5 +736,70 @@ impl Drop for Synthetic {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[tokio::test]
+    async fn previews_skip_stalled_and_failed_sources() {
+        let (stalled_tx, stalled_rx) = async_channel::bounded::<Option<u32>>(1);
+        let (ready_tx, ready_rx) = async_channel::bounded(1);
+        let (failed_tx, failed_rx) = async_channel::bounded(1);
+        ready_tx.try_send(Some(42)).unwrap();
+        drop(failed_tx);
+        let previews = preview_stream(
+            vec![
+                (SourceId::Window(1), stalled_rx),
+                (SourceId::Window(2), ready_rx),
+                (SourceId::Window(3), failed_rx),
+            ],
+            Duration::from_millis(50),
+            |rx| rx,
+        );
+        futures_util::pin_mut!(previews);
+        assert_eq!(previews.next().await, Some((SourceId::Window(2), Some(42))));
+        assert_eq!(previews.next().await, Some((SourceId::Window(3), None)));
+        assert_eq!(previews.next().await, Some((SourceId::Window(1), None)));
+        assert!(previews.next().await.is_none());
+        assert!(stalled_tx.is_closed());
+    }
+
+    #[tokio::test]
+    async fn preview_work_is_bounded_and_stops_when_dropped() {
+        let started = Cell::new(0);
+        let mut senders = Vec::new();
+        let jobs = (0..20)
+            .map(|id| {
+                let (tx, rx) = async_channel::bounded::<Option<u32>>(1);
+                senders.push(tx);
+                (SourceId::Window(id), rx)
+            })
+            .collect();
+        let mut previews = Box::pin(preview_stream(jobs, Duration::from_secs(10), |rx| {
+            started.set(started.get() + 1);
+            rx
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), previews.next())
+                .await
+                .is_err()
+        );
+        assert_eq!(started.get(), MAX_THUMBNAILS);
+        // A later preview completing frees one slot even if the first is stuck.
+        senders[3].try_send(Some(3)).unwrap();
+        assert_eq!(previews.next().await, Some((SourceId::Window(3), Some(3))));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), previews.next())
+                .await
+                .is_err()
+        );
+        assert_eq!(started.get(), MAX_THUMBNAILS + 1);
+        drop(previews);
+        assert!(senders.iter().all(|tx| tx.is_closed()));
+        assert_eq!(started.get(), MAX_THUMBNAILS + 1);
     }
 }
