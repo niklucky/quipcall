@@ -101,3 +101,34 @@ Same setup, sharing at 30 fps with the synthetic camera on: the previous build (
 The difference is within the run-to-run spread: about half a percent of CPU and 3 MB at most. All circles now start at 96 px instead of 200 / 160, so they decode the lowest simulcast layer more often.
 
 The bands themselves, isolated: the same build drawing your camera square (one draw) against round (~25 draws), three alternating runs of each, 18 samples: 5.0% against 4.9% CPU, footprint 143–147 MB in both. Nothing measurable. Your circle on the preview stays 96 px whatever size your own circle is, so the band count doesn't grow with it.
+
+## 2026-11-06 — Noise suppression: DeepFilterNet 3 vs WebRTC vs RNNoise
+
+Apple M5 Pro, macOS 27.0, release build. `python3 dev/denoise-eval.py` mixes TTS speech with real recordings (a dog, a food wrapper, paper, typing, traffic) at 5 dB below the speech, runs each filter over it offline, and saves the outputs to listen to. "Pauses" is how much quieter the noise gets where nobody speaks. PESQ (speech quality, 1–4.6) and STOI (intelligibility, 0–1) compare the output with the clean speech. WebRTC runs at its default level here; calls use its "high" level, which takes a few dB more off steady noise.
+
+| Noise | Pauses: WebRTC / RNNoise / DeepFilterNet | PESQ: none / WebRTC / RNNoise / DFN | STOI: none / WebRTC / RNNoise / DFN |
+|---|---|---|---|
+| Dog barking | 0.6 / 0.9 / **22.1 dB** | 1.73 / 1.82 / 1.78 / **1.97** | 0.955 / 0.940 / 0.956 / 0.929 |
+| Food wrapper | 3.2 / 7.6 / **22.8 dB** | 1.13 / 1.30 / 1.40 / **1.83** | 0.931 / 0.924 / 0.944 / 0.867 |
+| Paper | 1.2 / 8.0 / **29.5 dB** | 1.23 / 1.27 / 1.59 / **1.66** | 0.926 / 0.913 / 0.960 / 0.867 |
+| Typing | 4.7 / 21.0 / **47.0 dB** | 1.05 / 1.08 / 1.20 / **1.53** | 0.774 / 0.781 / 0.879 / **0.914** |
+| Traffic | 2.5 / 15.2 / **25.0 dB** | 1.12 / 1.29 / 1.56 / **1.78** | 0.903 / 0.902 / 0.923 / 0.873 |
+| Clean speech | — | 4.64 / 4.35 / 4.55 / 3.94 | 1.000 / 0.980 / 1.000 / 0.997 |
+
+- WebRTC's suppressor barely touches sudden noise, as expected: it tracks steady noise.
+- RNNoise is cheap and keeps speech intact, but lets barking and most rustling through.
+- DeepFilterNet removes almost all of it between words and scores best on quality. Where loud noise overlaps speech, it shaves a little intelligibility (STOI 0.87 against 0.93 unfiltered); it sounds cleaner but slightly processed. Its attenuation limit and post-filter (`-30db`, `-pf` in the script) changed little.
+
+Cost per 10 ms frame (one core):
+
+| Filter | Mean | p99 | CPU | Delay |
+|---|---|---|---|---|
+| WebRTC | 11 µs | 18 µs | 0.1% | ~11 ms |
+| RNNoise (`nnnoiseless`) | 27 µs | 37 µs | 0.3% | 10 ms |
+| DeepFilterNet 3 (tract) | 216–552 µs | 760–920 µs | 2.2–5.5% | 30 ms |
+
+The model is cheaper on clean speech: below a speech-to-noise threshold it skips stages.
+
+In the app: the model loads in ~180 ms while the call connects (plus a 30-frame speed check). It holds ~10.5 MB live, but parsing the ONNX file fragments the heap: in a mic-less call (model forced on), the footprint was 13–29 MB higher across runs, and ~12 MB of it stays after leaving, since macOS doesn't take back the freed pages. The model is therefore kept loaded for the rest of the run. Binary: 26.6 → 44.2 MB (+8 MB model, +9.6 MB tract and DeepFilterNet). Building tract's graph crates for size (`opt-level = "s"`) saved 2.2 MB of that for ~5% more time per frame; tract-linalg's kernels are left fast.
+
+The hook itself still needs a real call: while it runs, the log shows `noise suppression, time per 10 ms frame` once per minute of unmuted audio.

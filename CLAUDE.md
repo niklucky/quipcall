@@ -10,6 +10,7 @@ Read README.md first. Plan: docs/PLAN.md. Decisions: docs/ARCHITECTURE.md.
 ## Conventions
 - In PLAN.md, finished tasks are marked `[x] ~~task~~` and finished stages `## ~~Stage N~~ ✅`. Update it as work lands.
 - Run `make check` (clippy with `-D warnings`, plus svelte-check) and `cargo fmt --all` before committing.
+- Cargo needs `vendor/webrtc-sys` (crates.io source + `vendor/webrtc-sys.patch`, gitignored). `make` targets create it; in a fresh checkout run `dev/vendor-webrtc-sys.sh` before plain `cargo`.
 - Commit locally only. Push only when asked.
 
 ## Never
@@ -26,6 +27,7 @@ Read README.md first. Plan: docs/PLAN.md. Decisions: docs/ARCHITECTURE.md.
 - `QUIPCALL_FAKE_SCREEN=1` (or `=1600x900`) with the `share-own` script action shares a test pattern instead of anything on screen. Two app instances can share at once this way.
 - Without a terminal the app logs to `~/Library/Logs/Quipcall/`, which is the user's log. Run test instances under `script -q <logfile> <app> …` to keep them out of it.
 - Headless web participant: Chrome with `--headless=new --use-fake-device-for-media-stream --use-fake-ui-for-media-stream`, opening `?room=X&autojoin=1&mic=0`. The room is `window.qcRoom`, and its stats can be read over the DevTools protocol.
+- Noise suppression: `QUIPCALL_DENOISE=webrtc` (WebRTC's filter) or `=off` instead of DeepFilterNet, for A/B. `python3 dev/denoise-eval.py` compares filters offline on real noise recordings.
 - Measure memory with `dev/measure.sh <pid>`, which reports the physical footprint, not RSS. RSS once hid a 3 GB IOSurface leak.
 
 ## macOS gotchas

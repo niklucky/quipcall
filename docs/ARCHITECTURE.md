@@ -27,7 +27,7 @@ Desktop (macOS first, then Windows and Linux) plus a web client.
 |---|---|
 | Media server | LiveKit (self-hosted). 1:1 calls also go through it, so there's one code path |
 | Desktop | Rust, GPUI (`gpui-pre`, custom controls, no widget library), LiveKit Rust SDK (libwebrtc). UI design: [UI.md](UI.md) |
-| macOS media | `PlatformAudio` (CoreAudio, WebRTC echo cancellation / noise suppression / auto gain), ScreenCaptureKit, AVFoundation, VideoToolbox |
+| macOS media | `PlatformAudio` (CoreAudio, WebRTC echo cancellation / auto gain), DeepFilterNet 3 noise suppression (tract), ScreenCaptureKit, AVFoundation, VideoToolbox |
 | Web | Svelte 5, Vite, `livekit-client` |
 | Backend | Rust: Axum, tokio, sqlx + SQLite |
 | Shared types | `crates/protocol` (serde), with TypeScript types generated for web |
@@ -58,6 +58,7 @@ docs/               plan, architecture, footprint measurements, deploy runbook
   - *Motion*: 30 or 60 fps, up to 1920 px; when bandwidth drops, keep the frame rate and lower resolution.
 - **Bandwidth.** Simulcast + adaptive stream (each video is received at the size it's shown) + dynacast (layers nobody watches aren't encoded) + pausing tiles that aren't visible.
 - **Audio.** Opus with DTX and RED, using WebRTC's audio processing through the platform audio device module.
+- **Noise suppression (desktop).** DeepFilterNet 3, a neural filter, runs on each 10 ms microphone frame right after WebRTC's echo cancellation and gain control, through a hook in our `webrtc-sys` patch (`vendor/README.md`). WebRTC's own suppressor only removes steady noise (fans, hum); measured on real recordings, the model takes 21–47 dB of barking, wrappers, paper, typing and traffic out of speech pauses, where WebRTC's takes 1–5 dB and RNNoise 1–21 dB. Costs on an M5 Pro: 0.2–0.5 ms per frame (2–5% of one core while unmuted), 30 ms of delay, about 12–29 MB of memory once a call loads it, and 17.6 MB of binary (8 MB of it the model). WebRTC's suppressor is off while the model runs; it takes over if the model fails to load or a Mac needs more than 3 ms per frame. The web client keeps the browser's suppressor.
 
 ## Transcription design (single transcriber)
 

@@ -5,3 +5,5 @@ dist/
 *.local
 .env
 /dev/data/
+# Recreated from crates.io + vendor/webrtc-sys.patch by dev/vendor-webrtc-sys.sh
+/vendor/webrtc-sys/

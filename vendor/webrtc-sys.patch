@@ -1,0 +1,101 @@
+--- a/src/peer_connection_factory.cpp
++++ b/src/peer_connection_factory.cpp
+@@ -16,10 +16,13 @@
+ 
+ #include "livekit/peer_connection_factory.h"
+ 
++#include <atomic>
+ #include <memory>
+ #include <utility>
+ #include <vector>
+ 
++#include "modules/audio_processing/audio_buffer.h"
++
+ #include "api/audio_codecs/builtin_audio_decoder_factory.h"
+ #include "api/audio_codecs/builtin_audio_encoder_factory.h"
+ #include "api/audio/builtin_audio_processing_builder.h"
+@@ -47,6 +50,62 @@
+ #include "webrtc-sys/src/peer_connection.rs.h"
+ #include "webrtc-sys/src/peer_connection_factory.rs.h"
+ 
++// Quipcall patch: an extra filter after the microphone's WebRTC processing
++// (echo cancellation, gain control), and a switch for WebRTC's own noise
++// suppression on device microphones. Both are set from Rust via the C ABI.
++extern "C" {
++// `stream` identifies one APM; `channels` hold `num_frames` floats each, in
++// the 16-bit range. Called on the capture thread, every 10 ms.
++typedef void (*quipcall_capture_process_fn)(const void* stream,
++                                            float* const* channels,
++                                            size_t num_channels,
++                                            size_t num_frames,
++                                            int sample_rate_hz);
++// The APM behind `stream` is gone.
++typedef void (*quipcall_capture_release_fn)(const void* stream);
++}
++
++namespace {
++std::atomic<quipcall_capture_process_fn> quipcall_capture_process{nullptr};
++std::atomic<quipcall_capture_release_fn> quipcall_capture_release{nullptr};
++std::atomic<bool> quipcall_device_noise_suppression{true};
++
++class QuipcallCaptureProcessor : public webrtc::CustomProcessing {
++ public:
++  ~QuipcallCaptureProcessor() override {
++    if (auto release = quipcall_capture_release.load()) {
++      release(this);
++    }
++  }
++  void Initialize(int sample_rate_hz, int num_channels) override {
++    sample_rate_hz_ = sample_rate_hz;
++  }
++  void Process(webrtc::AudioBuffer* audio) override {
++    if (auto process = quipcall_capture_process.load()) {
++      process(this, audio->channels(), audio->num_channels(),
++              audio->num_frames(), sample_rate_hz_);
++    }
++  }
++  std::string ToString() const override { return "QuipcallCaptureProcessor"; }
++  void SetRuntimeSetting(webrtc::AudioProcessing::RuntimeSetting) override {}
++
++ private:
++  int sample_rate_hz_ = 0;
++};
++}  // namespace
++
++extern "C" void quipcall_set_capture_processor(
++    quipcall_capture_process_fn process,
++    quipcall_capture_release_fn release) {
++  quipcall_capture_release.store(release);
++  quipcall_capture_process.store(process);
++}
++
++// Applies to device microphone tracks created afterwards.
++extern "C" void quipcall_set_device_noise_suppression(bool enabled) {
++  quipcall_device_noise_suppression.store(enabled);
++}
++
+ namespace livekit_ffi {
+ namespace {
+ 
+@@ -192,7 +251,11 @@
+       std::move(std::make_unique<livekit_ffi::VideoDecoderFactory>());
+   dependencies.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
+   dependencies.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
+-  dependencies.audio_processing_builder = std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
++  auto audio_processing_builder =
++      std::make_unique<webrtc::BuiltinAudioProcessingBuilder>();
++  audio_processing_builder->SetCapturePostProcessing(
++      std::make_unique<QuipcallCaptureProcessor>());
++  dependencies.audio_processing_builder = std::move(audio_processing_builder);
+ 
+   webrtc::EnableMedia(dependencies);
+   peer_factory_ =
+@@ -249,7 +312,7 @@
+   webrtc::AudioOptions audio_options;
+   audio_options.echo_cancellation = true;
+   audio_options.auto_gain_control = true;
+-  audio_options.noise_suppression = true;
++  audio_options.noise_suppression = quipcall_device_noise_suppression.load();
+ 
+   webrtc::scoped_refptr<webrtc::AudioSourceInterface> audio_source =
+       peer_factory_->CreateAudioSource(audio_options);

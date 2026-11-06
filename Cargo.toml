@@ -21,6 +21,29 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
+# tract's graph code (model loading, op plumbing) built for size saves 2.3 MB;
+# its matrix kernels in tract-linalg stay at full speed.
+[profile.release.package.tract-core]
+opt-level = "s"
+[profile.release.package.tract-data]
+opt-level = "s"
+[profile.release.package.tract-hir]
+opt-level = "s"
+[profile.release.package.tract-nnef]
+opt-level = "s"
+[profile.release.package.tract-onnx]
+opt-level = "s"
+[profile.release.package.tract-onnx-opl]
+opt-level = "s"
+[profile.release.package.tract-pulse]
+opt-level = "s"
+[profile.release.package.tract-pulse-opl]
+opt-level = "s"
+[profile.release.package.prost]
+opt-level = "s"
+
 # GPUI's macOS backend with one change: borderless popup windows (see vendor/README.md).
 [patch.crates-io]
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
+# A filter slot after WebRTC's microphone processing (see vendor/README.md).
+webrtc-sys = { path = "vendor/webrtc-sys" }
