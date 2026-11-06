@@ -132,3 +132,39 @@ The model is cheaper on clean speech: below a speech-to-noise threshold it skips
 In the app: the model loads in ~180 ms while the call connects (plus a 30-frame speed check). It holds ~10.5 MB live, but parsing the ONNX file fragments the heap: in a mic-less call (model forced on), the footprint was 13–29 MB higher across runs, and ~12 MB of it stays after leaving, since macOS doesn't take back the freed pages. The model is therefore kept loaded for the rest of the run. Binary: 26.6 → 44.2 MB (+8 MB model, +9.6 MB tract and DeepFilterNet). Building tract's graph crates for size (`opt-level = "s"`) saved 2.2 MB of that for ~5% more time per frame; tract-linalg's kernels are left fast.
 
 The hook itself still needs a real call: while it runs, the log shows `noise suppression, time per 10 ms frame` once per minute of unmuted audio.
+
+## 2026-11-06 — Noise suppression, round 2: volume drops
+
+A real call found our voice "slightly worse than Telemost, as if we try too hard; mostly volume drops". The test bench (`python3 dev/denoise-eval.py`) now uses real voices (LibriVox: English and Russian, male and female) and 12 noise recordings. It builds 22 scenes: noises, a quiet and a loud speaker, a bark in a pause, two people talking at once, and the other side's voice echoing from laptop speakers. It runs every scene through WebRTC's audio processing set up as in a call, with the filter in its hook (`quipcall_test_apm_create` in the webrtc-sys patch), so gain control and echo cancellation are in the measurement.
+
+What caused the drops: **DeepFilterNet takes a quiet voice for noise.** Through the model alone (18 dB limit, no gain control), voice level change and PESQ by speaking level:
+
+| Voice | -30 dBFS | -40 dBFS | -45 dBFS | -50 dBFS | -55 dBFS |
+|---|---|---|---|---|---|
+| English, male | -0.2 dB, 4.23 | -0.4 dB, 4.08 | -8.2 dB, 3.06 | -18.2 dB, 3.14 | -18.2 dB, 2.64 |
+| Russian, female | -0.6 dB, 4.01 | -17.3 dB, 1.75 | -18.4 dB, 2.32 | -18.4 dB, 2.12 | -18.4 dB, 1.78 |
+| English, male, +12 dB into the model | -0.2 dB, 4.24 | -0.2 dB, 4.17 | -0.2 dB, 4.07 | -0.3 dB, 3.95 | -0.4 dB, 3.72 |
+| Russian, female, +12 dB into the model | -0.7 dB, 3.84 | -0.6 dB, 4.05 | -0.6 dB, 3.73 | -16.3 dB, 1.78 | -18.3 dB, 1.67 |
+
+Without a limit the voice simply vanishes past the cliff. The female voice reaches it at -40 dBFS, where a laptop microphone at arm's length often sits. A gain into the model, undone after it, moves the cliff about 10 dB lower and costs up to 0.2 PESQ on a normal voice.
+
+Calls now use a 12 dB attenuation limit and a 12 dB input gain, with AGC2 after the model in place of AGC1 before it (`Strength::CALLS`). Means over all 22 scenes:
+
+| | WebRTC | DFN as first shipped | **DFN 12 dB + gain (calls)** | DFN 18 dB + gain | RNNoise + AGC2 (like Telemost) |
+|---|---|---|---|---|---|
+| Voice dips (quietest 10%, dB) | 2.9 | 8.5 | **4.2** | 5.2 | 3.6 |
+| Voice > 6 dB below its level | 3.3% | 12.6% | **4.5%** | 8.8% | 5.1% |
+| PESQ | 2.52 | 2.20 | **2.62** | 2.58 | 2.47 |
+| STOI | 0.87 | 0.79 | **0.86** | 0.85 | 0.86 |
+| Quiet speaker (-45 dBFS), PESQ | 4.25 | 1.19 | **4.12** | 3.88 | 3.44 |
+| Bark, noise cut in pauses | 10.1 dB | 44.8 dB | **7.6 dB** | 12.1 dB | 13.1 dB |
+| Chips bag, noise cut in pauses | 10.1 dB | 85.8 dB | **10.9 dB** | 17.1 dB | 1.6 dB |
+| Own voice while the other side talks | -5.8 dB | -27.8 dB | **-13.8 dB** | -15.4 dB | -4.5 dB |
+
+- WebRTC's noise cuts are mostly its old gain control (AGC1) lifting speech more than pauses; its suppressor itself takes ~1 dB off a bark.
+- Moving gain control after the model did not by itself change much: AGC1 recovered within 1 dB after a loud bark (`after` in the script). The input level was the cause.
+- RNNoise lets chips through and, in the chips scene, muted voice and noise together for seconds.
+- Double talk with laptop speakers is still the weak spot: echo cancellation leaves the voice thinner while the other side talks, and the model then lowers it further. A lower limit helps, and no limit hurts most.
+- Telemost (inspected on this Mac, 3.3.3) runs RNNoise on the raw microphone by default, turns off AGC1 for AGC2 at 12 dB/s (as we now do) and disables Opus DTX. DeepFilterNet is only its web client's "high" level.
+
+Cost is unchanged: 0.40 ms per 10 ms frame for the model, plus ~0.05 ms for the rest of WebRTC's processing.

@@ -1,6 +1,6 @@
 --- a/src/peer_connection_factory.cpp
 +++ b/src/peer_connection_factory.cpp
-@@ -16,10 +16,13 @@
+@@ -16,10 +16,14 @@
  
  #include "livekit/peer_connection_factory.h"
  
@@ -10,17 +10,21 @@
  #include <vector>
  
 +#include "modules/audio_processing/audio_buffer.h"
++#include "modules/audio_processing/gain_controller2.h"
 +
  #include "api/audio_codecs/builtin_audio_decoder_factory.h"
  #include "api/audio_codecs/builtin_audio_encoder_factory.h"
  #include "api/audio/builtin_audio_processing_builder.h"
-@@ -47,6 +50,62 @@
+@@ -46,7 +50,155 @@
+ #include "rtc_base/thread.h"
  #include "webrtc-sys/src/peer_connection.rs.h"
  #include "webrtc-sys/src/peer_connection_factory.rs.h"
- 
-+// Quipcall patch: an extra filter after the microphone's WebRTC processing
-+// (echo cancellation, gain control), and a switch for WebRTC's own noise
-+// suppression on device microphones. Both are set from Rust via the C ABI.
++
++// Quipcall patch: an extra filter after the microphone's echo cancellation,
++// optionally followed by WebRTC's adaptive gain control (AGC2), so gain
++// follows the cleaned voice rather than the noise. Plus switches for WebRTC's
++// own noise suppression and gain control on device microphones. All set from
++// Rust via the C ABI.
 +extern "C" {
 +// `stream` identifies one APM; `channels` hold `num_frames` floats each, in
 +// the 16-bit range. Called on the capture thread, every 10 ms.
@@ -36,32 +40,68 @@
 +namespace {
 +std::atomic<quipcall_capture_process_fn> quipcall_capture_process{nullptr};
 +std::atomic<quipcall_capture_release_fn> quipcall_capture_release{nullptr};
++std::atomic<bool> quipcall_capture_gain_control{false};
 +std::atomic<bool> quipcall_device_noise_suppression{true};
++std::atomic<bool> quipcall_device_gain_control{true};
 +
 +class QuipcallCaptureProcessor : public webrtc::CustomProcessing {
 + public:
++  // For calls: the filter and gain switch set from Rust.
++  QuipcallCaptureProcessor() = default;
++  // For offline tests: a fixed filter, called with `context` as its stream.
++  QuipcallCaptureProcessor(quipcall_capture_process_fn process,
++                           const void* context,
++                           bool gain_control)
++      : test_(true),
++        test_process_(process),
++        test_context_(context),
++        test_gain_control_(gain_control) {}
++
 +  ~QuipcallCaptureProcessor() override {
-+    if (auto release = quipcall_capture_release.load()) {
++    if (auto release = quipcall_capture_release.load(); release && !test_) {
 +      release(this);
 +    }
 +  }
 +  void Initialize(int sample_rate_hz, int num_channels) override {
 +    sample_rate_hz_ = sample_rate_hz;
++    webrtc::AudioProcessing::Config::GainController2 config;
++    config.enabled = true;
++    config.adaptive_digital.enabled = true;
++    gain_control_ = std::make_unique<webrtc::GainController2>(
++        env_, config, webrtc::InputVolumeController::Config{}, sample_rate_hz,
++        num_channels, /*use_internal_vad=*/true);
 +  }
 +  void Process(webrtc::AudioBuffer* audio) override {
-+    if (auto process = quipcall_capture_process.load()) {
-+      process(this, audio->channels(), audio->num_channels(),
-+              audio->num_frames(), sample_rate_hz_);
++    auto process = test_ ? test_process_ : quipcall_capture_process.load();
++    if (process) {
++      process(test_ ? test_context_ : this, audio->channels(),
++              audio->num_channels(), audio->num_frames(), sample_rate_hz_);
++    }
++    bool gain = test_ ? test_gain_control_
++                      : quipcall_capture_gain_control.load();
++    if (gain && gain_control_) {
++      gain_control_->Process(/*input_volume_changed=*/false, audio);
 +    }
 +  }
 +  std::string ToString() const override { return "QuipcallCaptureProcessor"; }
 +  void SetRuntimeSetting(webrtc::AudioProcessing::RuntimeSetting) override {}
 +
 + private:
++  const bool test_ = false;
++  const quipcall_capture_process_fn test_process_ = nullptr;
++  const void* const test_context_ = nullptr;
++  const bool test_gain_control_ = false;
++  webrtc::Environment env_ = webrtc::CreateEnvironment();
++  std::unique_ptr<webrtc::GainController2> gain_control_;
 +  int sample_rate_hz_ = 0;
++};
++
++struct QuipcallTestApm {
++  webrtc::scoped_refptr<webrtc::AudioProcessing> apm;
 +};
 +}  // namespace
 +
++// `release` runs when an APM goes away; `process` may be null (no filter).
 +extern "C" void quipcall_set_capture_processor(
 +    quipcall_capture_process_fn process,
 +    quipcall_capture_release_fn release) {
@@ -69,15 +109,69 @@
 +  quipcall_capture_process.store(process);
 +}
 +
-+// Applies to device microphone tracks created afterwards.
++// AGC2 after the filter, from the next frame on.
++extern "C" void quipcall_set_capture_gain_control(bool enabled) {
++  quipcall_capture_gain_control.store(enabled);
++}
++
++// These apply to device microphone tracks created afterwards: WebRTC
++// re-applies a track's options on unmute and renegotiation.
 +extern "C" void quipcall_set_device_noise_suppression(bool enabled) {
 +  quipcall_device_noise_suppression.store(enabled);
++}
++extern "C" void quipcall_set_device_gain_control(bool enabled) {
++  quipcall_device_gain_control.store(enabled);
++}
++
++// Offline tests: an APM set up like a call's microphone on macOS (AEC3,
++// high-pass filter, NS at kHigh and AGC1 in fixed-digital mode when on; see
++// ApplyAudioProcessingOptions), with `process` as the extra filter. 48 kHz
++// mono, 480-sample frames.
++extern "C" void* quipcall_test_apm_create(bool noise_suppression,
++                                          bool gain_control1,
++                                          bool gain_control2,
++                                          quipcall_capture_process_fn process,
++                                          const void* context) {
++  webrtc::BuiltinAudioProcessingBuilder builder;
++  builder.SetCapturePostProcessing(std::make_unique<QuipcallCaptureProcessor>(
++      process, context, gain_control2));
++  auto apm = builder.Build(webrtc::CreateEnvironment());
++  webrtc::AudioProcessing::Config config;
++  config.echo_canceller.enabled = true;
++  config.high_pass_filter.enabled = true;
++  config.noise_suppression.enabled = noise_suppression;
++  config.noise_suppression.level =
++      webrtc::AudioProcessing::Config::NoiseSuppression::Level::kHigh;
++  config.gain_controller1.enabled = gain_control1;
++  config.gain_controller1.mode =
++      webrtc::AudioProcessing::Config::GainController1::kFixedDigital;
++  apm->ApplyConfig(config);
++  return new QuipcallTestApm{apm};
++}
+ 
++// One frame: `render` is what the speaker plays, `capture` the microphone,
++// processed in place.
++extern "C" int quipcall_test_apm_process(void* apm,
++                                         const int16_t* render,
++                                         int16_t* capture) {
++  auto& test = *static_cast<QuipcallTestApm*>(apm);
++  webrtc::StreamConfig config(48000, 1);
++  int16_t played[480];
++  if (int err = test.apm->ProcessReverseStream(render, config, config, played)) {
++    return err;
++  }
++  test.apm->set_stream_delay_ms(0);
++  return test.apm->ProcessStream(capture, config, config, capture);
++}
++
++extern "C" void quipcall_test_apm_destroy(void* apm) {
++  delete static_cast<QuipcallTestApm*>(apm);
 +}
 +
  namespace livekit_ffi {
  namespace {
  
-@@ -192,7 +251,11 @@
+@@ -192,7 +344,11 @@
        std::move(std::make_unique<livekit_ffi::VideoDecoderFactory>());
    dependencies.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
    dependencies.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
@@ -90,11 +184,13 @@
  
    webrtc::EnableMedia(dependencies);
    peer_factory_ =
-@@ -249,7 +312,7 @@
+@@ -248,8 +404,8 @@
+   // Create an audio source that uses the ADM for capture
    webrtc::AudioOptions audio_options;
    audio_options.echo_cancellation = true;
-   audio_options.auto_gain_control = true;
+-  audio_options.auto_gain_control = true;
 -  audio_options.noise_suppression = true;
++  audio_options.auto_gain_control = quipcall_device_gain_control.load();
 +  audio_options.noise_suppression = quipcall_device_noise_suppression.load();
  
    webrtc::scoped_refptr<webrtc::AudioSourceInterface> audio_source =
