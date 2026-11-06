@@ -168,3 +168,19 @@ Calls now use a 12 dB attenuation limit and a 12 dB input gain, with AGC2 after 
 - Telemost (inspected on this Mac, 3.3.3) runs RNNoise on the raw microphone by default, turns off AGC1 for AGC2 at 12 dB/s (as we now do) and disables Opus DTX. DeepFilterNet is only its web client's "high" level.
 
 Cost is unchanged: 0.40 ms per 10 ms frame for the model, plus ~0.05 ms for the rest of WebRTC's processing.
+
+## 2026-11-06 — Noise suppression, round 3: deeper in pauses
+
+Second real call: "sound is better", but hard rustling stayed faintly audible. In a pause nothing masks the rustle and no voice can be lost, so the limit now deepens there. The model's own speech-to-noise estimate tells voice from pause: in noisy pauses 90% of frames sit below -11 dB. After 0.3 s with no frame above -5 dB, the limit glides from 12 to 30 dB at 0.5 dB per frame. It returns to 12 dB at the next voiced frame. Simulated over the scenes, about 4% of speech frames get the pause limit (mostly where loud rustling buries the voice) and about two thirds of noisy-pause time does.
+
+| | 12 dB (round 2) | 18 dB | **12 dB, 30 dB in pauses** | 15 dB, 30 dB in pauses |
+|---|---|---|---|---|
+| Chips bag, cut in pauses | 10.9 dB | 17.1 dB | **20.6 dB** | 23.5 dB |
+| Bark | 7.6 dB | 12.1 dB | **15.0 dB** | 16.3 dB |
+| Typing | 11.4 dB | 17.2 dB | **26.8 dB** | 27.3 dB |
+| Noise cut, mean | 14.0 dB | 18.7 dB | **22.9 dB** | 24.0 dB |
+| Voice dips | 4.22 dB | 5.19 dB | **4.31 dB** | 4.88 dB |
+| Voice > 6 dB below its level | 4.5% | 8.8% | **5.0%** | 7.2% |
+| PESQ | 2.62 | 2.58 | **2.63** | 2.61 |
+
+The voice is as before, and noise in pauses drops twice as far. The bench doesn't score the trade-off: with steady noise (a fan), the background now rises while you talk and fades in pauses. The fade is gradual, and the rise is masked by the voice.

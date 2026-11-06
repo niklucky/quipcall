@@ -9,11 +9,12 @@
 //! before the hook) are off: two suppressors in a row damage speech.
 //!
 //! The model mixes back some of the noise ([`Strength::CALLS`]): removing all
-//! of it also took quiet parts of the voice with it.
+//! of it also took quiet parts of the voice with it. It may remove more in
+//! pauses, where no voice can be lost.
 //!
 //! `QUIPCALL_DENOISE=webrtc` uses WebRTC's suppressor instead, `=off` neither.
-//! `QUIPCALL_DENOISE_LIMIT=<dB>` (or `none`) overrides how much the model may
-//! remove, for listening tests.
+//! `QUIPCALL_DENOISE_LIMIT=<dB>[/<dB in pauses>]` (or `none`) overrides how
+//! much the model may remove, for listening tests.
 
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -48,6 +49,10 @@ pub struct Strength {
     /// The most the model may lower any sound, in dB (`None`: no limit). The
     /// rest of the noise is mixed back in.
     pub limit_db: Option<f32>,
+    /// A deeper limit once the model has heard no voice for a moment
+    /// (`None`: keep `limit_db`). In a pause no voice masks the noise, and
+    /// none can be lost.
+    pub pause_limit_db: Option<f32>,
     /// Frames whose local SNR the model rates below this (dB) count as noise
     /// only and are lowered fully.
     pub noise_only_below_db: f32,
@@ -61,34 +66,42 @@ impl Strength {
     /// DeepFilterNet's own defaults: remove all the noise it can.
     pub const MODEL_DEFAULT: Strength = Strength {
         limit_db: None,
+        pause_limit_db: None,
         noise_only_below_db: -10.0,
         input_gain_db: 0.0,
     };
 
     /// What calls use: the voice stays as steady as with WebRTC's own
-    /// suppressor, and barks, rustles and clicks drop by 8-12 dB.
-    /// `dev/denoise-eval.py` compares this with 15, 18 and 24 dB.
+    /// suppressor; barks, rustles and clicks drop by 8-12 dB while you talk
+    /// and 15-30 dB in pauses. `dev/denoise-eval.py` compares the options.
     pub const CALLS: Strength = Strength {
         limit_db: Some(12.0),
+        pause_limit_db: Some(30.0),
         noise_only_below_db: -10.0,
         input_gain_db: 12.0,
     };
 
-    /// [`Self::CALLS`], or the limit in `QUIPCALL_DENOISE_LIMIT`.
+    /// [`Self::CALLS`], or the limits in `QUIPCALL_DENOISE_LIMIT`: `none`,
+    /// `<dB>`, or `<dB>/<dB in pauses>`.
     fn for_calls() -> Strength {
-        match std::env::var("QUIPCALL_DENOISE_LIMIT").as_deref() {
-            Ok("none") => Strength {
+        let Ok(value) = std::env::var("QUIPCALL_DENOISE_LIMIT") else {
+            return Self::CALLS;
+        };
+        if value == "none" {
+            return Strength {
                 limit_db: None,
+                pause_limit_db: None,
+                ..Self::CALLS
+            };
+        }
+        let mut parts = value.split('/').map(str::parse::<f32>);
+        match (parts.next(), parts.next()) {
+            (Some(Ok(limit)), pause) => Strength {
+                limit_db: Some(limit),
+                pause_limit_db: pause.and_then(Result::ok),
                 ..Self::CALLS
             },
-            Ok(db) => match db.parse() {
-                Ok(db) => Strength {
-                    limit_db: Some(db),
-                    ..Self::CALLS
-                },
-                Err(_) => Self::CALLS,
-            },
-            Err(_) => Self::CALLS,
+            _ => Self::CALLS,
         }
     }
 }
@@ -102,7 +115,23 @@ pub struct Denoiser {
     /// Scale from WebRTC's 16-bit range into the model and back.
     scale_in: f32,
     scale_out: f32,
+    strength: Strength,
+    /// Frames since the model last heard a voice.
+    quiet_frames: u32,
+    /// The limit in force, between the voice's and the pause's (dB).
+    limit_db: f32,
 }
+
+/// The model hears a voice when it rates a frame's speech-to-noise ratio
+/// above this (dB). In noisy pauses it rarely does: 90% of frames sit below
+/// -11 dB in `dev/denoise-eval.py`'s scenes.
+const VOICE_LSNR_DB: f32 = -5.0;
+/// A pause starts this long (in frames) after the model last heard a voice,
+/// so word endings and short gaps keep the voice's limit.
+const PAUSE_AFTER_FRAMES: u32 = 30;
+/// How fast the limit deepens in a pause, dB per frame: the noise fades out
+/// rather than cutting off. When the voice returns, so does its limit, at once.
+const PAUSE_GLIDE_DB: f32 = 0.5;
 
 // SAFETY: tract keeps intermediate tensors in `Rc`s, which makes `DfTract`
 // `!Send`. Every one of those `Rc`s is created by and stays inside this one
@@ -130,6 +159,9 @@ impl Denoiser {
             output: Array2::zeros((1, FRAME)),
             scale_in: 1.0 / 32768.0,
             scale_out: 32768.0,
+            strength: Strength::MODEL_DEFAULT,
+            quiet_frames: 0,
+            limit_db: 0.0,
         })
     }
 
@@ -140,24 +172,54 @@ impl Denoiser {
 
     /// Change how hard the model works, from the next frame on.
     pub fn set_strength(&mut self, strength: Strength) {
-        self.df.atten_lim = strength.limit_db.map(|db| 10f32.powf(-db / 20.0));
+        self.strength = strength;
+        self.quiet_frames = 0;
+        self.set_limit(strength.limit_db);
         self.df.min_db_thresh = strength.noise_only_below_db;
         let gain = 10f32.powf(strength.input_gain_db / 20.0);
         self.scale_in = gain / 32768.0;
         self.scale_out = 32768.0 / gain;
     }
 
-    /// Clean one frame in place.
-    pub fn process(&mut self, samples: &mut [f32]) -> anyhow::Result<()> {
+    fn set_limit(&mut self, limit_db: Option<f32>) {
+        self.limit_db = limit_db.unwrap_or(f32::INFINITY);
+        self.df.atten_lim = limit_db.map(|db| 10f32.powf(-db / 20.0));
+    }
+
+    /// Deepen the limit in pauses, from the next frame on.
+    fn follow_pauses(&mut self, lsnr: f32) {
+        let (Some(voice), Some(pause)) = (self.strength.limit_db, self.strength.pause_limit_db)
+        else {
+            return;
+        };
+        self.quiet_frames = if lsnr > VOICE_LSNR_DB {
+            0
+        } else {
+            self.quiet_frames.saturating_add(1)
+        };
+        let limit = if self.quiet_frames > PAUSE_AFTER_FRAMES {
+            (self.limit_db + PAUSE_GLIDE_DB).min(pause)
+        } else {
+            voice
+        };
+        if limit != self.limit_db {
+            self.set_limit(Some(limit));
+        }
+    }
+
+    /// Clean one frame in place. Returns the model's estimate of the frame's
+    /// speech-to-noise ratio (dB).
+    pub fn process(&mut self, samples: &mut [f32]) -> anyhow::Result<f32> {
         anyhow::ensure!(samples.len() == FRAME, "frame of {} samples", samples.len());
         for (dst, src) in self.input.iter_mut().zip(samples.iter()) {
             *dst = src * self.scale_in;
         }
-        self.df.process(self.input.view(), self.output.view_mut())?;
+        let lsnr = self.df.process(self.input.view(), self.output.view_mut())?;
         for (dst, src) in samples.iter_mut().zip(self.output.iter()) {
             *dst = (src * self.scale_out).clamp(-32768.0, 32767.0);
         }
-        Ok(())
+        self.follow_pauses(lsnr);
+        Ok(lsnr)
     }
 }
 
@@ -344,7 +406,7 @@ unsafe extern "C" fn process(
     live.levels.add(first);
     let start = Instant::now();
     let failure = match catch_unwind(AssertUnwindSafe(|| live.denoiser.process(first))) {
-        Ok(Ok(())) => None,
+        Ok(Ok(_)) => None,
         Ok(Err(e)) => Some(format!("{e:#}")),
         Err(_) => Some("the model panicked".into()),
     };

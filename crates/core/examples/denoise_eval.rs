@@ -36,9 +36,10 @@ enum Kind {
     RnNoise,
 }
 
-const fn deep(limit_db: f32, input_gain_db: f32) -> Kind {
+const fn deep(limit_db: f32, pause_limit_db: Option<f32>, input_gain_db: f32) -> Kind {
     Kind::Deep(Strength {
         limit_db: Some(limit_db),
+        pause_limit_db,
         noise_only_below_db: -10.0,
         input_gain_db,
     })
@@ -61,34 +62,34 @@ const CHAINS: &[Chain] = &[
         agc2: false,
         filter: Kind::Deep(Strength::MODEL_DEFAULT),
     },
-    // What calls use (Strength::CALLS), and stronger and milder limits.
+    // What calls use (Strength::CALLS), and alternatives.
+    Chain {
+        name: "dfn12p30g12-agc2",
+        webrtc_ns: false,
+        agc1: false,
+        agc2: true,
+        filter: deep(12.0, Some(30.0), 12.0),
+    },
+    Chain {
+        name: "dfn15p30g12-agc2",
+        webrtc_ns: false,
+        agc1: false,
+        agc2: true,
+        filter: deep(15.0, Some(30.0), 12.0),
+    },
     Chain {
         name: "dfn12g12-agc2",
         webrtc_ns: false,
         agc1: false,
         agc2: true,
-        filter: deep(12.0, 12.0),
-    },
-    Chain {
-        name: "dfn15g12-agc2",
-        webrtc_ns: false,
-        agc1: false,
-        agc2: true,
-        filter: deep(15.0, 12.0),
+        filter: deep(12.0, None, 12.0),
     },
     Chain {
         name: "dfn18g12-agc2",
         webrtc_ns: false,
         agc1: false,
         agc2: true,
-        filter: deep(18.0, 12.0),
-    },
-    Chain {
-        name: "dfn24g12-agc2",
-        webrtc_ns: false,
-        agc1: false,
-        agc2: true,
-        filter: deep(24.0, 12.0),
+        filter: deep(18.0, None, 12.0),
     },
     // Close to Telemost's desktop default: RNNoise, then AGC2.
     Chain {
@@ -160,7 +161,9 @@ unsafe extern "C" fn hook(
     let start = Instant::now();
     match &mut filter.state {
         State::None => {}
-        State::Deep(d) => d.process(frame).expect("DeepFilterNet"),
+        State::Deep(d) => {
+            d.process(frame).expect("DeepFilterNet");
+        }
         State::RnNoise(state, out) => {
             state.process_frame(out, frame);
             frame.copy_from_slice(out);
