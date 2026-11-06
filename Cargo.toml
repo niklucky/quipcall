@@ -21,6 +21,6 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
-# GPUI's macOS backend with one change: borderless popup windows (see vendor/README.md).
+# GPUI's macOS backend with call window fixes (see vendor/README.md).
 [patch.crates-io]
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }

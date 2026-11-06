@@ -1,3 +1,4 @@
+use crate::accessibility::AccessibleContentView;
 use crate::{
     BoolExt, MacDisplay, MetalFrames, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
     TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
@@ -701,7 +702,7 @@ struct MacWindowState {
     toggle_tab_bar_callback: Option<Box<dyn FnMut()>>,
     activated_least_once: bool,
     closed: Arc<AtomicBool>,
-    accesskit_adapter: Option<accesskit_macos::SubclassingAdapter>,
+    accessibility_view: objc2::rc::Weak<AccessibleContentView>,
     // The parent window if this window is a sheet (Dialog kind)
     sheet_parent: Option<*mut AnyObject>,
 }
@@ -1108,9 +1109,11 @@ impl MacWindow {
                 setReleasedWhenClosed: Bool::NO
             ];
 
-            let content_view: *mut AnyObject = msg_send![native_window, contentView];
+            let original_content: *mut AnyObject = msg_send![native_window, contentView];
+            let content_bounds: NSRect = msg_send![original_content, bounds];
+            let content_view = AccessibleContentView::new(marker, content_bounds);
+            let _: () = msg_send![native_window, setContentView: &*content_view];
             let native_view: *mut AnyObject = msg_send![VIEW_CLASS, alloc];
-            let content_bounds: NSRect = msg_send![content_view, bounds];
             let native_view: *mut AnyObject = msg_send![native_view, initWithFrame: content_bounds];
             assert!(!native_view.is_null());
 
@@ -1169,7 +1172,7 @@ impl MacWindow {
                 toggle_tab_bar_callback: None,
                 activated_least_once: false,
                 closed: Arc::new(AtomicBool::new(false)),
-                accesskit_adapter: None,
+                accessibility_view: objc2::rc::Weak::new(&content_view),
                 sheet_parent: None,
             }));
             let mut window = Self(state, marker, metal_frames);
@@ -1226,7 +1229,7 @@ impl MacWindow {
             ];
 
             let native_view: *mut AnyObject = msg_send![native_view, autorelease];
-            let _: () = msg_send![content_view, addSubview: native_view];
+            let _: () = msg_send![&*content_view, addSubview: native_view];
             let _: Bool = msg_send![native_window, makeFirstResponder: native_view];
 
             let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
@@ -1405,16 +1408,13 @@ impl MacWindow {
 
 impl Drop for MacWindow {
     fn drop(&mut self) {
+        // Dropping an active accessibility tree can notify AppKit synchronously.
+        let view = self.0.lock().accessibility_view.load();
+        if let Some(view) = view {
+            view.clear();
+        }
+
         let mut this = self.0.lock();
-        // `accesskit_macos::SubclassingAdapter::for_window` strong-retains the
-        // window's content view, and that content view keeps the `GPUIView` it
-        // hosts alive. Together with the `Rc<Mutex<MacWindowState>>` parked in
-        // both views' `windowState` ivar, that forms
-        // `MacWindowState -> adapter -> content view -> GPUIView -> MacWindowState`,
-        // a cycle the delegate/`frame_source` teardown below cannot break. Drop
-        // the adapter here so the native view, its `CAMetalLayer` and the
-        // renderer's command queue are actually released with the window.
-        drop(this.accesskit_adapter.take());
         this.renderer.destroy();
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
@@ -2410,56 +2410,21 @@ impl PlatformWindow for MacWindow {
     }
 
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
-        let mut lock = self.0.lock();
-
-        let activation_handler = A11yActivationHandler {
-            callback: callbacks.activation,
-        };
-        let action_handler = A11yActionHandler(callbacks.action);
-
-        let adapter = unsafe {
-            accesskit_macos::SubclassingAdapter::for_window(
-                lock.native_window as *mut c_void,
-                activation_handler,
-                action_handler,
-            )
-        };
-
-        lock.accesskit_adapter = Some(adapter);
+        let view = self.0.lock().accessibility_view.load();
+        if let Some(view) = view {
+            view.init_accessibility(callbacks);
+        }
     }
 
     fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
-        let events = {
-            let mut lock = self.0.lock();
-            lock.accesskit_adapter
-                .as_mut()
-                .and_then(|adapter| adapter.update_if_active(|| tree_update))
-        };
-        if let Some(events) = events {
+        let view = self.0.lock().accessibility_view.load();
+        if let Some(events) = view.and_then(|view| view.update_tree(tree_update)) {
             events.raise();
         }
     }
 
     fn a11y_update_window_bounds(&self) {
         // macOS handles window bounds tracking automatically via NSAccessibility.
-    }
-}
-
-struct A11yActivationHandler {
-    callback: Box<dyn Fn() -> Option<accesskit::TreeUpdate> + Send + 'static>,
-}
-
-impl accesskit::ActivationHandler for A11yActivationHandler {
-    fn request_initial_tree(&mut self) -> Option<accesskit::TreeUpdate> {
-        (self.callback)()
-    }
-}
-
-struct A11yActionHandler(Box<dyn Fn(accesskit::ActionRequest) + Send + 'static>);
-
-impl accesskit::ActionHandler for A11yActionHandler {
-    fn do_action(&mut self, request: accesskit::ActionRequest) {
-        (self.0)(request);
     }
 }
 
@@ -3250,13 +3215,8 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
     let executor = lock.foreground_executor.clone();
     drop(lock);
 
-    let a11y_events = {
-        let mut lock = window_state.lock();
-        lock.accesskit_adapter
-            .as_mut()
-            .and_then(|adapter| adapter.update_view_focus_state(is_active))
-    };
-    if let Some(events) = a11y_events {
+    let view = window_state.lock().accessibility_view.load();
+    if let Some(events) = view.and_then(|view| view.update_focus(is_active)) {
         events.raise();
     }
 
