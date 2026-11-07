@@ -1251,6 +1251,9 @@ impl MacWindow {
                     if kind == WindowKind::Floating {
                         // Let the window float keep above normal windows.
                         let _: () = msg_send![native_window, setLevel: NSFloatingWindowLevel];
+                        // quipcall patch: the share picker must remain available
+                        // when a permission prompt or another app takes focus.
+                        let _: () = msg_send![native_window, setHidesOnDeactivate: Bool::NO];
                         let _: () = msg_send![native_window, setAcceptsMouseMovedEvents: Bool::YES];
                     } else {
                         let _: () = msg_send![native_window, setLevel: NSNormalWindowLevel];
@@ -1270,6 +1273,9 @@ impl MacWindow {
                 WindowKind::PopUp | WindowKind::AnchoredPopup(_) => {
                     add_mouse_tracking_area(tracking_view);
 
+                    // quipcall patch: call controls stay visible while the user
+                    // works in the app they are sharing. NSPanel defaults to YES.
+                    let _: () = msg_send![native_window, setHidesOnDeactivate: Bool::NO];
                     let _: () = msg_send![native_window, setLevel: NSPopUpWindowLevel];
                     let _: () = msg_send![
                         native_window,

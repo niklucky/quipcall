@@ -41,6 +41,7 @@ These are targets. We measure them at the end of Stage 1 and at every milestone,
 - [x] ~~Desktop: GPUI window that connects to a room with a dev token~~
 - [x] ~~Desktop: render remote video. I420 → full-range NV12 `CVPixelBuffer` → GPUI `surface`~~
 - [ ] Desktop: microphone and speaker via `PlatformAudio`, with echo cancellation, noise suppression and auto gain from WebRTC. *Mic → web verified (audio arrives with signal, no concealment). Speaker playback still needs a human ear.*
+- [ ] Desktop: neural noise suppression (DeepFilterNet 3) after WebRTC's echo cancellation, then AGC2, through a `webrtc-sys` hook (`vendor/README.md`). *First real call: voice dipped; the model was muting quiet voices (fixed with a 12 dB input gain and a 12 dB limit). Second call: better, hard rustling still faintly audible, so pauses now allow 30 dB ([FOOTPRINT.md](FOOTPRINT.md)). Needs a third listening check, and a look at double talk on laptop speakers.*
 - [x] ~~Desktop: screen share via ScreenCaptureKit, with frame-rate presets 5/15/30/60 and a text/motion mode~~ *Verified by sharing one of Quipcall's own windows: the web client receives 2200×1440 at 15 fps (text) and 1920×1256 at 30 fps (motion), 0 dropped frames.*
 - [x] ~~Desktop: ask for mic and camera permission up front (AVCaptureDevice `requestAccess`) before opening the audio device. Otherwise a pending prompt blocks WebRTC's audio thread and freezes the call (found in testing).~~ *The header shows "Waiting for … access" while the prompt is open; if the mic is denied, the call continues listen-only.*
 - [x] ~~Desktop: pick the simulcast layer per tile from its on-screen size (the Rust SDK's adaptive stream doesn't report sizes)~~
@@ -102,6 +103,7 @@ Design: [UI.md](UI.md).
 - [ ] `core`: call state machine with no UI code
 - [ ] Contacts: add by username, see who's online
 - [ ] Settings: mic, speaker, camera, default screen-share preset
+- [ ] Noise suppression switch (off for music), desktop and web; the web client gets the same model in WASM. Then shrink the model's footprint: a pre-converted model to cut load-time memory, or our own inference on Accelerate instead of tract.
 
 **Done when:** the app starts in the menu bar, logs in, shows contacts with live presence, and meets the idle budget.
 
@@ -135,7 +137,8 @@ Started early (2026-11-03), ahead of Stages 3–6: there are no accounts yet, so
 - [ ] Notarization (Apple Developer ID), so a downloaded zip opens without the manual "Open"; simple update check
 - [ ] Invite codes for friends
 - [x] ~~Fix: crash on join on Macs with a Touch Bar~~ — floating windows are created borderless (patched GPUI) instead of switching style afterwards; the accessibility content view also keeps its class when home closes so Touch Bar observers survive the transition
-- [ ] Bug: on a friend's Intel Mac (macOS 15.6, two displays, Touch Bar) all call windows vanished after he started a screen share, though the app kept running and the share worked. Not reproducible here; the app now logs window visibility, waiting for a log
+- [ ] Verify on the affected Intel Mac (macOS 15.6, two displays, Touch Bar): call windows stay visible when sharing and switching apps. *Fixed NSPanel's default hide-on-deactivate behavior for floating windows and popups; audio continued while the UI disappeared. Needs a manual check with the updated app.*
+- [ ] Verify share picker responsiveness with many windows. *Permission checks and enumeration run off the UI thread; choices arrive before previews. Native submissions run on isolated workers with deadlines and a shared limit of four requests across picker sessions. In-flight requests keep their slot through timeouts and cancellation until the native callback completes; listing failures offer Retry.*
 
 **Done when:** friends install the app, sign up, and call each other over the internet, including through strict NAT.
 

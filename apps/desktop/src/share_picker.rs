@@ -1,6 +1,8 @@
 //! "Share your screen": pick a screen or window from live thumbnails, and a
 //! frame-rate preset.
 
+use std::time::Duration;
+
 use gpui::prelude::*;
 use gpui::{
     App, Bounds, ClickEvent, Context, Div, Entity, FocusHandle, FontWeight, KeyBinding, ObjectFit,
@@ -8,7 +10,7 @@ use gpui::{
     actions, div, hsla, px, rgb, size, svg,
 };
 use quipcall_core::permissions;
-use quipcall_core::{ScreenSharePreset, ShareSource, SourceId};
+use quipcall_core::{ScreenSharePreset, ShareSource, ShareSourceUpdate, SourceId};
 
 use crate::assets::Icon;
 use crate::call::Call;
@@ -71,6 +73,7 @@ pub struct SharePicker {
     preset: ScreenSharePreset,
     focus: FocusHandle,
     _load: Option<Task<()>>,
+    _load_timeout: Option<Task<()>>,
 }
 
 impl SharePicker {
@@ -89,46 +92,105 @@ impl SharePicker {
             preset,
             focus,
             _load: None,
+            _load_timeout: None,
         };
         picker.load(cx);
         picker
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
-        if !permissions::screen_recording_allowed() {
-            self.state = State::NeedsPermission;
-            cx.notify();
-            return;
-        }
+        // Drop the old receiver before starting a retry. Permission checks and
+        // native capture setup also belong to the worker, not the UI thread.
+        self._load = None;
+        self._load_timeout = None;
+        self.selected = None;
         self.state = State::Loading;
-        self._load = Some(cx.spawn(async move |this, cx| {
-            let result = quipcall_core::list_sources(THUMB_PIXELS).await;
+        let updates = self.call.read(cx).screen_sources(THUMB_PIXELS);
+        // This timer lives on the UI executor so even a native API that blocks
+        // before returning can be abandoned without freezing the picker.
+        self._load_timeout = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs(12))
+                .await;
             let _ = this.update(cx, |picker, cx| {
-                match result {
-                    Ok(sources) => {
-                        picker.selected = sources.first().map(|s| s.id);
-                        picker.state = State::Ready(sources);
-                    }
-                    Err(e) if e.is::<quipcall_core::NoPermission>() => {
-                        picker.state = State::NeedsPermission
-                    }
-                    Err(e) => picker.state = State::Failed(format!("{e:#}")),
+                if matches!(picker.state, State::Loading) {
+                    picker._load = None;
+                    picker.state =
+                        State::Failed("macOS took too long to respond. Please try again.".into());
+                    tracing::warn!("screen share picker timed out");
+                    cx.notify();
                 }
-                cx.notify();
             });
+        }));
+        self._load = Some(cx.spawn(async move |this, cx| {
+            while let Ok(result) = updates.recv().await {
+                if this
+                    .update(cx, |picker, cx| {
+                        match result {
+                            Ok(ShareSourceUpdate::Sources(sources)) => {
+                                picker.selected = sources.first().map(|s| s.id);
+                                picker.state = State::Ready(sources);
+                            }
+                            Ok(ShareSourceUpdate::Thumbnail(id, thumbnail)) => {
+                                if let State::Ready(sources) = &mut picker.state
+                                    && let Some(source) = sources.iter_mut().find(|s| s.id == id)
+                                {
+                                    source.thumbnail = Some(thumbnail);
+                                }
+                            }
+                            Err(e) if e.is::<quipcall_core::NoPermission>() => {
+                                picker.state = State::NeedsPermission
+                            }
+                            Err(e) => {
+                                tracing::warn!("screen share picker: {e:#}");
+                                picker.state = State::Failed(format!("{e:#}"));
+                            }
+                        }
+                        picker._load_timeout = None;
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
         }));
         cx.notify();
     }
 
     fn share(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.state, State::Ready(_)) {
+            return;
+        }
         let Some(source) = self.selected else { return };
+        self._load = None;
+        self._load_timeout = None;
         let preset = self.preset;
         self.call.update(cx, |c, cx| c.share(source, preset, cx));
         window.remove_window();
     }
 
     fn cancel(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+        self._load = None;
+        self._load_timeout = None;
         window.remove_window();
+    }
+
+    fn request_permission(&mut self, cx: &mut Context<Self>) {
+        // CGRequestScreenCaptureAccess can wait for the system prompt.
+        let request = cx
+            .background_executor()
+            .spawn(async { permissions::request_screen_recording() });
+        self._load = Some(cx.spawn(async move |this, cx| {
+            let allowed = request.await;
+            let _ = this.update(cx, |picker, cx| {
+                if allowed {
+                    picker.load(cx);
+                } else {
+                    cx.open_url(SETTINGS_URL);
+                }
+            });
+        }));
     }
 
     fn render_sources(&self, sources: &[ShareSource], cx: &mut Context<Self>) -> Div {
@@ -279,14 +341,8 @@ impl SharePicker {
                     .gap_2()
                     .pt_2()
                     .child(
-                        button("open-settings", "Open System Settings", true).on_click(
-                            cx.listener(|_, _, _, cx| {
-                                // The first time this shows macOS's own prompt.
-                                if !permissions::request_screen_recording() {
-                                    cx.open_url(SETTINGS_URL);
-                                }
-                            }),
-                        ),
+                        button("open-settings", "Open System Settings", true)
+                            .on_click(cx.listener(|this, _, _, cx| this.request_permission(cx))),
                     )
                     .child(
                         button("retry", "Try again", false)
@@ -302,7 +358,13 @@ impl Render for SharePicker {
         let body = match &self.state {
             State::Loading => centered("Looking for screens and windows…"),
             State::NeedsPermission => self.render_permission(cx),
-            State::Failed(e) => centered(format!("Couldn't list screens: {e}")),
+            State::Failed(e) => centered(format!("Couldn't list screens: {e}"))
+                .flex_col()
+                .gap_3()
+                .child(
+                    button("retry", "Try again", false)
+                        .on_click(cx.listener(|this, _, _, cx| this.load(cx))),
+                ),
             State::Ready(sources) if sources.is_empty() => centered("Nothing to share."),
             State::Ready(sources) => self.render_sources(sources, cx),
         };

@@ -8,6 +8,7 @@
 //! executor it likes.
 
 mod camera;
+pub mod denoise;
 pub mod permissions;
 #[cfg(target_os = "macos")]
 pub mod pixel_buffer;
@@ -34,7 +35,7 @@ pub use permissions::{Access, MediaDevice};
 pub use quipcall_protocol as protocol;
 pub use screen::{ContentMode, ScreenSharePreset, SourceId};
 #[cfg(target_os = "macos")]
-pub use screen_mac::{NoPermission, ShareSource, Thumbnail, list_sources, own_window};
+pub use screen_mac::{NoPermission, ShareSource, ShareSourceUpdate, Thumbnail, own_window};
 pub use video::{FrameSink, VideoSubscription};
 
 /// Stable identifier of a remote track inside the UI.
@@ -330,6 +331,37 @@ impl Engine {
         });
     }
 
+    /// Lists share choices first, then delivers previews as they arrive. Native
+    /// screen APIs may block even before calling their completion handlers, so
+    /// keep the entire operation off both the UI and media executor threads.
+    /// Dropping the receiver stops queuing and waiting for previews. In-flight
+    /// native requests retain their shared budget until completion, including
+    /// when another picker opens with its own stream.
+    #[cfg(target_os = "macos")]
+    pub fn screen_sources(
+        &self,
+        thumb_width: u32,
+    ) -> async_channel::Receiver<anyhow::Result<ShareSourceUpdate>> {
+        let (tx, rx) = async_channel::bounded(8);
+        let runtime = self.rt().handle().clone();
+        self.rt().spawn_blocking(move || {
+            crate::autorelease_pool(|| {
+                runtime.block_on(async {
+                    tokio::select! {
+                        biased;
+                        _ = tx.closed() => {},
+                        result = screen_mac::list_sources(thumb_width, &tx) => {
+                            if let Err(error) = result {
+                                let _ = tx.send(Err(error)).await;
+                            }
+                        }
+                    }
+                });
+            });
+        });
+        rx
+    }
+
     /// Share `source` (required on macOS, where our own picker chooses it).
     /// Captured frames also go to `preview`, so you can see what you share.
     pub fn start_screen_share(
@@ -488,6 +520,10 @@ async fn connect(
             .await?;
     }
 
+    // Load the noise model while the room connects; the microphone track
+    // must wait for it, since it fixes WebRTC's own suppression on creation.
+    let denoise = mic_allowed.then(|| tokio::task::spawn_blocking(denoise::prepare));
+
     // The platform ADM has to exist before the peer connections are created.
     let audio = if use_audio {
         let audio = PlatformAudio::new().context("audio device")?;
@@ -542,6 +578,11 @@ async fn connect(
     if let Some(audio) = audio.filter(|_| mic_allowed) {
         let (room, state, events) = (room.clone(), state.clone(), events.clone());
         tokio::spawn(async move {
+            if let Some(denoise) = denoise
+                && let Err(e) = denoise.await
+            {
+                tracing::error!("noise suppression: {e}");
+            }
             let mic = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
             let options = TrackPublishOptions {
                 source: TrackSource::Microphone,
