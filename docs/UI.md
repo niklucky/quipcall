@@ -46,11 +46,11 @@ One window (960 × 640), two panes:
 One small glass widget floats above all apps and Spaces and never takes focus. Prototype: [prototype/call-widget.html](prototype/call-widget.html).
 
 - **The row** shows up to three people who were active last (spoke, unmuted or joined). When someone new speaks and the row is full, they take the place of whoever has been quiet longest; the others stay where they are. **You** are always last in the row (a red badge while muted) and don't count toward the three, so muting moves nothing.
-- **The stack**, a grey pill with one face and "+N", holds everyone else muted or quiet for two minutes. It keeps one width whatever it holds.
+- **The stack**, a grey pill with one dimmed face, the next two peeking out behind it and "+N", holds everyone else muted or quiet for two minutes.
 - **Cameras**: people in the row with their camera on (you included) show as video tiles above the row, named on the tile. Faces in the row are avatars.
 - **Three buttons, always**: Share, Mic, Leave. Hovering them opens a row underneath with Camera, Copy link and Call window.
 - **Hovering the stack** opens a row with everyone in it (name, mic state). **Hovering a face** for a moment shows the name and what they're doing ("speaking", "active 40 s ago").
-- **While you share**, the widget grows upward with your screen's live preview on top, and a Stop button.
+- **While you share**, the widget grows upward with your screen's live preview on top (once its first frame arrives, in its shape), and a Stop button.
 - **Someone sharing** has a screen badge on their face or tile; click it to bring their share window to the front. Anyone sharing stays in the row.
 - **The main row never moves**: the widget grows around it, up for tiles and your preview, down for the hover rows, and sideways from its left end, so Share, Mic and Leave stay under the cursor. Near the bottom of the screen the hover rows open above it instead. A row closes once the cursor has been outside the widget for a quarter of a second.
 - "Joining…", permission prompts and errors show in a slim row under the main one.
@@ -84,5 +84,6 @@ One window (1040 × 680): the room's name and the call's time in the title bar, 
 - Glass is the system blur behind the window (GPUI's `Blurred` background, an `NSVisualEffectView`) under a faint dark tint.
 - GPUI clips video only to rectangles, so rounded tiles and previews are drawn in horizontal bands, each clipped to the shape's width, under an opaque ring that hides the steps (`rounded_video` in `ui.rs`): about 10 draws for a widget tile. Patching GPUI's surface shader for rounded corners would make it one draw, but that means vendoring GPUI itself.
 - The text field is GPUI's `input.rs` example, adapted (`text_input.rs`).
+- Screenshots and screen recordings show our floating windows. Our own screen shares leave every Quipcall window out through their ScreenCaptureKit filter, so nobody sees the widget (or a preview of the preview) in your share.
 - No widget library: the look is custom, and every dependency costs footprint. Shared pieces (avatars, buttons, tooltips, empty states) are in `ui.rs`.
 - Icons: [Lucide](https://lucide.dev) (ISC licence), embedded as SVG.

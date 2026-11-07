@@ -49,8 +49,6 @@ const RADIUS: f64 = 26.0;
 const RING: f32 = 2.5;
 const EDGE: u32 = 0x1d1f26;
 const PREVIEW_RADIUS: f32 = 16.0;
-/// Until the first frame of your share arrives (most Mac screens are 16:10).
-const PREVIEW_ASPECT: f32 = 1.6;
 /// The stack: avatars behind the front one, and the "+N" after it.
 const GHOST: f32 = 9.0;
 const COUNT: f32 = 26.0;
@@ -129,8 +127,8 @@ pub struct Capsule {
     /// Height above the main row.
     above: f32,
     /// [`Self::above`] for the window's frame as it is now: a resize lands a
-    /// frame later, and until then the main row is drawn here, so it stays
-    /// put.
+    /// turn later (set right before it), and until then the main row is drawn
+    /// here, so it stays put.
     shown_above: f32,
     /// The drawer opens above the main row: no room under it.
     drawer_above: bool,
@@ -326,7 +324,7 @@ impl Capsule {
             above + MAIN + if drawer_above { 0.0 } else { drawer_h },
         );
         if wanted != self.size || above != self.above {
-            mac::resize(
+            mac::resize_with(
                 window,
                 wanted,
                 mac::Mask::Rounded(RADIUS),
@@ -335,6 +333,10 @@ impl Capsule {
                     after: above,
                 },
                 cx,
+                move |this, cx| {
+                    this.shown_above = above;
+                    cx.notify();
+                },
             );
             self.size = wanted;
             self.above = above;
@@ -408,26 +410,24 @@ impl Capsule {
 }
 
 /// While you share: the shape of what you share.
+/// Shown once the first frame arrives, so the widget grows once, to the
+/// right shape.
 fn preview_aspect(me: &Member) -> Option<f32> {
-    let screen = me.screen.as_ref()?;
-    Some(
-        screen
-            .sink
-            .aspect()
-            .unwrap_or(PREVIEW_ASPECT)
-            .clamp(1.0, 2.5),
-    )
+    Some(me.screen.as_ref()?.sink.aspect()?.clamp(1.0, 2.5))
 }
 
-/// The stack keeps one width whatever it holds, so people coming and going
-/// don't shift the row.
-const STACK_W: f32 = 2.0 + FACE + 2.0 * GHOST + GAP + 2.0 + COUNT + 9.0;
+/// The stack: its front face, up to two faces peeking out behind it, "+N".
+fn stack_width(n: usize) -> f32 {
+    let behind = n.saturating_sub(1).min(2) as f32;
+    let count = if n > 1 { GAP + 2.0 + COUNT } else { 0.0 };
+    2.0 + FACE + behind * GHOST + count + 9.0
+}
 
 fn row_width(plan: &Plan) -> f32 {
     let mut items: Vec<f32> = plan.faces.iter().map(|_| FACE).collect();
     let mut extra = 0.0;
     if !plan.stack.is_empty() {
-        items.push(STACK_W);
+        items.push(stack_width(plan.stack.len()));
         if !plan.faces.is_empty() {
             extra += GAP;
         }
@@ -457,9 +457,15 @@ fn strip_height(plan: &Plan) -> f32 {
 }
 
 fn preview_height(plan: &Plan, width: f32) -> f32 {
-    plan.preview.map_or(0.0, |aspect| {
-        PAD + ((width - 2.0 * PAD) / aspect).clamp(130.0, 230.0).round()
-    })
+    plan.preview
+        .map_or(0.0, |aspect| PAD + preview_size(aspect, width).height)
+}
+
+/// Your preview in the shape of what you share: the widget's width, unless
+/// that makes it taller than 300 px; then narrower, at the right end.
+fn preview_size(aspect: f32, width: f32) -> Size<f32> {
+    let h = ((width - 2.0 * PAD) / aspect).clamp(120.0, 300.0).round();
+    size((h * aspect).min(width - 2.0 * PAD).round(), h)
 }
 
 /// People per line in the stack's row, at `width`.
@@ -524,12 +530,6 @@ impl Render for Capsule {
         };
         // Until a resize lands, draw the main row where it is on screen now,
         // and keep the right end (the buttons) in place.
-        let viewport = window.viewport_size();
-        if (viewport.width / px(1.0) - self.size.width).abs() < 0.5
-            && (viewport.height / px(1.0) - self.size.height).abs() < 0.5
-        {
-            self.shown_above = self.above;
-        }
         let top = self.shown_above - self.above;
 
         div()
@@ -560,65 +560,74 @@ impl Render for Capsule {
 
 impl Capsule {
     fn preview_view(&self, plan: &Plan, width: f32, cx: &mut Context<Self>) -> Option<Div> {
-        plan.preview?;
-        let height = preview_height(plan, width) - PAD;
+        let box_size = preview_size(plan.preview?, width);
         let c = self.call.read(cx);
         let frame = c.me.read(cx).screen.as_ref().and_then(|v| v.sink.latest());
         let preset = c.sharing.map(|p| p.label());
         let call = self.call.clone();
         Some(
-            div().flex_none().pt(px(PAD)).px(px(PAD)).child(
-                div()
-                    .h(px(height))
-                    .w_full()
-                    .relative()
-                    .rounded(px(PREVIEW_RADIUS))
-                    .bg(rgb(0x000000))
-                    .children(
-                        frame.map(|f| rounded_video(f, PREVIEW_RADIUS, RING, ObjectFit::Contain)),
-                    )
-                    .child(ring(PREVIEW_RADIUS, RING, rgb(EDGE)))
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(8.0))
-                            .top(px(8.0))
-                            .h(px(22.0))
-                            .px(px(8.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .rounded(px(8.0))
-                            .bg(black(0.62))
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(div().size(px(7.0)).rounded_full().bg(rgb(ACCENT)))
-                            .child(match preset {
-                                Some(preset) => format!("Sharing · {preset}"),
-                                None => "Starting to share…".into(),
+            div()
+                .flex_none()
+                .pt(px(PAD))
+                .px(px(PAD))
+                .flex()
+                .justify_end()
+                .child(
+                    div()
+                        .h(px(box_size.height))
+                        .w(px(box_size.width))
+                        .relative()
+                        .rounded(px(PREVIEW_RADIUS))
+                        .bg(rgb(0x000000))
+                        .children(
+                            frame.map(|f| {
+                                rounded_video(f, PREVIEW_RADIUS, RING, ObjectFit::Contain)
                             }),
-                    )
-                    .child(
-                        div()
-                            .id("stop-share")
-                            .absolute()
-                            .right(px(8.0))
-                            .top(px(8.0))
-                            .h(px(22.0))
-                            .px(px(9.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(8.0))
-                            .bg(rgb(DANGER))
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::BOLD)
-                            .cursor_pointer()
-                            .hover(|s| s.opacity(0.88))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(move |_, _, cx| call.update(cx, |c, cx| c.toggle_share(cx)))
-                            .child("Stop"),
-                    ),
-            ),
+                        )
+                        .child(ring(PREVIEW_RADIUS, RING, rgb(EDGE)))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(8.0))
+                                .top(px(8.0))
+                                .h(px(22.0))
+                                .px(px(8.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .rounded(px(8.0))
+                                .bg(black(0.62))
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(div().size(px(7.0)).rounded_full().bg(rgb(ACCENT)))
+                                .child(match preset {
+                                    Some(preset) => format!("Sharing · {preset}"),
+                                    None => "Starting to share…".into(),
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("stop-share")
+                                .absolute()
+                                .right(px(8.0))
+                                .top(px(8.0))
+                                .h(px(22.0))
+                                .px(px(9.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(8.0))
+                                .bg(rgb(DANGER))
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::BOLD)
+                                .cursor_pointer()
+                                .hover(|s| s.opacity(0.88))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(move |_, _, cx| {
+                                    call.update(cx, |c, cx| c.toggle_share(cx))
+                                })
+                                .child("Stop"),
+                        ),
+                ),
         )
     }
 
@@ -847,20 +856,28 @@ impl Capsule {
 
     fn stack_view(&self, plan: &Plan, after_faces: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let n = plan.stack.len();
-        let ghosts = n.saturating_sub(1).min(2);
+        let behind = n.saturating_sub(1).min(2);
         let front = plan.stack[0].read(cx);
         let open = self.open == Some(Drawer::People);
-        let ghost = |left: f32, color: u32| {
-            div()
-                .absolute()
-                .top_0()
-                .left(px(left))
-                .size(px(FACE))
-                .rounded_full()
-                .bg(rgb(color))
-                .border_2()
-                .border_color(rgb(EDGE))
-        };
+        // The next people in the stack, peeking out to the right, dimmer
+        // the further back they are.
+        let peeking: Vec<AnyElement> = plan.stack[1..=behind]
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(ix, member)| {
+                let name = member.read(cx).name.clone();
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px((ix + 1) as f32 * GHOST))
+                    .size(px(FACE))
+                    .rounded_full()
+                    .bg(rgb(EDGE))
+                    .child(avatar(&name, FACE).opacity(if ix == 0 { 0.45 } else { 0.3 }))
+                    .into_any_element()
+            })
+            .collect();
         div()
             .id("stack")
             .flex_none()
@@ -884,27 +901,30 @@ impl Capsule {
                     .relative()
                     .flex_none()
                     .h(px(FACE))
-                    .w(px(FACE + 2.0 * GHOST))
-                    .when(ghosts > 1, |el| el.child(ghost(2.0 * GHOST, 0x373a44)))
-                    .when(ghosts > 0, |el| el.child(ghost(GHOST, 0x4a4e59)))
+                    .w(px(FACE + behind as f32 * GHOST))
+                    .children(peeking)
                     .child(
                         div()
                             .absolute()
                             .top_0()
                             .left_0()
+                            .rounded_full()
+                            .bg(rgb(EDGE))
                             .child(avatar(&front.name, FACE).opacity(0.7))
                             .when(front.mic_muted, |el| el.child(mute_badge())),
                     ),
             )
-            .child(
-                div()
-                    .w(px(COUNT))
-                    .ml(px(2.0))
-                    .text_size(px(13.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(TEXT_DIM))
-                    .when(n > 1, |el| el.child(format!("+{}", n - 1))),
-            )
+            .when(n > 1, |el| {
+                el.child(
+                    div()
+                        .w(px(COUNT))
+                        .ml(px(2.0))
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(TEXT_DIM))
+                        .child(format!("+{}", n - 1)),
+                )
+            })
     }
 
     fn drawer_view(

@@ -8,7 +8,7 @@ use std::ptr::NonNull;
 
 use block2::RcBlock;
 use gpui::{
-    App, Size, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
+    App, Context, Size, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
 };
 use objc2::rc::Retained;
 use objc2_app_kit::{
@@ -16,8 +16,8 @@ use objc2_app_kit::{
     NSApplicationDidHideNotification, NSApplicationDidResignActiveNotification,
     NSApplicationDidUnhideNotification, NSEvent, NSView, NSWindow,
     NSWindowDidChangeOcclusionStateNotification, NSWindowDidChangeScreenNotification,
-    NSWindowOcclusionState, NSWindowSharingType, NSWindowStyleMask, NSWindowWillCloseNotification,
-    NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
+    NSWindowOcclusionState, NSWindowStyleMask, NSWindowWillCloseNotification, NSWorkspace,
+    NSWorkspaceActiveSpaceDidChangeNotification,
 };
 use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSNotificationName, NSPoint, NSRect, NSSize,
@@ -94,8 +94,9 @@ fn apply_mask(window: &NSWindow, mask: &Mask) {
     CATransaction::commit();
 }
 
-/// Drop the shadow and clip the content to `mask`. Floating windows also stay
-/// out of our own screen shares.
+/// Drop the shadow and clip the content to `mask`. Screenshots and screen
+/// recordings show floating windows; our own screen shares leave them out
+/// through their ScreenCaptureKit filter (`crates/core/src/screen_mac.rs`).
 ///
 /// The window must already be borderless: GPUI creates title-less popups that
 /// way (patched, see vendor/README.md). Switching the style mask here instead
@@ -114,7 +115,6 @@ pub fn make_shape(window: &Window, mask: Mask, cx: &App) {
     cx.foreground_executor()
         .spawn(async move {
             ns.setHasShadow(false);
-            ns.setSharingType(NSWindowSharingType::None);
             apply_mask(&ns, &mask);
         })
         .detach();
@@ -146,39 +146,63 @@ pub fn resize(window: &Window, size: Size<f32>, mask: Mask, anchor: Anchor, cx: 
         return;
     };
     cx.foreground_executor()
-        .spawn(async move {
-            let frame = ns.frame();
-            let (w, h) = (size.width as f64, size.height as f64);
-            // AppKit's y axis points up: origin is the bottom-left corner.
-            let (x, y) = match anchor {
-                Anchor::Center => (
-                    frame.origin.x + (frame.size.width - w) / 2.0,
-                    frame.origin.y + (frame.size.height - h) / 2.0,
-                ),
-                Anchor::TopLeft => (frame.origin.x, frame.origin.y + frame.size.height - h),
-                Anchor::Row { before, after } => (
-                    frame.origin.x + frame.size.width - w,
-                    frame.origin.y + frame.size.height - before as f64 + after as f64 - h,
-                ),
-            };
-            let mut target = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
-            if !matches!(anchor, Anchor::TopLeft)
-                && let Some(visible) = ns.screen().map(|s| s.visibleFrame())
-                && contains(visible, frame)
-            {
-                target.origin.x = target.origin.x.clamp(
-                    visible.origin.x,
-                    (visible.origin.x + visible.size.width - w).max(visible.origin.x),
-                );
-                target.origin.y = target.origin.y.clamp(
-                    visible.origin.y,
-                    (visible.origin.y + visible.size.height - h).max(visible.origin.y),
-                );
-            }
-            ns.setFrame_display(target, true);
-            apply_mask(&ns, &mask);
-        })
+        .spawn(async move { set_frame(&ns, size, &mask, anchor) })
         .detach();
+}
+
+/// Like [`resize`], but first runs `before` on the view, in the same turn as
+/// the frame change, so whatever the view draws next matches the new frame.
+/// Several resizes may be on their way at once; each brings its own state.
+pub fn resize_with<V: 'static>(
+    window: &Window,
+    size: Size<f32>,
+    mask: Mask,
+    anchor: Anchor,
+    cx: &mut Context<V>,
+    before: impl FnOnce(&mut V, &mut Context<V>) + 'static,
+) {
+    let Some(ns) = ns_window(window) else {
+        return;
+    };
+    cx.spawn(async move |view, cx| {
+        if view.update(cx, |v, cx| before(v, cx)).is_ok() {
+            set_frame(&ns, size, &mask, anchor);
+        }
+    })
+    .detach();
+}
+
+fn set_frame(ns: &NSWindow, size: Size<f32>, mask: &Mask, anchor: Anchor) {
+    let frame = ns.frame();
+    let (w, h) = (size.width as f64, size.height as f64);
+    // AppKit's y axis points up: origin is the bottom-left corner.
+    let (x, y) = match anchor {
+        Anchor::Center => (
+            frame.origin.x + (frame.size.width - w) / 2.0,
+            frame.origin.y + (frame.size.height - h) / 2.0,
+        ),
+        Anchor::TopLeft => (frame.origin.x, frame.origin.y + frame.size.height - h),
+        Anchor::Row { before, after } => (
+            frame.origin.x + frame.size.width - w,
+            frame.origin.y + frame.size.height - before as f64 + after as f64 - h,
+        ),
+    };
+    let mut target = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+    if !matches!(anchor, Anchor::TopLeft)
+        && let Some(visible) = ns.screen().map(|s| s.visibleFrame())
+        && contains(visible, frame)
+    {
+        target.origin.x = target.origin.x.clamp(
+            visible.origin.x,
+            (visible.origin.x + visible.size.width - w).max(visible.origin.x),
+        );
+        target.origin.y = target.origin.y.clamp(
+            visible.origin.y,
+            (visible.origin.y + visible.size.height - h).max(visible.origin.y),
+        );
+    }
+    ns.setFrame_display(target, true);
+    apply_mask(ns, mask);
 }
 
 fn contains(outer: NSRect, inner: NSRect) -> bool {
