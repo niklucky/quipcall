@@ -1,56 +1,66 @@
-//! Minimal mode: everyone in one floating glass capsule over your work.
+//! Minimal mode: the call in one small floating glass widget.
 //!
-//! Faces sit in a row (a column when the capsule is docked at the left or
-//! right edge of the screen). Mic and Leave are always there; the timer,
-//! camera, share, link and expand slide out while you hover. While you share,
-//! your face turns into a live preview of what you share.
-//!
-//! Drag it by any empty spot. Scroll or pinch over it to resize the faces.
-//! More than [`MAX_FACES`] people: a "+N" chip opens the rest, and whoever
-//! speaks always gets a visible place.
+//! The main row holds up to three people who were active last (spoke,
+//! unmuted or joined; a newcomer takes the place of whoever has been quiet
+//! longest), then you, then a stack with everyone muted or quiet for two
+//! minutes, then Share, Mic and Leave. People with their camera on show as
+//! video tiles above the row; while you share, your screen's preview sits on
+//! top. Hovering the buttons, the stack or a face opens a row underneath
+//! (above the main row instead when the screen ends first). The main row
+//! never moves: the window grows around it.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Context, Div, Entity, EntityId, MouseButton, ObjectFit, PinchEvent,
-    Pixels, ScrollEvent, SharedString, Size, Stateful, Subscription, Task, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, div, point, px, rgb, size,
+    AnyElement, App, Bounds, Context, Div, Entity, EntityId, FontWeight, MouseButton, ObjectFit,
+    Size, Stateful, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, div, point, px, rgb, size,
 };
 
 use crate::assets::Icon;
 use crate::call::{Call, Camera, Member, Mode};
 use crate::mac;
-use crate::theme::{DANGER, SPEAKING, TEXT, TEXT_DIM, black, glass_tint, white};
-use crate::ui::{self, Tone, avatar, icon, ring, round_button, rounded_video};
+use crate::theme::{
+    ACCENT, DANGER, SPEAKING, TEXT, TEXT_DIM, avatar_background, black, first_name, glass_tint,
+    white,
+};
+use crate::ui::{Tone, avatar, icon, icon_button, ring, round_button, rounded_video};
 
-/// Every face starts this size.
-pub const FACE: f32 = 44.0;
-const MIN_FACE: f32 = 32.0;
-const MAX_FACE: f32 = 96.0;
-/// Faces shown before the rest fold into a "+N" chip.
-const MAX_FACES: usize = 6;
+/// People in the row besides you.
+const ROW_MAX: usize = 3;
+/// Quiet this long and you go into the stack.
+const QUIET: Duration = Duration::from_secs(120);
+const FACE: f32 = 40.0;
 const PAD: f32 = 6.0;
 const GAP: f32 = 6.0;
-const BUTTON: f32 = 36.0;
-/// The timer, or the name of the face under the cursor.
-const LABEL: f32 = 92.0;
-/// Room for "Joining…" or an error next to the faces.
-const NOTICE: f32 = 240.0;
-/// The ring on every face: covers the steps of [`rounded_video`] and turns
-/// green while someone speaks.
+const BUTTON: f32 = 38.0;
+/// The main row's height.
+const MAIN: f32 = 56.0;
+const TILE_W: f32 = 120.0;
+const TILE_H: f32 = 90.0;
+const TILE_RADIUS: f32 = 18.0;
+const MIN_WIDTH: f32 = 240.0;
+const RADIUS: f64 = 26.0;
+/// Covers the steps of [`rounded_video`]; green while someone speaks.
 const RING: f32 = 2.5;
-const RING_IDLE: u32 = 0x2a2c33;
-const PREVIEW_RADIUS: f32 = 8.0;
+const EDGE: u32 = 0x1d1f26;
+const PREVIEW_RADIUS: f32 = 16.0;
 /// Until the first frame of your share arrives (most Mac screens are 16:10).
 const PREVIEW_ASPECT: f32 = 1.6;
-/// Docked: closer than this to the left or right edge of the screen.
-const DOCK: f32 = 24.0;
-/// Hover-only controls: camera, share, link, expand.
-const MORE_BUTTONS: usize = 4;
+/// The stack: avatars behind the front one, and the "+N" after it.
+const GHOST: f32 = 9.0;
+const COUNT: f32 = 26.0;
+/// A person in the stack's row: avatar and first name.
+const PERSON: f32 = 54.0;
+const CONTROLS_H: f32 = 73.0;
+const LINE_H: f32 = 37.0;
+/// Rows open and close after the cursor settles this long.
+const HOVER_DELAY: Duration = Duration::from_millis(250);
 /// Repaints at most this often. Everyone's frames arrive out of step, so
-/// without a cap the capsule redraws at the display's rate (up to 120 Hz);
+/// without a cap the widget redraws at the display's rate (up to 120 Hz);
 /// cameras send 30 fps at most.
 const FRAME: Duration = Duration::from_millis(33);
 
@@ -59,7 +69,8 @@ pub fn open(call: Entity<Call>, cx: &mut App) -> Option<WindowHandle<Capsule>> {
         .primary_display()
         .map(|d| d.visible_bounds())
         .unwrap_or_else(|| Bounds::new(point(px(0.0), px(0.0)), size(px(1440.0), px(900.0))));
-    let s = Capsule::measure(call.read(cx), FACE, false, false, false, cx);
+    // A first size; the widget fits itself as soon as it opens.
+    let s = size(MIN_WIDTH, MAIN);
     let bounds = Bounds::new(
         point(
             area.origin.x + (area.size.width - px(s.width)) / 2.0,
@@ -76,25 +87,47 @@ pub fn open(call: Entity<Call>, cx: &mut App) -> Option<WindowHandle<Capsule>> {
     .ok()
 }
 
+/// The row under (or over) the main one.
+#[derive(Clone, PartialEq)]
+enum Drawer {
+    /// Camera, copy link, call window.
+    Controls,
+    /// Everyone in the stack.
+    People,
+    /// The name of the face under the cursor (an identity).
+    Name(String),
+    /// "Joining…", a permission prompt or an error.
+    Notice,
+}
+
+/// Who goes where, for one frame.
+struct Plan {
+    /// In the row with the camera on: tiles above it. You last.
+    tiles: Vec<Entity<Member>>,
+    /// In the row with the camera off. You last.
+    faces: Vec<Entity<Member>>,
+    /// Muted or quiet, the most recently active first; you last when muted.
+    stack: Vec<Entity<Member>>,
+    /// Identities of people sharing their screen.
+    sharers: Vec<String>,
+    /// The shape of what you share, while you share.
+    preview: Option<f32>,
+}
+
 pub struct Capsule {
     call: Entity<Call>,
-    face: f32,
-    vertical: bool,
-    hovered: bool,
-    /// Show everyone, not just [`MAX_FACES`].
-    show_all: bool,
-    /// The face under the cursor, named in the label.
-    hovered_face: Option<SharedString>,
+    /// The people in the row besides you; positions stay put.
+    slots: Vec<Entity<Member>>,
+    /// The row opened by hovering.
+    open: Option<Drawer>,
     size: Size<f32>,
-    /// Someone's video or share changed shape: check the window size.
-    refit: bool,
-    /// Repaint subscriptions for every person on show.
+    /// Height above the main row.
+    above: f32,
+    /// The drawer opens above the main row: no room under it.
+    drawer_above: bool,
+    hover_task: Option<Task<()>>,
+    /// Repaint subscriptions for every person in the call.
     watched: HashMap<EntityId, Subscription>,
-    /// Checks for docking once the capsule stops moving.
-    settle: Option<Task<()>>,
-    /// The window's last bounds: a change of size is our own resize, not a
-    /// move, and mustn't dock the capsule.
-    last_bounds: Option<Bounds<Pixels>>,
     /// A repaint is already scheduled (see [`FRAME`]).
     repaint_pending: bool,
     _subscriptions: Vec<Subscription>,
@@ -108,21 +141,17 @@ impl Capsule {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        mac::make_shape(window, mask(size), cx);
-        let subscriptions = vec![
-            cx.observe_in(&call, window, |this, _, window, cx| {
-                this.watch(cx);
-                this.fit(window, cx);
-                cx.notify();
-            }),
-            cx.observe_window_bounds(window, |this, window, cx| this.moved(window, cx)),
-        ];
-        // The timer shows while you hover.
+        mac::make_shape(window, mac::Mask::Rounded(RADIUS), cx);
+        let subscriptions = vec![cx.observe(&call, |this, _, cx| {
+            this.watch(cx);
+            cx.notify();
+        })];
+        // People go quiet without any event: look again every second.
         let tick = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let alive = this.update(cx, |this, cx| {
-                    if this.hovered {
+                    if this.update_slots(cx) || matches!(this.open, Some(Drawer::Name(_))) {
                         cx.notify();
                     }
                 });
@@ -133,16 +162,13 @@ impl Capsule {
         });
         let mut this = Self {
             call,
-            face: FACE,
-            vertical: false,
-            hovered: false,
-            show_all: false,
-            hovered_face: None,
+            slots: Vec::new(),
+            open: None,
             size,
-            refit: false,
+            above: 0.0,
+            drawer_above: false,
+            hover_task: None,
             watched: HashMap::new(),
-            settle: None,
-            last_bounds: None,
             repaint_pending: false,
             _subscriptions: subscriptions,
             _tick: tick,
@@ -156,12 +182,9 @@ impl Capsule {
         let members: Vec<Entity<Member>> = self.call.read(cx).members().cloned().collect();
         let live: Vec<EntityId> = members.iter().map(|m| m.entity_id()).collect();
         for member in members {
-            self.watched.entry(member.entity_id()).or_insert_with(|| {
-                cx.observe(&member, |this, _, cx| {
-                    this.refit = true;
-                    this.schedule_repaint(cx);
-                })
-            });
+            self.watched
+                .entry(member.entity_id())
+                .or_insert_with(|| cx.observe(&member, |this, _, cx| this.schedule_repaint(cx)));
         }
         self.watched.retain(|id, _| live.contains(id));
     }
@@ -181,234 +204,168 @@ impl Capsule {
         .detach();
     }
 
-    /// The window size for the call's state and ours.
-    fn measure(
-        call: &Call,
-        face: f32,
-        vertical: bool,
-        expanded: bool,
-        show_all: bool,
-        cx: &App,
-    ) -> Size<f32> {
-        let notice = call.notice().is_some();
-        // A notice needs the width of a row.
-        let vertical = vertical && !notice;
-        let faces = visible(call, show_all, cx);
-        let along: f32 = faces
-            .iter()
-            .map(|slot| slot.extent(face, vertical, cx))
-            .sum::<f32>()
-            + GAP * faces.len().saturating_sub(1) as f32;
-        let mut controls = 2.0 * BUTTON + GAP;
-        if expanded {
-            controls += MORE_BUTTONS as f32 * (BUTTON + GAP);
-            if !vertical {
-                controls += LABEL + GAP;
-            }
-        }
-        if notice {
-            controls += NOTICE + GAP;
-        }
-        let length = PAD + along + GAP + 1.0 + GAP + controls + PAD;
-        let thickness = PAD + face.max(BUTTON) + PAD;
-        if vertical {
-            size(thickness, length)
-        } else {
-            size(length, thickness)
-        }
-    }
-
-    fn expanded(&self) -> bool {
-        self.hovered
-    }
-
-    /// Resize the window to fit. A row keeps its right end (Mic and Leave)
-    /// where it is, so they never move under the cursor; a column keeps its
-    /// top, or its right edge when docked there.
-    fn fit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Keep the row to the people active last. Returns whether it changed.
+    fn update_slots(&mut self, cx: &App) -> bool {
         let call = self.call.read(cx);
-        let wanted = Self::measure(
-            call,
-            self.face,
-            self.vertical,
-            self.expanded(),
-            self.show_all,
-            cx,
-        );
-        if wanted != self.size {
-            let anchor = if self.vertical {
-                if self.docked_right(window, cx) {
-                    mac::Anchor::Right
-                } else {
-                    mac::Anchor::Top
-                }
-            } else {
-                mac::Anchor::Right
-            };
-            self.size = wanted;
-            mac::resize(window, wanted, mask(wanted), anchor, cx);
+        let sharers = call.sharers(cx);
+        let others = call.others.clone();
+        let before = self.slots.clone();
+        let sharing = |m: &Member| sharers.contains(&m.identity);
+        let active = |m: &Member| sharing(m) || m.is_active(QUIET);
+        self.slots
+            .retain(|e| others.contains(e) && active(e.read(cx)));
+        let mut candidates: Vec<Entity<Member>> = others
+            .iter()
+            .filter(|e| !self.slots.contains(e) && active(e.read(cx)))
+            .cloned()
+            .collect();
+        // Sharers first, then whoever was active most recently.
+        candidates.sort_by_key(|e| {
+            let m = e.read(cx);
+            (!sharing(m), !m.speaking, Reverse(m.last_active))
+        });
+        for candidate in candidates {
+            self.take(candidate, &sharers, cx);
         }
+        self.slots != before
     }
 
-    fn docked_right(&self, window: &Window, cx: &App) -> bool {
-        let Some(area) = window.display(cx).map(|d| d.visible_bounds()) else {
-            return false;
-        };
-        let b = window.bounds();
-        let centre = b.origin.x + b.size.width / 2.0;
-        centre > area.origin.x + area.size.width / 2.0
-    }
-
-    /// After a move, turn vertical at the left or right edge of the screen
-    /// and back to a row elsewhere.
-    fn moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let bounds = window.bounds();
-        let resized = self
-            .last_bounds
-            .replace(bounds)
-            .is_some_and(|last| last.size != bounds.size);
-        if resized {
-            // A check queued by a move would see the new size: drop it.
-            self.settle = None;
+    /// Put `member` in the row: in a free place, or in place of whoever has
+    /// been quiet longest if `member` was active since.
+    fn take(&mut self, member: Entity<Member>, sharers: &[String], cx: &App) {
+        if self.slots.len() < ROW_MAX {
+            self.slots.push(member);
             return;
         }
-        self.settle = Some(cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(300))
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                let Some(area) = window.display(cx).map(|d| d.visible_bounds()) else {
-                    return;
-                };
-                let b = window.bounds();
-                let left = (b.origin.x - area.origin.x) / px(1.0);
-                let right =
-                    ((area.origin.x + area.size.width) - (b.origin.x + b.size.width)) / px(1.0);
-                let vertical = left < DOCK || right < DOCK;
-                if vertical != this.vertical {
-                    tracing::debug!(vertical, "capsule docked");
-                    this.vertical = vertical;
-                    let wanted = Self::measure(
-                        this.call.read(cx),
-                        this.face,
-                        vertical,
-                        this.expanded(),
-                        this.show_all,
-                        cx,
-                    );
-                    this.size = wanted;
-                    let anchor = if right < DOCK {
-                        mac::Anchor::Right
-                    } else {
-                        mac::Anchor::Left
-                    };
-                    mac::resize(window, wanted, mask(wanted), anchor, cx);
-                    cx.notify();
-                }
+        let m = member.read(cx);
+        let sharer = sharers.contains(&m.identity);
+        let oldest = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !sharers.contains(&s.read(cx).identity))
+            .min_by_key(|(_, s)| {
+                let s = s.read(cx);
+                (s.speaking, s.last_active)
+            })
+            .map(|(ix, _)| ix);
+        if let Some(ix) = oldest {
+            let o = self.slots[ix].read(cx);
+            let newer =
+                (m.speaking && !o.speaking) || (!o.speaking && m.last_active > o.last_active);
+            if sharer || newer {
+                self.slots[ix] = member;
+            }
+        }
+    }
+
+    fn plan(&self, cx: &App) -> Plan {
+        let call = self.call.read(cx);
+        let me = call.me.clone();
+        let me_muted = me.read(cx).mic_muted;
+        let mut row = self.slots.clone();
+        if !me_muted {
+            row.push(me.clone());
+        }
+        let (tiles, faces) = row.into_iter().partition(|e| e.read(cx).video.is_some());
+        let mut stack: Vec<Entity<Member>> = call
+            .others
+            .iter()
+            .filter(|e| !self.slots.contains(e))
+            .cloned()
+            .collect();
+        stack.sort_by_key(|e| Reverse(e.read(cx).last_active));
+        if me_muted {
+            stack.push(me.clone());
+        }
+        Plan {
+            tiles,
+            faces,
+            stack,
+            sharers: call.sharers(cx),
+            preview: preview_aspect(me.read(cx)),
+        }
+    }
+
+    /// The drawer showing: the one opened by hovering, else a notice.
+    fn drawer(&self, cx: &App) -> Option<Drawer> {
+        self.open.clone().or_else(|| {
+            self.call
+                .read(cx)
+                .notice()
+                .is_some()
+                .then_some(Drawer::Notice)
+        })
+    }
+
+    /// Size the window for what's on show, keeping the main row in place.
+    fn fit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Plan {
+        let plan = self.plan(cx);
+        let width = row_width(&plan).max(strip_width(&plan)).max(MIN_WIDTH);
+        let base = preview_height(&plan, width) + strip_height(&plan);
+        let drawer_h = self
+            .drawer(cx)
+            .map_or(0.0, |d| drawer_height(&d, &plan, width));
+        // Open downwards unless the screen ends first.
+        let drawer_above = drawer_h > 0.0
+            && window.display(cx).is_some_and(|d| {
+                let area = d.visible_bounds();
+                let row_bottom = window.bounds().origin.y + px(self.above + MAIN);
+                (area.origin.y + area.size.height - row_bottom) / px(1.0) < drawer_h + 12.0
             });
+        let above = base + if drawer_above { drawer_h } else { 0.0 };
+        let wanted = size(
+            width,
+            above + MAIN + if drawer_above { 0.0 } else { drawer_h },
+        );
+        if wanted != self.size || above != self.above {
+            mac::resize(
+                window,
+                wanted,
+                mac::Mask::Rounded(RADIUS),
+                mac::Anchor::Row {
+                    before: self.above,
+                    after: above,
+                },
+                cx,
+            );
+            self.size = wanted;
+            self.above = above;
+        }
+        self.drawer_above = drawer_above;
+        plan
+    }
+
+    fn set_open(&mut self, open: Option<Drawer>, cx: &mut Context<Self>) {
+        self.hover_task = None;
+        if self.open != open {
+            self.open = open;
+            cx.notify();
+        }
+    }
+
+    /// Open (or close) a row once the cursor has settled.
+    fn open_after(&mut self, open: Option<Drawer>, window: &mut Window, cx: &mut Context<Self>) {
+        self.hover_task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(HOVER_DELAY).await;
+            let _ = this.update(cx, |this, cx| this.set_open(open, cx));
         }));
     }
 
-    fn set_hovered(&mut self, hovered: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.hovered != hovered {
-            self.hovered = hovered;
-            if !hovered {
-                self.hovered_face = None;
-                self.show_all = false;
-            }
-            self.fit(window, cx);
-            cx.notify();
-        }
-    }
-
-    /// Act as hovered (snapshot tests).
+    /// Open a row as if hovered (snapshot tests): `controls`, `people`.
     #[cfg(feature = "snapshot")]
-    pub fn hover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_hovered(true, window, cx);
+    pub fn show(&mut self, which: &str, cx: &mut Context<Self>) {
+        let open = match which {
+            "people" => Drawer::People,
+            _ => Drawer::Controls,
+        };
+        self.set_open(Some(open), cx);
     }
-
-    /// Turn vertical, as when docked at an edge (snapshot tests).
-    #[cfg(feature = "snapshot")]
-    pub fn dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.vertical = true;
-        self.fit(window, cx);
-        cx.notify();
-    }
-
-    fn resize_faces(&mut self, face: f32, window: &mut Window, cx: &mut Context<Self>) {
-        let face = face.clamp(MIN_FACE, MAX_FACE);
-        if (face - self.face).abs() >= 0.5 {
-            self.face = face;
-            self.fit(window, cx);
-            cx.notify();
-        }
-    }
-}
-
-/// A rounded window: a capsule along its longer side.
-fn mask(s: Size<f32>) -> mac::Mask {
-    mac::Mask::Rounded((s.width.min(s.height) / 2.0) as f64)
-}
-
-/// What one place in the row shows.
-enum Slot {
-    Face(Entity<Member>),
-    /// "+N": the people not shown.
-    More(usize),
-}
-
-impl Slot {
-    /// Length along the capsule.
-    fn extent(&self, face: f32, vertical: bool, cx: &App) -> f32 {
-        match self {
-            Slot::Face(m) => match preview_aspect(m.read(cx)) {
-                Some(aspect) => preview_size(face, aspect, vertical).width_or_height(vertical),
-                None => face,
-            },
-            Slot::More(_) => face,
-        }
-    }
-}
-
-trait Along {
-    fn width_or_height(self, vertical: bool) -> f32;
-}
-
-impl Along for Size<f32> {
-    fn width_or_height(self, vertical: bool) -> f32 {
-        if vertical { self.height } else { self.width }
-    }
-}
-
-/// The people on show, you last: everyone, or the first few with whoever is
-/// speaking among them.
-fn visible(call: &Call, show_all: bool, cx: &App) -> Vec<Slot> {
-    let others = &call.others;
-    if show_all || others.len() < MAX_FACES {
-        return others
-            .iter()
-            .chain(std::iter::once(&call.me))
-            .map(|m| Slot::Face(m.clone()))
-            .collect();
-    }
-    // Room for MAX_FACES - 2 others, you and the chip.
-    let room = MAX_FACES - 2;
-    let mut shown: Vec<&Entity<Member>> = others.iter().take(room).collect();
-    if let Some(speaker) = others.iter().skip(room).find(|m| m.read(cx).speaking) {
-        shown[room - 1] = speaker;
-    }
-    let hidden = others.len() - shown.len();
-    shown
-        .into_iter()
-        .chain(std::iter::once(&call.me))
-        .map(|m| Slot::Face(m.clone()))
-        .chain(std::iter::once(Slot::More(hidden)))
-        .collect()
 }
 
 /// While you share: the shape of what you share.
-fn preview_aspect(member: &Member) -> Option<f32> {
-    let screen = member.screen.as_ref()?;
+fn preview_aspect(me: &Member) -> Option<f32> {
+    let screen = me.screen.as_ref()?;
     Some(
         screen
             .sink
@@ -418,350 +375,720 @@ fn preview_aspect(member: &Member) -> Option<f32> {
     )
 }
 
-/// Your share preview: as tall as a face in a row, as wide as one in a
-/// column.
-fn preview_size(face: f32, aspect: f32, vertical: bool) -> Size<f32> {
-    if vertical {
-        size(face, (face / aspect).round())
+fn stack_width(n: usize) -> f32 {
+    let ghosts = n.saturating_sub(1).min(2) as f32;
+    let count = if n > 1 { GAP + 2.0 + COUNT } else { 0.0 };
+    2.0 + FACE + ghosts * GHOST + count + 9.0
+}
+
+fn row_width(plan: &Plan) -> f32 {
+    let mut items: Vec<f32> = plan.faces.iter().map(|_| FACE).collect();
+    let mut extra = 0.0;
+    if !plan.stack.is_empty() {
+        items.push(stack_width(plan.stack.len()));
+        if !plan.faces.is_empty() {
+            extra += GAP;
+        }
+    }
+    if !items.is_empty() {
+        items.push(5.0); // the separator
+    }
+    items.push(3.0 * BUTTON + 2.0 * GAP);
+    2.0 * PAD + items.iter().sum::<f32>() + GAP * (items.len() - 1) as f32 + extra
+}
+
+fn strip_width(plan: &Plan) -> f32 {
+    let n = plan.tiles.len() as f32;
+    if n == 0.0 {
+        0.0
     } else {
-        size((face * aspect).round(), face)
+        2.0 * PAD + n * TILE_W + (n - 1.0) * GAP
+    }
+}
+
+fn strip_height(plan: &Plan) -> f32 {
+    if plan.tiles.is_empty() {
+        0.0
+    } else {
+        PAD + TILE_H
+    }
+}
+
+fn preview_height(plan: &Plan, width: f32) -> f32 {
+    plan.preview.map_or(0.0, |aspect| {
+        PAD + ((width - 2.0 * PAD) / aspect).clamp(130.0, 230.0).round()
+    })
+}
+
+/// People per line in the stack's row, at `width`.
+fn per_line(width: f32) -> usize {
+    (((width - 24.0 + 4.0) / (PERSON + 4.0)) as usize).max(1)
+}
+
+fn drawer_height(drawer: &Drawer, plan: &Plan, width: f32) -> f32 {
+    match drawer {
+        Drawer::Controls => CONTROLS_H,
+        Drawer::Name(_) | Drawer::Notice => LINE_H,
+        Drawer::People => {
+            let lines = plan.stack.len().div_ceil(per_line(width)).max(1) as f32;
+            1.0 + 8.0 + 18.0 + lines * 52.0 + (lines - 1.0) * 8.0 + 10.0
+        }
+    }
+}
+
+/// "speaking", "active 40 s ago", "muted"…
+fn status(m: &Member, sharing: bool) -> String {
+    if m.is_local {
+        return if m.mic_muted { "muted" } else { "unmuted" }.into();
+    }
+    if sharing {
+        return "sharing their screen".into();
+    }
+    if m.mic_muted {
+        return "muted".into();
+    }
+    if m.speaking {
+        return "speaking".into();
+    }
+    match m.last_active.map(|t| t.elapsed().as_secs()) {
+        Some(s) if s < 60 => format!("active {s} s ago"),
+        Some(s) => format!("active {} min ago", s / 60),
+        None => "quiet".into(),
     }
 }
 
 impl Render for Capsule {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if std::mem::take(&mut self.refit) {
-            self.fit(window, cx);
-        }
-        let call = self.call.read(cx);
-        let notice = call.notice();
-        let vertical = self.vertical && notice.is_none();
-        let expanded = self.expanded();
-        let face = self.face;
-        let slots = visible(call, self.show_all, cx);
-        let pixel_height = face * window.scale_factor();
-        let members: Vec<Entity<Member>> = slots
-            .iter()
-            .filter_map(|s| match s {
-                Slot::Face(m) => Some(m.clone()),
-                Slot::More(_) => None,
-            })
-            .collect();
-        for member in &members {
+        self.update_slots(cx);
+        let plan = self.fit(window, cx);
+        let pixel_height = TILE_H * window.scale_factor();
+        for member in &plan.tiles {
             self.call
                 .update(cx, |call, cx| call.fit_video(member, pixel_height, cx));
         }
-        let faces: Vec<AnyElement> = slots
-            .into_iter()
-            .enumerate()
-            .map(|(ix, slot)| match slot {
-                Slot::Face(member) => self
-                    .face_view(ix, &member, face, vertical, cx)
-                    .into_any_element(),
-                Slot::More(n) => more_chip(n, face, cx).into_any_element(),
-            })
-            .collect();
-        let call = self.call.read(cx);
-
-        let line = |vertical: bool| {
-            if vertical {
-                div()
-                    .w(px(face.max(BUTTON) * 0.6))
-                    .h(px(1.0))
-                    .bg(white(0.14))
-            } else {
-                div()
-                    .w(px(1.0))
-                    .h(px(face.max(BUTTON) * 0.6))
-                    .bg(white(0.14))
-            }
+        let width = self.size.width;
+        let drawer = self.drawer(cx).map(|d| {
+            let h = drawer_height(&d, &plan, width);
+            self.drawer_view(&d, &plan, h, cx)
+        });
+        let above = self.drawer_above;
+        let preview = self.preview_view(&plan, width, cx);
+        let strip = self.strip_view(&plan, cx);
+        let main = self.main_view(&plan, cx);
+        let (drawer_above, drawer_below) = if above {
+            (drawer, None)
+        } else {
+            (None, drawer)
         };
 
-        let label = (!vertical && expanded).then(|| {
-            let text: SharedString = match (&self.hovered_face, call.elapsed()) {
-                (Some(name), _) => name.clone(),
-                (None, Some(elapsed)) => clock(elapsed).into(),
-                (None, None) => "Joining…".into(),
-            };
+        div()
+            .id("capsule")
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(glass_tint())
+            .text_color(rgb(TEXT))
+            .text_size(px(13.0))
+            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
+                if *hovered {
+                    // Back in before the row closed: keep it.
+                    if this.open.is_some() {
+                        this.hover_task = None;
+                    }
+                } else {
+                    this.open_after(None, window, cx);
+                }
+            }))
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+            .children(preview)
+            .children(strip)
+            .children(drawer_above)
+            .child(main)
+            .children(drawer_below)
+    }
+}
+
+impl Capsule {
+    fn preview_view(&self, plan: &Plan, width: f32, cx: &mut Context<Self>) -> Option<Div> {
+        plan.preview?;
+        let height = preview_height(plan, width) - PAD;
+        let c = self.call.read(cx);
+        let frame = c.me.read(cx).screen.as_ref().and_then(|v| v.sink.latest());
+        let preset = c.sharing.map(|p| p.label());
+        let call = self.call.clone();
+        Some(
+            div().flex_none().pt(px(PAD)).px(px(PAD)).child(
+                div()
+                    .h(px(height))
+                    .w_full()
+                    .relative()
+                    .rounded(px(PREVIEW_RADIUS))
+                    .bg(rgb(0x000000))
+                    .children(
+                        frame.map(|f| rounded_video(f, PREVIEW_RADIUS, RING, ObjectFit::Contain)),
+                    )
+                    .child(ring(PREVIEW_RADIUS, RING, rgb(EDGE)))
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(8.0))
+                            .top(px(8.0))
+                            .h(px(22.0))
+                            .px(px(8.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .rounded(px(8.0))
+                            .bg(black(0.62))
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(div().size(px(7.0)).rounded_full().bg(rgb(ACCENT)))
+                            .child(match preset {
+                                Some(preset) => format!("Sharing · {preset}"),
+                                None => "Starting to share…".into(),
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("stop-share")
+                            .absolute()
+                            .right(px(8.0))
+                            .top(px(8.0))
+                            .h(px(22.0))
+                            .px(px(9.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(8.0))
+                            .bg(rgb(DANGER))
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::BOLD)
+                            .cursor_pointer()
+                            .hover(|s| s.opacity(0.88))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(move |_, _, cx| call.update(cx, |c, cx| c.toggle_share(cx)))
+                            .child("Stop"),
+                    ),
+            ),
+        )
+    }
+
+    fn strip_view(&self, plan: &Plan, cx: &mut Context<Self>) -> Option<Div> {
+        if plan.tiles.is_empty() {
+            return None;
+        }
+        let tiles: Vec<AnyElement> = plan
+            .tiles
+            .iter()
+            .enumerate()
+            .map(|(ix, member)| self.tile(ix, member, plan, cx).into_any_element())
+            .collect();
+        Some(
             div()
-                .w(px(LABEL))
                 .flex_none()
+                .h(px(PAD + TILE_H))
+                .pt(px(PAD))
                 .flex()
                 .justify_center()
-                .text_size(px(12.0))
-                .text_color(rgb(TEXT_DIM))
-                .truncate()
-                .child(text)
-        });
+                .gap(px(GAP))
+                .children(tiles),
+        )
+    }
 
-        let notice_view = notice.map(|(text, is_error)| {
-            let call = self.call.clone();
-            div()
-                .w(px(NOTICE))
-                .flex_none()
+    fn tile(
+        &self,
+        ix: usize,
+        member: &Entity<Member>,
+        plan: &Plan,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let m = member.read(cx);
+        let speaking = m.speaking && !m.mic_muted;
+        let sharing = !m.is_local && plan.sharers.contains(&m.identity);
+        let content = match m.video.as_ref().and_then(|v| v.sink.latest()) {
+            Some(frame) => {
+                rounded_video(frame, TILE_RADIUS, RING, ObjectFit::Cover).into_any_element()
+            }
+            None => div()
+                .size_full()
                 .flex()
                 .items_center()
-                .gap(px(4.0))
-                .text_size(px(12.0))
-                .text_color(if is_error {
-                    rgb(0xff8a80)
-                } else {
-                    rgb(TEXT_DIM)
-                })
-                .child(div().flex_1().min_w_0().truncate().child(text))
-                .when(is_error, |el| {
-                    el.child(
-                        ui::icon_button("dismiss", Icon::X, 22.0)
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(move |_, _, cx| call.update(cx, |c, cx| c.dismiss_error(cx))),
-                    )
-                })
-        });
+                .justify_center()
+                .child(avatar(&m.name, 44.0))
+                .into_any_element(),
+        };
+        let name = if m.is_local {
+            "You".to_owned()
+        } else {
+            first_name(&m.name).to_owned()
+        };
+        let muted = m.mic_muted;
+        let identity = m.identity.clone();
+        div()
+            .id(("tile", ix))
+            .relative()
+            .flex_none()
+            .w(px(TILE_W))
+            .h(px(TILE_H))
+            .rounded(px(TILE_RADIUS))
+            .bg(avatar_background(&m.name))
+            .child(content)
+            .child(ring(
+                TILE_RADIUS,
+                RING,
+                if speaking { rgb(SPEAKING) } else { rgb(EDGE) },
+            ))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(6.0))
+                    .bottom(px(6.0))
+                    .h(px(20.0))
+                    .px(px(7.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .rounded(px(7.0))
+                    .bg(black(0.55))
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .when(muted, |el| {
+                        el.child(icon(Icon::MicOff, 10.0, rgb(0xff8a80)))
+                    })
+                    .child(name),
+            )
+            .when(sharing, |el| {
+                el.child(self.share_badge(&identity, 6.0, 6.0))
+            })
+    }
 
-        let c = call;
+    /// The screen badge on someone sharing: click for their share window.
+    fn share_badge(&self, identity: &str, top: f32, right: f32) -> Stateful<Div> {
+        let call = self.call.clone();
+        let who = identity.to_owned();
+        div()
+            .id(gpui::SharedString::from(format!("share-{identity}")))
+            .absolute()
+            .top(px(top))
+            .right(px(right))
+            .size(px(18.0))
+            .rounded_full()
+            .bg(rgb(ACCENT))
+            .border_2()
+            .border_color(rgb(EDGE))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |_, _, cx| {
+                let call = call.clone();
+                let who = who.clone();
+                // Not from inside this window's event: AppKit reorders windows.
+                cx.defer(move |cx| {
+                    if let Some(handle) = call.read(cx).share_window_of(&who) {
+                        let _ = handle.update(cx, |_, window, _| window.activate_window());
+                    }
+                });
+            })
+            .child(icon(Icon::MonitorUp, 10.0, rgb(0xffffff)))
+    }
+
+    fn main_view(&self, plan: &Plan, cx: &mut Context<Self>) -> Div {
+        let faces: Vec<AnyElement> = plan
+            .faces
+            .iter()
+            .enumerate()
+            .map(|(ix, member)| self.face(ix, member, plan, cx).into_any_element())
+            .collect();
+        let has_faces = !faces.is_empty();
+        let stack = (!plan.stack.is_empty()).then(|| self.stack_view(plan, has_faces, cx));
+        let c = self.call.read(cx);
         let on = |f: fn(&mut Call, &mut Context<Call>)| {
             let call = self.call.clone();
             move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| call.update(cx, f)
         };
-        let to_regular = {
-            let call = self.call.clone();
-            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
-                call.update(cx, |c, cx| c.set_mode(Mode::Regular, cx))
-            }
-        };
-        let copied = c.copied_at.is_some();
-        let more = expanded.then(|| {
-            vec![
-                round_button(
-                    "camera",
-                    if c.camera == Camera::Off {
-                        Icon::VideoOff
-                    } else {
-                        Icon::Video
-                    },
-                    BUTTON,
-                    if c.camera == Camera::Off {
-                        Tone::Off
-                    } else {
-                        Tone::Plain
-                    },
-                )
-                .on_click(on(Call::toggle_camera)),
+        let sharing = c.sharing.is_some();
+        let controls = div()
+            .id("controls")
+            .flex()
+            .gap(px(GAP))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.set_open(Some(Drawer::Controls), cx);
+                }
+            }))
+            .child(
                 round_button(
                     "share",
-                    if c.sharing.is_some() {
+                    if sharing {
                         Icon::MonitorOff
                     } else {
                         Icon::MonitorUp
                     },
                     BUTTON,
-                    if c.sharing.is_some() {
-                        Tone::Active
-                    } else {
-                        Tone::Plain
-                    },
+                    if sharing { Tone::Active } else { Tone::Plain },
                 )
                 .on_click(on(Call::toggle_share)),
+            )
+            .child(
                 round_button(
-                    "link",
-                    if copied { Icon::Check } else { Icon::Link },
+                    "mic",
+                    if c.mic_on { Icon::Mic } else { Icon::MicOff },
                     BUTTON,
-                    Tone::Plain,
+                    if c.mic_on { Tone::Plain } else { Tone::Off },
                 )
-                .on_click(on(Call::copy_link)),
-                round_button("expand", Icon::Maximize, BUTTON, Tone::Plain).on_click(to_regular),
-            ]
-        });
-        let mic = round_button(
-            "mic",
-            if c.mic_on { Icon::Mic } else { Icon::MicOff },
-            BUTTON,
-            if c.mic_on { Tone::Plain } else { Tone::Off },
-        )
-        .on_click(on(Call::toggle_mic));
-        let leave =
-            round_button("leave", Icon::PhoneOff, BUTTON, Tone::Danger).on_click(on(Call::leave));
-
-        let row = |el: Div| {
-            if vertical {
-                el.flex_col()
-            } else {
-                el.flex_row()
-            }
-        };
-        row(div())
-            .id("capsule")
-            .size_full()
+                .on_click(on(Call::toggle_mic)),
+            )
+            .child(
+                round_button("leave", Icon::PhoneOff, BUTTON, Tone::Danger)
+                    .on_click(on(Call::leave)),
+            );
+        let separator = (has_faces || stack.is_some())
+            .then(|| div().w(px(1.0)).h(px(24.0)).mx(px(2.0)).bg(white(0.14)));
+        div()
+            .flex_none()
+            .h(px(MAIN))
+            .px(px(PAD))
             .flex()
             .items_center()
-            .p(px(PAD))
+            .justify_center()
             .gap(px(GAP))
-            .bg(glass_tint())
-            .text_color(rgb(TEXT))
-            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
-                this.set_hovered(*hovered, window, cx)
-            }))
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
-            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
-                let dy = event.delta.pixel_delta(px(16.0)).y / px(1.0);
-                this.resize_faces(this.face - dy * 0.5, window, cx);
-            }))
-            .on_pinch(cx.listener(|this, event: &PinchEvent, window, cx| {
-                this.resize_faces(this.face * (1.0 + event.delta), window, cx);
-            }))
-            .child(row(div().flex().items_center().gap(px(GAP)).flex_none()).children(faces))
-            .child(line(vertical).flex_none())
-            .children(notice_view)
-            .children(label)
-            .children(more.into_iter().flatten())
-            .child(mic)
-            .child(leave)
+            .children(faces)
+            .children(stack)
+            .children(separator)
+            .child(controls)
     }
-}
 
-impl Capsule {
-    fn face_view(
+    fn face(
         &self,
         ix: usize,
         member: &Entity<Member>,
-        face: f32,
-        vertical: bool,
+        plan: &Plan,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let m = member.read(cx);
-        let name: SharedString = if m.is_local {
-            "You".into()
-        } else {
-            m.name.clone().into()
-        };
-        let hover_name = name.clone();
-        let call = self.call.clone();
-        let is_local = m.is_local;
+        let speaking = m.speaking && !m.mic_muted;
+        let sharing = !m.is_local && plan.sharers.contains(&m.identity);
         let muted = m.mic_muted;
-        let speaking = m.speaking && !muted;
-        let ring_color = if speaking {
-            rgb(SPEAKING)
-        } else {
-            rgb(RING_IDLE)
-        };
-        let hovered_me = is_local && self.hovered_face.as_ref() == Some(&hover_name);
-
-        // While you share, your face shows what you share.
-        let (shape, radius, content) = match preview_aspect(m) {
-            Some(aspect) => {
-                let s = preview_size(face, aspect, vertical);
-                let frame = m.screen.as_ref().and_then(|v| v.sink.latest());
-                let content = match frame {
-                    Some(frame) => div()
-                        .absolute()
-                        .inset_0()
-                        .child(rounded_video(frame, PREVIEW_RADIUS, RING, ObjectFit::Cover))
-                        .into_any_element(),
-                    None => div().absolute().inset_0().bg(black(0.6)).into_any_element(),
-                };
-                (s, PREVIEW_RADIUS, content)
-            }
-            None => {
-                let content = match m.video.as_ref().and_then(|v| v.sink.latest()) {
-                    Some(frame) => div()
-                        .absolute()
-                        .inset_0()
-                        .rounded_full()
-                        .bg(crate::theme::avatar_background(&m.name))
-                        .child(rounded_video(frame, face / 2.0, RING, ObjectFit::Cover))
-                        .into_any_element(),
-                    None => avatar(&m.name, face).into_any_element(),
-                };
-                (size(face, face), face / 2.0, content)
-            }
-        };
-
-        let badge_size = (face * 0.4).clamp(16.0, 24.0);
-        let badge = if is_local {
-            (muted || hovered_me).then(|| {
-                div()
-                    .id("my-mic")
-                    .absolute()
-                    .right(px(-2.0))
-                    .bottom(px(-2.0))
-                    .size(px(badge_size))
-                    .rounded_full()
-                    .bg(if muted {
-                        rgb(DANGER).into()
-                    } else {
-                        black(0.75)
-                    })
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, _, cx| call.update(cx, |c, cx| c.toggle_mic(cx)))
-                    .child(icon(
-                        if muted { Icon::MicOff } else { Icon::Mic },
-                        badge_size * 0.55,
-                        rgb(0xffffff),
-                    ))
-                    .into_any_element()
-            })
-        } else {
-            muted.then(|| {
-                div()
-                    .absolute()
-                    .right(px(-2.0))
-                    .bottom(px(-2.0))
-                    .size(px(badge_size))
-                    .rounded_full()
-                    .bg(rgb(DANGER))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(icon(Icon::MicOff, badge_size * 0.55, rgb(0xffffff)))
-                    .into_any_element()
-            })
-        };
-
+        let identity = m.identity.clone();
+        let name = m.name.clone();
         div()
             .id(("face", ix))
             .relative()
             .flex_none()
-            .w(px(shape.width))
-            .h(px(shape.height))
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            .size(px(FACE))
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
                 if *hovered {
-                    this.hovered_face = Some(hover_name.clone());
-                } else if this.hovered_face.as_ref() == Some(&hover_name) {
-                    this.hovered_face = None;
+                    this.open_after(Some(Drawer::Name(identity.clone())), window, cx);
+                } else if this.open.is_none() {
+                    this.hover_task = None;
                 }
-                cx.notify();
             }))
-            .child(content)
-            .child(ring(radius, RING, ring_color))
-            .children(badge)
+            .child(avatar(&name, FACE))
+            .when(speaking, |el| {
+                el.child(ring(FACE / 2.0, RING, rgb(SPEAKING)))
+            })
+            .when(muted, |el| el.child(mute_badge()))
+            .when(sharing, |el| {
+                el.child(self.share_badge(&m.identity, -4.0, -4.0))
+            })
+    }
+
+    fn stack_view(&self, plan: &Plan, after_faces: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let n = plan.stack.len();
+        let ghosts = n.saturating_sub(1).min(2);
+        let front = plan.stack[0].read(cx);
+        let open = self.open == Some(Drawer::People);
+        let ghost = |left: f32, color: u32| {
+            div()
+                .absolute()
+                .top_0()
+                .left(px(left))
+                .size(px(FACE))
+                .rounded_full()
+                .bg(rgb(color))
+                .border_2()
+                .border_color(rgb(EDGE))
+        };
+        div()
+            .id("stack")
+            .flex_none()
+            .h(px(44.0))
+            .pl(px(2.0))
+            .pr(px(9.0))
+            .when(after_faces, |el| el.ml(px(GAP)))
+            .flex()
+            .items_center()
+            .gap(px(GAP))
+            .rounded_full()
+            .bg(white(if open { 0.12 } else { 0.06 }))
+            .hover(|s| s.bg(white(0.12)))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.set_open(Some(Drawer::People), cx);
+                }
+            }))
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .h(px(FACE))
+                    .w(px(FACE + ghosts as f32 * GHOST))
+                    .when(ghosts > 1, |el| el.child(ghost(2.0 * GHOST, 0x373a44)))
+                    .when(ghosts > 0, |el| el.child(ghost(GHOST, 0x4a4e59)))
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .child(avatar(&front.name, FACE).opacity(0.7))
+                            .when(front.mic_muted, |el| el.child(mute_badge())),
+                    ),
+            )
+            .when(n > 1, |el| {
+                el.child(
+                    div()
+                        .w(px(COUNT))
+                        .ml(px(2.0))
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(TEXT_DIM))
+                        .child(format!("+{}", n - 1)),
+                )
+            })
+    }
+
+    fn drawer_view(
+        &self,
+        drawer: &Drawer,
+        plan: &Plan,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let above = self.drawer_above;
+        let body: AnyElement = match drawer {
+            Drawer::Controls => self.controls_row(cx).into_any_element(),
+            Drawer::People => self.people_row(plan, cx).into_any_element(),
+            Drawer::Name(identity) => self.name_line(identity, plan, cx),
+            Drawer::Notice => self.notice_line(cx),
+        };
+        let line = || div().flex_none().h(px(1.0)).mx(px(12.0)).bg(white(0.08));
+        let keep_open = matches!(drawer, Drawer::Controls | Drawer::People);
+        div()
+            .id("drawer")
+            .flex_none()
+            .h(px(height))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .when(keep_open, |el| {
+                // Hovering the row keeps it open.
+                el.on_hover(cx.listener(|this, hovered: &bool, _, _| {
+                    if *hovered {
+                        this.hover_task = None;
+                    }
+                }))
+            })
+            .when(above, |el| el.pt(px(10.0)))
+            .when(!above, |el| el.child(line().mb(px(8.0))))
+            .child(div().flex_1().min_h_0().child(body))
+            .when(above, |el| el.child(line().mt(px(8.0))))
+            .when(!above, |el| el.pb(px(10.0)))
+    }
+
+    fn people_row(&self, plan: &Plan, cx: &mut Context<Self>) -> Div {
+        let people: Vec<AnyElement> = plan
+            .stack
+            .iter()
+            .map(|member| {
+                let m = member.read(cx);
+                div()
+                    .w(px(PERSON))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .relative()
+                            .size(px(34.0))
+                            .child(avatar(&m.name, 34.0))
+                            .when(m.mic_muted, |el| el.child(mute_badge())),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(PERSON))
+                            .truncate()
+                            .text_size(px(10.5))
+                            .text_color(rgb(TEXT_DIM))
+                            .child(if m.is_local {
+                                "You".to_owned()
+                            } else {
+                                first_name(&m.name).to_owned()
+                            }),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        div()
+            .px(px(12.0))
+            .child(
+                div()
+                    .h(px(18.0))
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(TEXT_DIM))
+                    .child(format!("Muted or quiet · {}", plan.stack.len())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_x(px(4.0))
+                    .gap_y(px(8.0))
+                    .children(people),
+            )
+    }
+
+    fn name_line(&self, identity: &str, plan: &Plan, cx: &App) -> AnyElement {
+        let c = self.call.read(cx);
+        let Some(m) = c
+            .members()
+            .map(|m| m.read(cx))
+            .find(|m| m.identity == identity)
+        else {
+            return div().into_any_element();
+        };
+        let name = if m.is_local {
+            "You".to_owned()
+        } else {
+            m.name.clone()
+        };
+        div()
+            .h(px(18.0))
+            .px(px(12.0))
+            .flex()
+            .justify_center()
+            .gap(px(4.0))
+            .text_size(px(12.0))
+            .text_color(rgb(TEXT_DIM))
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(TEXT))
+                    .child(name),
+            )
+            .child(format!(
+                "· {}",
+                status(m, plan.sharers.contains(&m.identity))
+            ))
+            .into_any_element()
+    }
+
+    fn notice_line(&self, cx: &App) -> AnyElement {
+        let Some((text, is_error)) = self.call.read(cx).notice() else {
+            return div().into_any_element();
+        };
+        let call = self.call.clone();
+        div()
+            .h(px(18.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(4.0))
+            .text_size(px(12.0))
+            .text_color(if is_error {
+                rgb(0xff8a80)
+            } else {
+                rgb(TEXT_DIM)
+            })
+            .child(div().min_w_0().truncate().child(text))
+            .when(is_error, |el| {
+                el.child(
+                    icon_button("dismiss", Icon::X, 20.0)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_, _, cx| call.update(cx, |c, cx| c.dismiss_error(cx))),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn controls_row(&self, cx: &mut Context<Self>) -> Div {
+        let c = self.call.read(cx);
+        let camera_off = c.camera == Camera::Off;
+        let copied = c.copied_at.is_some();
+        let item = |id: &'static str,
+                    glyph: Icon,
+                    tone: Tone,
+                    label: &'static str,
+                    action: Box<dyn Fn(&mut App)>| {
+            div()
+                .w(px(64.0))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(4.0))
+                .child(round_button(id, glyph, 36.0, tone).on_click(move |_, _, cx| action(cx)))
+                .child(
+                    div()
+                        .h(px(14.0))
+                        .text_size(px(10.5))
+                        .text_color(rgb(TEXT_DIM))
+                        .child(label),
+                )
+        };
+        let (call, call2, call3) = (self.call.clone(), self.call.clone(), self.call.clone());
+        div()
+            .flex()
+            .justify_center()
+            .gap(px(10.0))
+            .child(item(
+                "camera",
+                if camera_off {
+                    Icon::VideoOff
+                } else {
+                    Icon::Video
+                },
+                if camera_off { Tone::Off } else { Tone::Plain },
+                if camera_off {
+                    "Camera off"
+                } else {
+                    "Camera on"
+                },
+                Box::new(move |cx| call.update(cx, |c, cx| c.toggle_camera(cx))),
+            ))
+            .child(item(
+                "link",
+                if copied { Icon::Check } else { Icon::Link },
+                Tone::Plain,
+                if copied { "Copied" } else { "Copy link" },
+                Box::new(move |cx| call2.update(cx, |c, cx| c.copy_link(cx))),
+            ))
+            .child(item(
+                "window",
+                Icon::Maximize,
+                Tone::Plain,
+                "Call window",
+                Box::new(move |cx| call3.update(cx, |c, cx| c.set_mode(Mode::Regular, cx))),
+            ))
     }
 }
 
-fn more_chip(hidden: usize, face: f32, cx: &mut Context<Capsule>) -> Stateful<Div> {
+fn mute_badge() -> Div {
     div()
-        .id("more")
-        .size(px(face))
-        .flex_none()
+        .absolute()
+        .right(px(-3.0))
+        .bottom(px(-3.0))
+        .size(px(16.0))
         .rounded_full()
-        .bg(white(0.12))
+        .bg(rgb(DANGER))
+        .border_2()
+        .border_color(rgb(EDGE))
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px((face * 0.3).round().max(11.0)))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .cursor_pointer()
-        .hover(|s| s.bg(white(0.2)))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.show_all = true;
-            this.fit(window, cx);
-            cx.notify();
-        }))
-        .child(format!("+{hidden}"))
+        .child(icon(Icon::MicOff, 8.0, rgb(0xffffff)))
 }
 
 /// "4:05", "1:02:09".

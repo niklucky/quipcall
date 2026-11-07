@@ -5,8 +5,8 @@
 //! - `QUIPCALL_SCRIPT="4:regular 8:minimal 12:leave"`: runs the same actions as
 //!   the buttons at the given second: `regular`, `minimal`, `leave`, `quick`
 //!   (quick call from home), `mic`, `camera`, `share` (opens the picker),
-//!   `hover` (the capsule acts as hovered, to see all its controls), `dock`
-//!   (the capsule turns vertical, as at a screen edge), `panel` / `people`
+//!   `hover` / `stack` (the capsule opens its row of controls, or of the
+//!   people in its stack, as if hovered), `panel` / `people`
 //!   (the call window's side panel, on the transcript or people tab),
 //!   `share-own` / `share-own-60` (shares one of Quipcall's own windows with
 //!   that preset, so tests never capture anything else on screen; with
@@ -83,13 +83,15 @@ fn act(action: &str, cx: &mut App) {
     use crate::Shell;
     use crate::call::{Call, Mode};
 
-    if action == "hover" || action == "dock" {
+    if action == "hover" || action == "stack" {
         for handle in cx.windows() {
             if let Some(capsule) = handle.downcast::<crate::capsule::Capsule>() {
-                let _ = capsule.update(cx, |c, window, cx| match action {
-                    "hover" => c.hover(window, cx),
-                    _ => c.dock(window, cx),
-                });
+                let which = if action == "stack" {
+                    "people"
+                } else {
+                    "controls"
+                };
+                let _ = capsule.update(cx, |c, _, cx| c.show(which, cx));
             }
         }
         return;

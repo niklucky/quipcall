@@ -1,6 +1,6 @@
 # Quipcall UI
 
-Less is more. Outside a call the app is one window: your rooms and their calls. During a call there is no window by default, just one small capsule of faces floating over whatever you're working on.
+Less is more. Outside a call the app is one window: your rooms and their calls. During a call there is no window by default, just one small widget with the call floating over whatever you're working on.
 
 The clickable prototype these screens were built from is [prototype/ui.html](prototype/ui.html) (open it in a browser). Some of it waits for the backend: sign-in, transcripts, recordings, files.
 
@@ -36,20 +36,25 @@ One window (960 × 640), two panes:
 ## Call: minimal mode (default)
 
 ```
-                                   your other apps…
-
-              ╭──────────────────────────────────────────────────────╮
-              │ (A)(L)(T)(you) │ 4:05  📷  🖥  🔗  ⤢  🎙  ⏻ │   ← one glass capsule
-              ╰──────────────────────────────────────────────────────╯
+              ╭──────────────────────────────╮
+              │ [Anna ▣] [Lee ▣] [You ▣]     │   ← camera on: video tiles above the row
+              │ (M) (T)  ((S)))+3 │ 🖥 🎙 ⏻  │   ← the row: recent speakers, the stack, three buttons
+              ╰──────────────────────────────╯
+                 Camera · Copy link · Call window   ← a row that opens on hover
 ```
 
-- Everyone, you included, is a **face** in one floating glass capsule: their camera, or their avatar (initials on a colour picked from their name). The capsule floats above all apps and Spaces and never takes focus.
-- **Mic** and **Leave** are always there. Hovering slides out the rest: the call's time (or the name of the face under the cursor), camera, screen share, copy link, and expand to regular mode. Mic and Leave stay where they are; the faces move left to make room.
-- A green ring shows who's speaking; a red badge, who's muted. On **your own face** the mic badge is a button. It shows while you're muted, and while you hover otherwise.
-- **While you share**, your face turns into a live preview of what you share: a rounded rectangle in the shape of the screen or window.
-- **More than 6 people**: the first few show with a "+N" chip; whoever is speaking always gets a place. Click the chip to see everyone (until the cursor leaves).
-- **Drag** the capsule by any empty spot. Left near the left or right edge of the screen, it turns into a column. **Scroll or pinch** over it to resize the faces (32–96 px, 44 to start).
-- "Joining…", permission prompts and errors show as a line of text in the capsule.
+One small glass widget floats above all apps and Spaces and never takes focus. Prototype: [prototype/call-widget.html](prototype/call-widget.html).
+
+- **The row** shows up to three people who were active last (spoke, unmuted or joined). When someone new speaks and the row is full, they take the place of whoever has been quiet longest; the others stay where they are. **You** come last in the row while unmuted and don't count toward the three.
+- **The stack**, a grey pill with one face and "+N", holds everyone muted or quiet for two minutes (you too while muted).
+- **Cameras**: people in the row with their camera on (you included) show as video tiles above the row, named on the tile. Faces in the row are avatars.
+- **Three buttons, always**: Share, Mic, Leave. Hovering them opens a row underneath with Camera, Copy link and Call window.
+- **Hovering the stack** opens a row with everyone in it (name, mic state). **Hovering a face** for a moment shows the name and what they're doing ("speaking", "active 40 s ago").
+- **While you share**, the widget grows upward with your screen's live preview on top, and a Stop button.
+- **Someone sharing** has a screen badge on their face or tile; click it to bring their share window to the front. Anyone sharing stays in the row.
+- **The main row never moves**: the widget grows around it, up for tiles and your preview, down for the hover rows. Near the bottom of the screen the hover rows open above it instead.
+- "Joining…", permission prompts and errors show in a slim row under the main one.
+- **Drag** the widget by any empty spot.
 - Someone else's **screen share** floats as its own rounded rectangle you can move and resize. **Double-click** it, or press ⤢ on it, to watch it **fullscreen** (macOS fullscreen in its own Space). Esc, a double-click or ⤡ brings it back.
 - **Screen share** opens a picker with live thumbnails of your screens and windows and the frame-rate presets (5 / 15 fps for text, 30 / 60 fps for motion). Clicking share again stops sharing.
 
@@ -60,13 +65,13 @@ One window (1040 × 680): the room's name and the call's time in the title bar, 
 - **The layout picks itself**: alone, a card with your face and the call link; 2–4 people, a grid; more, whoever is speaking big with a strip of the others (as many as fit, then "+N"); anyone sharing, the share big and faces in a column. Your own share gets the big tile when nobody else shares.
 - **Controls**: mic, camera, share | side panel, minimal | Leave.
 - **Side panel**: *Transcript* (the live timeline, and transcripts later) and *People* (the call link and everyone, with their mic state).
-- Double-click someone's share for fullscreen. Closing the window doesn't end the call; it goes back to the capsule. Leaving is the red button.
+- Double-click someone's share for fullscreen. Closing the window doesn't end the call; it goes back to the widget. Leaving is the red button.
 
 ## Decisions so far (easy to change)
 
 - Dark only, with today's blue accent. Colours are named by use in `theme.rs`, so a light set can follow the system later.
 - Avatar colours come from the name, not the call identity, so people keep their colour from call to call.
-- One capsule instead of a window per face (asked for after the prototype). The faces lose the compositor's free circle clip; see below.
+- One widget instead of a window per face. Video in it loses the compositor's free circle clip; see below.
 - Recording, files and the device menus (mic/speaker choice, noise filter) wait for their backends; the prototype shows where they go.
 - Rooms and history are stored on this Mac until the backend exists; then they move to the server so everyone in a room sees it.
 - Your own camera isn't mirrored yet (GPUI can't flip video).
@@ -75,9 +80,9 @@ One window (1040 × 680): the room's name and the call's time in the title bar, 
 
 ## How it's built
 
-- The capsule and each floating share are borderless, non-activating panels (GPUI `WindowKind::PopUp`): above other apps, on all Spaces, never stealing focus. The capsule's window resizes as it expands, and macOS clips it to a capsule shape (corner radius = half its thickness).
+- The widget and each floating share are borderless, non-activating panels (GPUI `WindowKind::PopUp`): above other apps, on all Spaces, never stealing focus. The widget's window resizes around its main row (`mac::Anchor::Row`), and macOS rounds its corners. It repaints at most 30 times a second.
 - Glass is the system blur behind the window (GPUI's `Blurred` background, an `NSVisualEffectView`) under a faint dark tint.
-- GPUI clips video only to rectangles, so round faces and rounded tiles are drawn in horizontal bands, each clipped to the shape's width, under an opaque ring that hides the steps (`rounded_video` in `ui.rs`): about 15 draws for a 44 px face, one more per corner zone of a tile. Patching GPUI's surface shader for rounded corners would make it one draw, but that means vendoring GPUI itself.
+- GPUI clips video only to rectangles, so rounded tiles and previews are drawn in horizontal bands, each clipped to the shape's width, under an opaque ring that hides the steps (`rounded_video` in `ui.rs`): about 10 draws for a widget tile. Patching GPUI's surface shader for rounded corners would make it one draw, but that means vendoring GPUI itself.
 - The text field is GPUI's `input.rs` example, adapted (`text_input.rs`).
 - No widget library: the look is custom, and every dependency costs footprint. Shared pieces (avatars, buttons, tooltips, empty states) are in `ui.rs`.
 - Icons: [Lucide](https://lucide.dev) (ISC licence), embedded as SVG.

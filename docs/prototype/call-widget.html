@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Call widget prototype</title>
+<style>
+:root{color-scheme:light dark}
+html,body{margin:0}
+body{font-family:var(--font-sans,-apple-system,BlinkMacSystemFont,"Inter",system-ui,sans-serif);color:var(--foreground,#1d1d1f);-webkit-font-smoothing:antialiased}
+body.standalone{background:#0e0f12;color:#e8e9ec;--foreground:#e8e9ec;--muted-foreground:#8f95a0;--border:rgba(255,255,255,.12);--secondary:rgba(255,255,255,.08);--background:#0e0f12}
+body.standalone #board{padding:32px 24px 64px}
+body:not(.standalone) .head h1{display:none}
+#board{max-width:1000px;margin:0 auto;padding:4px 0 32px;
+ --q-text:#f2f3f5;--q-dim:#9ba1ac;--q-accent:#4f8cff;--q-live:#3fd07a;--q-danger:#e5484d;
+ --q-glass:rgba(24,26,33,.68);--q-glass-line:rgba(255,255,255,.14);--q-gbtn:rgba(255,255,255,.10);--q-gbtn-h:rgba(255,255,255,.18);--q-edge:#1d1f26}
+.head h1{font-size:20px;line-height:1.25;margin:0 0 6px;font-weight:650;letter-spacing:-.01em}
+.head p,.lede{margin:0;font-size:13.5px;line-height:1.55;color:var(--muted-foreground,#8a8f98);max-width:78ch}
+section{margin-top:36px}
+section h2{font-size:16px;margin:0 0 4px;font-weight:650}
+.pctl{display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;margin-top:12px;font-size:12px;color:var(--muted-foreground,#8a8f98)}
+.pctl>span{display:flex;align-items:center;gap:8px}
+.seg{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--border,rgba(128,128,128,.3));border-radius:8px}
+.seg button{all:unset;cursor:pointer;padding:3px 10px;border-radius:6px;font-size:12px;line-height:18px;color:var(--muted-foreground,#8a8f98)}
+.seg button:hover{color:var(--foreground,#1d1d1f)}
+.seg button[aria-pressed="true"]{background:var(--secondary,rgba(128,128,128,.16));color:var(--foreground,#1d1d1f)}
+.stage{position:relative;margin-top:10px;border-radius:var(--radius,12px);overflow:hidden}
+.canvas{position:absolute;left:0;top:0;transform-origin:0 0}
+.notes{margin:14px 0 0;padding-left:20px;font-size:13.5px;line-height:1.55;max-width:84ch}
+.notes li{margin:6px 0}
+.notes b{font-weight:600}
+.wall{background:radial-gradient(70% 60% at 8% 4%,#5d6fe0 0%,transparent 62%),radial-gradient(60% 70% at 96% 100%,#c2578f 0%,transparent 60%),radial-gradient(50% 50% at 72% 18%,#2e9f97 0%,transparent 60%),#1b1f3d}
+
+/* desktop */
+.menubar{position:absolute;left:0;right:0;top:0;height:26px;display:flex;align-items:center;gap:18px;padding:0 14px;font:500 13px -apple-system,system-ui,sans-serif;color:#fff;background:rgba(18,20,38,.28);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+.menubar b{font-weight:700}.menubar .r{margin-left:auto}
+.ed{position:absolute;left:150px;top:46px;width:660px;height:300px;border-radius:12px;overflow:hidden;background:#1a1c22;box-shadow:0 0 0 .5px rgba(0,0,0,.6),0 24px 60px rgba(0,0,0,.4)}
+.ed-top{height:34px;background:#202229;display:flex;align-items:center;justify-content:center;font:12px -apple-system,system-ui;color:#8d93a0;border-bottom:1px solid rgba(255,255,255,.06);position:relative}
+.lights{position:absolute;left:14px;top:11px;display:flex;gap:7px}.lights i{width:11px;height:11px;border-radius:50%;background:#ff5f57}.lights i+i{background:#febc2e}.lights i+i+i{background:#28c840}
+.cl{display:flex;gap:8px;height:18px;align-items:center}.cl i{height:7px;border-radius:3px;opacity:.7}
+.sharewin{position:absolute;left:24px;top:52px;width:320px;height:200px;border-radius:14px;overflow:hidden;background:#0b0c0f;box-shadow:0 0 0 .5px rgba(0,0,0,.5),0 24px 60px rgba(0,0,0,.45);transition:box-shadow .2s}
+.sharewin.ping{box-shadow:0 0 0 3px var(--q-accent),0 24px 60px rgba(0,0,0,.45)}
+.tag{position:absolute;left:8px;top:8px;height:22px;padding:0 8px;border-radius:7px;background:rgba(10,11,14,.6);color:#fff;font:600 11px -apple-system,system-ui;display:flex;align-items:center;gap:5px}
+.toast{position:absolute;left:50%;top:36px;transform:translateX(-50%);padding:7px 12px;border-radius:9px;background:rgba(18,18,22,.92);color:#fff;font:500 12px -apple-system,system-ui;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9}
+.toast.on{opacity:1}
+
+/* the widget */
+.w{--pv:0px;--st:0px;width:max-content;border-radius:26px;background:var(--q-glass);backdrop-filter:blur(26px) saturate(1.8);-webkit-backdrop-filter:blur(26px) saturate(1.8);box-shadow:inset 0 0 0 .5px var(--q-glass-line),0 0 0 .5px rgba(0,0,0,.35),0 14px 40px rgba(0,0,0,.32);color:var(--q-text);font:13px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;overflow:hidden;box-sizing:border-box;text-align:left}
+.w *{box-sizing:border-box}
+.w button{font:inherit;color:inherit;border:0;padding:0;background:none;cursor:pointer}
+.w.live{position:absolute;left:50%;top:calc(var(--rowy) - var(--pv) - var(--st));transform:translateX(-50%);transition:top .26s cubic-bezier(.2,.8,.2,1);cursor:grab;z-index:3}
+.w.static{pointer-events:none}
+.w.static,.w.static .preview,.w.static .strip,.w.static .drawer{transition:none}
+.preview{height:var(--pv);overflow:hidden;transition:height .26s cubic-bezier(.2,.8,.2,1);padding:0 6px}
+.pv{margin-top:6px;height:calc(var(--pv) - 6px);border-radius:20px;overflow:hidden;position:relative;background:#0b0c0f}
+.pv-tag{position:absolute;left:8px;top:8px;height:22px;padding:0 8px;border-radius:8px;background:rgba(10,11,14,.62);color:#fff;font-size:11px;font-weight:600;display:flex;align-items:center;gap:6px}
+.pv-tag i{width:7px;height:7px;border-radius:50%;background:var(--q-accent)}
+.w .pv-stop{position:absolute;right:8px;top:8px;height:22px;padding:0 9px;border-radius:8px;background:var(--q-danger);color:#fff;font-size:11px;font-weight:700}
+.strip{height:var(--st);overflow:hidden;transition:height .26s cubic-bezier(.2,.8,.2,1)}
+.strip-in{display:flex;gap:6px;justify-content:center;padding:6px 6px 0}
+.vt{width:120px;height:90px;border-radius:18px;position:relative;overflow:hidden;flex:none}
+.vt::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 2.5px transparent;transition:box-shadow .2s;pointer-events:none}
+.vt.speaking::after{box-shadow:inset 0 0 0 2.5px var(--q-live)}
+.vt-name{position:absolute;left:6px;bottom:6px;height:20px;padding:0 7px;border-radius:7px;background:rgba(10,11,14,.55);color:#fff;font-size:11px;font-weight:600;display:flex;align-items:center;gap:4px;z-index:2}
+.main{display:flex;align-items:center;gap:6px;padding:6px;min-height:52px}
+.faces{display:flex;align-items:center;gap:6px}
+.vsep{width:1px;height:24px;background:rgba(255,255,255,.14);flex:none;margin:0 2px}
+.face{width:var(--s);height:var(--s);border-radius:50%;position:relative;flex:none;transition:box-shadow .2s}
+.face .clip{position:absolute;inset:0;border-radius:50%;overflow:hidden;display:grid;place-items:center}
+.face.speaking{box-shadow:0 0 0 2.5px var(--q-live)}
+.av{width:100%;height:100%;display:grid;place-items:center;color:#fff;font-weight:600;font-size:calc(var(--s)*.4);background:linear-gradient(135deg,hsl(var(--h) 55% 52%),hsl(calc(var(--h) + 29) 60% 38%))}
+.vid{position:absolute;inset:0;background:radial-gradient(55% 45% at 78% 12%,hsl(var(--h) 45% 62% / .55),transparent 70%),linear-gradient(170deg,hsl(var(--h) 24% 30%),hsl(calc(var(--h) + 30) 26% 13%))}
+.vid::before{content:"";position:absolute;left:50%;top:22%;height:44%;aspect-ratio:.8;transform:translateX(-50%);border-radius:48% 48% 44% 44%;background:linear-gradient(hsl(var(--hr)) 0 30%,transparent 30%),radial-gradient(circle at 42% 45%,hsl(var(--k)),color-mix(in srgb,hsl(var(--k)) 78%,#000))}
+.vid::after{content:"";position:absolute;left:50%;bottom:-22%;height:52%;aspect-ratio:1.9;transform:translateX(-50%);border-radius:50% 50% 0 0;background:hsl(calc(var(--h) + 200) 22% 30%)}
+.w .b-share{position:absolute;top:-4px;right:-4px;width:18px;height:18px;border-radius:50%;background:var(--q-accent);color:#fff;display:grid;place-items:center;box-shadow:0 0 0 2px var(--q-edge);z-index:4}
+.vt .b-share{top:6px;right:6px;box-shadow:none}
+.b-mute{position:absolute;bottom:-3px;right:-3px;width:16px;height:16px;border-radius:50%;background:var(--q-danger);color:#fff;display:grid;place-items:center;box-shadow:0 0 0 2px var(--q-edge);z-index:4}
+.stack{display:flex;align-items:center;gap:8px;height:44px;padding:2px 11px 2px 2px;margin-left:6px;border-radius:22px;background:rgba(255,255,255,.06);transition:background .15s}
+.w.live .stack:hover,.w[data-open="people"] .stack{background:rgba(255,255,255,.12)}
+.pile{position:relative;height:40px;flex:none}
+.pile .front{position:absolute;left:0;top:0;z-index:3}
+.pile .front .clip{filter:saturate(.45) brightness(.8)}
+.ghost{position:absolute;top:0;width:40px;height:40px;border-radius:50%;box-shadow:0 0 0 2px var(--q-edge)}
+.g1{left:9px;z-index:2;background:#4a4e59}.g2{left:18px;z-index:1;background:#373a44}
+.cnt{font-size:13px;font-weight:650;color:var(--q-dim)}
+.ctrls{display:flex;gap:6px}
+.w .tb{width:38px;height:38px;border-radius:50%;display:grid;place-items:center;background:var(--q-gbtn);flex:none;transition:filter .15s}
+.w .tb:hover{filter:brightness(1.25)}
+.w .tb.off{background:var(--q-text);color:var(--q-danger)}
+.w .tb.on{background:var(--q-accent);color:#fff}
+.w .tb.leave{background:var(--q-danger);color:#fff}
+.drawer{display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s cubic-bezier(.2,.8,.2,1)}
+.drawer>.din{overflow:hidden;min-height:0}
+.w[data-open="controls"] .d-controls,.w[data-open="people"] .d-people,.w[data-open="name"] .d-name{grid-template-rows:1fr}
+.dpad{width:0;min-width:100%;padding:0 12px 10px}
+.dline{height:1px;background:rgba(255,255,255,.08);margin-bottom:8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;justify-content:center}
+.w .chip{height:32px;padding:0 12px 0 10px;border-radius:16px;background:var(--q-gbtn);display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600}
+.w .chip:hover{background:var(--q-gbtn-h)}
+.w .chip.off{color:var(--q-danger)}
+.dh{font-size:11px;font-weight:600;color:var(--q-dim);padding:0 2px 7px}
+.pgrid{display:flex;flex-wrap:wrap;gap:8px 4px}
+.pp{width:54px;display:flex;flex-direction:column;align-items:center;gap:4px}
+.pp span{font-size:10.5px;color:var(--q-dim);max-width:54px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nm{text-align:center;font-size:12px;color:var(--q-dim)}
+.nm b{color:var(--q-text);font-weight:600}
+.i{display:block;flex:none}
+
+/* screen mocks, sized by their box */
+.mk{position:absolute;inset:0;background:#f6f5f1;padding:10% 8%;display:flex;flex-direction:column;gap:6%}
+.mk .h{height:9%;width:45%;border-radius:3px;background:#2b2c33}
+.mk .l{height:5%;border-radius:3px;background:#d8d6cf}
+.mk .bars{flex:1;display:flex;align-items:flex-end;gap:5%}
+.mk .bars i{flex:1;border-radius:3px 3px 0 0;background:#ff7a45}
+.mk.dark{background:#111318}.mk.dark .h{background:#d7dae0}.mk.dark .l{background:#2a2e38}.mk.dark .bars i{background:#7aa2ff}
+
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(470px,1fr));gap:16px;margin-top:12px}
+.gbox{border-radius:var(--radius,12px);padding:28px 16px;display:flex;justify-content:center;align-items:center;min-height:116px;overflow:hidden}
+.gbox>.w{flex:none}
+.gitem p{font-size:12.5px;line-height:1.5;margin:7px 2px 0;color:var(--muted-foreground,#8a8f98)}
+.gitem p b{color:var(--foreground,#1d1d1f);font-weight:600}
+@media (prefers-reduced-motion:reduce){#board *{transition:none !important}}
+</style>
+</head>
+<body>
+<div id="board">
+  <header class="head">
+    <h1>Call widget · round 4</h1>
+    <p>Your answers built in: you're always in the widget, the row shows at most 3 people (whoever spoke last), the muted and the quiet go into the stack, and hovering a face shows the name. Both camera ideas are here to compare: video tiles <b>above</b> the row, or <b>bigger</b> faces in it. A made-up conversation runs on the desktop below.</p>
+  </header>
+
+  <section>
+    <h2>Live</h2>
+    <div class="pctl">
+      <span>People with camera <span class="seg" id="ctl-mode"><button data-v="above" aria-pressed="true">Above</button><button data-v="bigger" aria-pressed="false">Bigger</button><button data-v="same" aria-pressed="false">Same size</button></span></span>
+      <span>People <span class="seg" id="ctl-n"><button data-v="4" aria-pressed="false">4</button><button data-v="8" aria-pressed="true">8</button><button data-v="12" aria-pressed="false">12</button></span></span>
+      <span>Conversation <span class="seg" id="ctl-talk"><button data-v="1" aria-pressed="true">Running</button><button data-v="0" aria-pressed="false">Paused</button></span></span>
+      <span>Lee shares <span class="seg" id="ctl-lee"><button data-v="0" aria-pressed="true">No</button><button data-v="1" aria-pressed="false">Yes</button></span></span>
+    </div>
+    <div class="stage" data-w="960" data-h="560"><div class="canvas wall" id="desk"></div></div>
+    <ol class="notes">
+      <li><b>At most 3 people in the row: whoever spoke last.</b> When someone new speaks, they take the place of whoever has been quiet longest; the other faces stay where they are. Muted people, and anyone quiet for 2 minutes (20 seconds here), go into the stack.</li>
+      <li><b>You're always in the widget:</b> last in the row while unmuted, in the stack while muted. You don't count toward the 3.</li>
+      <li><b>Anyone sharing stays visible</b> with a screen badge, even when muted or quiet.</li>
+      <li><b>Above:</b> people with their camera on leave the row for a strip of video tiles above it, with their names on the tiles. Your own camera shows there too. <b>Bigger:</b> they stay in the row as larger circles. <b>Same size:</b> round 3, for comparison.</li>
+      <li><b>Hover a face</b> for the name and what they're doing. The buttons and the stack open their rows as before, and your share preview sits on top of everything.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Every state</h2>
+    <p class="lede">Frozen, with "Above" unless a title says otherwise.</p>
+    <div class="gallery" id="gallery"></div>
+  </section>
+
+  <section>
+    <h2>My pick, and questions</h2>
+    <ol class="notes">
+      <li><b>I'd go with Above.</b> Video gets a real size instead of a 64 px circle, the row stays one even line, and it grows upward the same way your share preview does. Bigger makes the row uneven and the window jump in height whenever a camera turns on.</li>
+      <li><b>Does "3" include you?</b> I read it as 3 other people plus you, so you never push someone out.</li>
+      <li><b>Should a video tile be draggable out</b> into a floating window of its own, like the old circles? Handy for keeping one person big on another screen.</li>
+      <li><b>Is 2 minutes the right "quiet" time</b> before someone drops into the stack?</li>
+    </ol>
+  </section>
+</div>
+
+<script>
+(() => {
+"use strict";
+const IC = {
+ mic:'<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/>',
+ micoff:'<path d="m2 2 20 20"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><path d="M12 19v3"/>',
+ video:'<path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/>',
+ videooff:'<path d="M10.66 6H14a2 2 0 0 1 2 2v2.5l5.248-3.062A.5.5 0 0 1 22 7.87v8.196"/><path d="M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2"/><path d="m2 2 20 20"/>',
+ share:'<path d="m9 10 3-3 3 3"/><path d="M12 13V7"/><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M12 17v4"/><path d="M8 21h8"/>',
+ shareoff:'<path d="M17 17H4a2 2 0 0 1-2-2V5c0-1.5 1-2 1-2"/><path d="M22 15V5a2 2 0 0 0-2-2H9"/><path d="M8 21h8"/><path d="M12 17v4"/><path d="m2 2 20 20"/>',
+ phoneoff:'<path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/><path d="M22 2 2 22"/>',
+ link:'<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+ check:'<path d="M20 6 9 17l-5-5"/>',
+ max:'<path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/>'
+};
+const ic = (n, s = 16) => `<svg class="i" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${IC[n]}</svg>`;
+function hue(seed) { let h = 2166136261; for (const b of new TextEncoder().encode(seed.toLowerCase())) { h ^= b; h = Math.imul(h, 16777619) >>> 0; } return h % 360; }
+const initials = n => n.trim().split(/\s+/).slice(0, 2).map(w => w[0].toUpperCase()).join('');
+const first = n => n.split(' ')[0];
+
+/* people: who has a camera on */
+const P = {
+ anna:{name:'Anna Petrova',video:1,k:'24 52% 76%',hr:'40 62% 64%'}, lee:{name:'Lee Chen',video:1,k:'32 42% 70%',hr:'220 15% 12%'},
+ mia:{name:'Mia Kovač'}, omar:{name:'Omar Haddad',video:1,k:'28 40% 52%',hr:'20 20% 14%'},
+ tom:{name:'Tom Becker'}, max:{name:'Max Orlov',video:1,k:'26 42% 64%',hr:'24 30% 20%'}, sofia:{name:'Sofia Rossi'},
+ dan:{name:'Daniel Park'}, kai:{name:'Kai Müller'}, eva:{name:'Eva Lind'}, june:{name:'June Ito'},
+ me:{name:'Nikita',k:'28 38% 66%',hr:'25 25% 20%'}
+};
+/* [id, muted, spoke seconds ago] */
+const SETS = {
+ 4:[['anna',0,2],['lee',0,8],['tom',1]],
+ 8:[['anna',0,2],['lee',0,6],['mia',0,10],['omar',0,45],['sofia',0,90],['tom',1],['max',1]],
+ 12:[['anna',0,2],['lee',0,6],['mia',0,10],['omar',0,45],['sofia',0,90],['dan',0,120],['tom',1],['max',1],['kai',1],['eva',1],['june',1]]
+};
+const MAX_ROW = 3, QUIET = 20;
+function people(n, t) { return SETS[n].map(([id, muted, ago]) => ({id, muted: !!muted, last: ago == null ? -1e9 : t - ago})); }
+function state(o = {}, t = 1000) {
+  const s = Object.assign({n: 8, mode: 'above', me: {muted: false, video: true, sharing: false}, lee: false, speaking: 'anna', copied: false, slots: [], t}, o);
+  if (!s.people) s.people = people(s.n, t);
+  slots(s, t);
+  return s;
+}
+
+/* The row: up to 3 recent speakers; a newcomer replaces whoever has been quiet longest. */
+function slots(s, t) {
+  const get = id => s.people.find(p => p.id === id);
+  const sharer = id => s.lee && id === 'lee';
+  const active = p => sharer(p.id) || (!p.muted && t - p.last <= QUIET);
+  s.slots = s.slots.filter(id => get(id) && active(get(id)));
+  if (s.lee && !s.slots.includes('lee')) take(s, 'lee', get, sharer);
+  s.people.filter(p => active(p) && !s.slots.includes(p.id)).sort((a, b) => b.last - a.last).forEach(p => take(s, p.id, get, sharer));
+}
+function take(s, id, get, sharer) {
+  if (s.slots.length < MAX_ROW) { s.slots.push(id); return; }
+  const lru = s.slots.filter(x => !sharer(x)).sort((a, b) => get(a).last - get(b).last)[0];
+  if (lru && (sharer(id) || get(id).last > get(lru).last)) s.slots[s.slots.indexOf(lru)] = id;
+}
+function layout(s) {
+  const get = id => s.people.find(p => p.id === id);
+  const shown = s.slots.map(id => ({...get(id), sharing: s.lee && id === 'lee'}));
+  const me = {id: 'me', me: true, muted: s.me.muted, sharing: s.me.sharing};
+  const inRow = [...shown, ...(s.me.muted ? [] : [me])];
+  const stack = s.people.filter(p => !s.slots.includes(p.id)).sort((a, b) => b.last - a.last);
+  if (s.me.muted) stack.push(me);
+  const cam = p => !s.camsOff && (p.me ? s.me.video : !!P[p.id].video);
+  const above = s.mode === 'above';
+  return {videos: above ? inRow.filter(cam) : [], faces: above ? inRow.filter(p => !cam(p)) : inRow, stack, cam};
+}
+
+const vid = d => `<div class="vid" style="--h:${hue(d.name)};--k:${d.k};--hr:${d.hr}"></div>`;
+function face(p, size, o = {}) {
+  const d = P[p.id];
+  const inner = o.video ? vid(d) : `<div class="av" style="--h:${hue(d.name)}">${initials(d.name)}</div>`;
+  return `<div class="face${o.speaking ? ' speaking' : ''}" data-id="${p.id}" style="--s:${size}px"><div class="clip">${inner}</div>${p.sharing && !p.me ? `<button class="b-share" data-act="focus" title="Show ${first(d.name)}'s screen">${ic('share', 10)}</button>` : ''}${p.muted ? `<span class="b-mute">${ic('micoff', 9)}</span>` : ''}</div>`;
+}
+function tile(p, speaking) {
+  const d = P[p.id];
+  return `<div class="vt${speaking ? ' speaking' : ''}" data-id="${p.id}">${vid(d)}<span class="vt-name">${p.muted ? ic('micoff', 10) : ''}${p.me ? 'You' : first(d.name)}</span>${p.sharing && !p.me ? `<button class="b-share" data-act="focus">${ic('share', 10)}</button>` : ''}</div>`;
+}
+function stackHTML(stack) {
+  const n = stack.length, ghosts = Math.min(n - 1, 2);
+  return `<div class="stack" data-zone="people"><div class="pile" style="width:${40 + ghosts * 9}px">${ghosts > 1 ? '<span class="ghost g2"></span>' : ''}${ghosts > 0 ? '<span class="ghost g1"></span>' : ''}<span class="front">${face(stack[0], 40)}</span></div>${n > 1 ? `<span class="cnt">+${n - 1}</span>` : ''}</div>`;
+}
+const mock = dark => `<div class="mk${dark ? ' dark' : ''}"><div class="h"></div><div class="l" style="width:80%"></div><div class="l" style="width:62%"></div><div class="bars"><i style="height:35%"></i><i style="height:55%"></i><i style="height:42%"></i><i style="height:78%"></i><i style="height:64%"></i><i style="height:90%"></i></div></div>`;
+
+function widgetHTML(s) {
+  const {videos, faces, stack, cam} = layout(s);
+  const size = p => s.mode === 'bigger' && cam(p) ? 64 : 40;
+  const video = cam;
+  const tb = (act, icon, cls, tip) => `<button class="tb ${cls}" data-act="${act}" title="${tip}">${ic(icon, 17)}</button>`;
+  const ctrls = `<div class="ctrls" data-zone="controls">${tb('share', s.me.sharing ? 'shareoff' : 'share', s.me.sharing ? 'on' : '', s.me.sharing ? 'Stop sharing' : 'Share screen')}${tb('mic', s.me.muted ? 'micoff' : 'mic', s.me.muted ? 'off' : '', s.me.muted ? 'Unmute' : 'Mute')}${tb('leave', 'phoneoff', 'leave', 'Leave')}</div>`;
+  const chip = (act, icon, label, cls = '') => `<button class="chip ${cls}" data-act="${act}">${ic(icon, 15)}${label}</button>`;
+  const chips = `<div class="chips">${chip('cam', s.me.video ? 'video' : 'videooff', s.me.video ? 'Camera on' : 'Camera off', s.me.video ? '' : 'off')}${chip('link', s.copied ? 'check' : 'link', s.copied ? 'Copied' : 'Copy link')}${chip('window', 'max', 'Call window')}</div>`;
+  const list = stack.length ? `<div class="dh">Muted or quiet · ${stack.length}</div><div class="pgrid">${stack.map(p => `<div class="pp">${face(p, 34)}<span>${p.me ? 'You' : first(P[p.id].name)}</span></div>`).join('')}</div>` : '<div class="dh">Everyone is in the row</div>';
+  return `<div class="preview"><div class="pv">${mock(false)}<div class="pv-tag"><i></i>Sharing · Display 1</div><button class="pv-stop" data-act="share">Stop</button></div></div>`
+    + `<div class="strip"><div class="strip-in">${videos.map(p => tile(p, p.id === s.speaking)).join('')}</div></div>`
+    + `<div class="main"><div class="faces">${faces.map(p => face(p, size(p), {video: video(p), speaking: p.id === s.speaking})).join('')}</div>${stack.length ? stackHTML(stack) : ''}${faces.length || stack.length ? '<span class="vsep"></span>' : ''}${ctrls}</div>`
+    + `<div class="drawer d-controls"><div class="din"><div class="dpad"><div class="dline"></div>${chips}</div></div></div>`
+    + `<div class="drawer d-people"><div class="din"><div class="dpad"><div class="dline"></div>${list}</div></div></div>`
+    + `<div class="drawer d-name"><div class="din"><div class="dpad"><div class="dline"></div><div class="nm"></div></div></div></div>`;
+}
+/* Sizes above the row: your preview keeps your screen's shape; tiles are 90 px tall. */
+function setHeights(w, s) {
+  const {videos} = layout(s);
+  w.style.setProperty('--st', videos.length ? '96px' : '0px');
+  const width = w.offsetWidth - 12;
+  w.style.setProperty('--pv', s.me.sharing ? Math.round(Math.min(230, Math.max(130, width / 1.6))) + 6 + 'px' : '0px');
+}
+function fillName(w, s, id, t) {
+  const p = id === 'me' ? null : s.people.find(x => x.id === id);
+  const name = id === 'me' ? 'You' : P[id].name;
+  const what = id === 'me' ? (s.me.muted ? 'muted' : 'unmuted') : (s.lee && id === 'lee') ? 'sharing their screen' : id === s.speaking ? 'speaking' : `spoke ${Math.max(1, Math.round(t - p.last))} s ago`;
+  w.querySelector('.nm').innerHTML = `<b>${name}</b> · ${what}`;
+}
+
+/* ---- live desktop ---- */
+const desk = document.getElementById('desk');
+const now = () => performance.now() / 1000;
+let S = state({}, now()), closeT = 0, nameT = 0, talking = true;
+const rnd = (() => { let a = 7; return () => { a = (a * 16807) % 2147483647; return a / 2147483647; }; })();
+let code = '';
+for (let i = 0; i < 15; i++) { let segs = ''; for (let j = 0; j < 1 + Math.floor(rnd() * 4); j++) segs += `<i style="width:${20 + Math.round(rnd() * 100)}px;background:${['#c792ea', '#82aaff', '#c3e88d', '#f78c6c', '#89ddff', '#9aa3b2'][Math.floor(rnd() * 6)]}"></i>`; code += `<div class="cl" style="padding-left:${46 + [0, 16, 32][Math.floor(rnd() * 3)]}px">${i % 6 === 2 ? '' : segs}</div>`; }
+desk.innerHTML = `<div class="menubar"><b>Code</b><span>File</span><span>Edit</span><span>View</span><span class="r">Sat 7 Nov 11:14</span></div>
+  <div class="ed"><div class="ed-top"><span class="lights"><i></i><i></i><i></i></span>call.rs — quipcall</div><div style="padding-top:10px">${code}</div></div>
+  <div class="sharewin" id="leewin" style="display:none">${mock(true)}<span class="tag">${ic('share', 11)}Lee's screen</span></div>
+  <div class="toast" id="toast"></div>
+  <div class="w live" id="live" style="--rowy:452px"></div>`;
+const live = document.getElementById('live'), leewin = document.getElementById('leewin'), toast = document.getElementById('toast');
+let shown = '';
+
+function renderLive(force) {
+  const key = JSON.stringify([S.slots, S.mode, S.me, S.lee, S.copied, S.people.map(p => p.muted), layout(S).stack[0]?.id, layout(S).stack.length]);
+  if (!force && key === shown) return speak();
+  shown = key;
+  const openNow = live.dataset.open;
+  live.innerHTML = widgetHTML(S);
+  live.dataset.open = openNow || '';
+  void live.offsetWidth; // transitions start from the current size
+  setHeights(live, S);
+  leewin.style.display = S.lee ? '' : 'none';
+  speak();
+}
+function speak() {
+  live.querySelectorAll('.main .faces .face, .vt').forEach(f => f.classList.toggle('speaking', f.dataset.id === S.speaking));
+}
+function open(what) { live.dataset.open = what || ''; }
+function say(text) { toast.textContent = text; toast.classList.add('on'); clearTimeout(say.t); say.t = setTimeout(() => toast.classList.remove('on'), 1400); }
+
+live.addEventListener('mouseover', e => {
+  clearTimeout(closeT);
+  const zone = e.target.closest('[data-zone], .d-controls, .d-people, .d-name, .main .faces .face[data-id]');
+  if (!zone) return;
+  if (zone.matches('[data-zone="controls"], .d-controls')) { clearTimeout(nameT); open('controls'); }
+  else if (zone.matches('[data-zone="people"], .d-people')) { clearTimeout(nameT); open('people'); }
+  else if (zone.matches('.face')) {
+    const id = zone.dataset.id; clearTimeout(nameT);
+    nameT = setTimeout(() => { fillName(live, S, id, now()); open('name'); }, 250);
+  }
+});
+live.addEventListener('mouseleave', () => { clearTimeout(nameT); closeT = setTimeout(() => open(''), 250); });
+live.addEventListener('click', e => {
+  const a = e.target.closest('[data-act]'); if (!a) return;
+  switch (a.dataset.act) {
+    case 'share': S.me.sharing = !S.me.sharing; break;
+    case 'mic': S.me.muted = !S.me.muted; break;
+    case 'cam': S.me.video = !S.me.video; break;
+    case 'link': S.copied = true; setTimeout(() => { S.copied = false; renderLive(); }, 1500); break;
+    case 'leave': say('Leave: the call ends, home opens'); return;
+    case 'window': say('Opens the call window'); return;
+    case 'focus': leewin.classList.add('ping'); setTimeout(() => leewin.classList.remove('ping'), 900); say("Lee's screen comes to the front"); return;
+  }
+  renderLive();
+});
+
+/* A made-up conversation: mostly the people already talking, sometimes someone new. */
+setInterval(() => {
+  const t = now();
+  if (talking) {
+    const open = S.people.filter(p => !p.muted);
+    const regulars = open.filter(p => S.slots.includes(p.id));
+    const pool = regulars.length && rnd() < 0.7 ? regulars : open;
+    const p = pool[Math.floor(rnd() * pool.length)];
+    if (p) { p.last = t; S.speaking = p.id; }
+    if (rnd() < 0.12) { const q = S.people[Math.floor(rnd() * S.people.length)]; q.muted = !q.muted; if (!q.muted) q.last = t; }
+  } else S.speaking = null;
+  slots(S, t);
+  renderLive();
+}, 1800);
+
+function seg(id, fn) {
+  document.getElementById(id).addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    document.querySelectorAll(`#${id} button`).forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+    fn(b.dataset.v);
+  });
+}
+seg('ctl-mode', v => { S.mode = v; renderLive(true); });
+seg('ctl-n', v => { const t = now(); S.n = Number(v); S.people = people(S.n, t); S.slots = []; slots(S, t); renderLive(true); });
+seg('ctl-talk', v => { talking = v === '1'; });
+seg('ctl-lee', v => { S.lee = v === '1'; slots(S, now()); renderLive(true); });
+renderLive(true);
+
+/* ---- every state ---- */
+const STATES = [
+  ['Resting', 'Anna and Lee spoke last and have cameras on: tiles above. Mia spoke too: a face in the row, then you. The grey pill is the stack: Omar, who spoke most recently of them, on top; then Sofia (quiet), Tom and Max (muted).', state(), ''],
+  ['Bigger, resting', 'The same moment with camera faces kept in the row, larger.', state({mode: 'bigger'}), ''],
+  ['Same size, resting', 'Round 3 sizes, for comparison.', state({mode: 'same'}), ''],
+  ['Hovering a face', 'Its name and what they’re doing.', state(), 'name'],
+  ['Hovering the stack', 'Everyone muted or quiet.', state(), 'people'],
+  ['Hovering the buttons', 'Camera, copy link, call window.', state(), 'controls'],
+  ['You’re sharing', 'Your preview on top, the tiles under it, the row last.', state({me: {muted: false, video: true, sharing: true}}), ''],
+  ['Lee is sharing', 'A screen badge on Lee’s tile; click it for Lee’s window.', state({lee: true}), ''],
+  ['12 people, cameras off', 'Three recent speakers and you; the stack holds eight.', state({n: 12, camsOff: true}), ''],
+  ['Everyone quiet, you muted', 'Only the stack and the buttons.', state({people: people(8, 1000).map(p => ({...p, last: -1e9})), me: {muted: true, video: true, sharing: false}, speaking: null}), '']
+];
+const gallery = document.getElementById('gallery');
+gallery.innerHTML = STATES.map(([title, text], i) => `<div class="gitem"><div class="gbox wall"><div class="w static" id="g${i}"></div></div><p><b>${title}.</b> ${text}</p></div>`).join('');
+STATES.forEach(([, , s, openRow], i) => {
+  const w = document.getElementById('g' + i);
+  w.innerHTML = widgetHTML(s);
+  w.dataset.open = openRow;
+  if (openRow === 'name') fillName(w, s, 'mia', 1000);
+  setHeights(w, s);
+});
+// Scale states wider than their box down to fit.
+function fitGallery() {
+  document.querySelectorAll('.gbox').forEach(box => {
+    const w = box.firstElementChild;
+    w.style.zoom = 1;
+    const k = Math.min(1, (box.clientWidth - 24) / w.offsetWidth);
+    w.style.zoom = k;
+  });
+}
+fitGallery(); addEventListener('resize', fitGallery);
+
+/* ---- page ---- */
+if (!getComputedStyle(document.documentElement).getPropertyValue('--background').trim()) document.body.classList.add('standalone');
+function fit() {
+  document.querySelectorAll('.stage').forEach(st => {
+    const W = Number(st.dataset.w), H = Number(st.dataset.h), cw = st.clientWidth, k = Math.min(1, cw / W), c = st.firstElementChild;
+    c.style.width = W + 'px'; c.style.height = H + 'px'; c.style.transform = `scale(${k})`;
+    c.style.left = cw > W ? `${(cw - W) / 2}px` : '0'; st.style.height = Math.round(H * k) + 'px';
+  });
+}
+fit(); addEventListener('resize', fit);
+})();
+</script>
+</body>
+</html>

@@ -22,7 +22,7 @@ Read README.md first. Plan: docs/PLAN.md. Decisions: docs/ARCHITECTURE.md.
 ## Testing the desktop app
 - `QUIPCALL_DATA_DIR=/tmp/qc-data` keeps the user's rooms and history out of tests.
 - `QUIPCALL_NO_MIC=1` starts the app without opening an audio device.
-- `--features snapshot` with `QUIPCALL_SNAPSHOT_DIR` saves a PNG of every window. The AppKit capsule clip and blur don't show in it, and a window hidden behind others stops drawing, so its PNG keeps an old frame. `QUIPCALL_SCRIPT` actions `hover`, `dock`, `panel` and `people` (and `QUIPCALL_PANEL=transcript|people`) reach the new UI states.
+- `--features snapshot` with `QUIPCALL_SNAPSHOT_DIR` saves a PNG of every window. The AppKit capsule clip and blur don't show in it, and a window hidden behind others stops drawing, so its PNG keeps an old frame. `QUIPCALL_SCRIPT` actions `hover`, `stack`, `panel` and `people` (and `QUIPCALL_PANEL=transcript|people`) reach the new UI states.
 - `QUIPCALL_SCRIPT="4:regular 8:leave"` presses buttons on a timer (`src/snapshot.rs`).
 - `QUIPCALL_FAKE_SCREEN=1` (or `=1600x900`) with the `share-own` script action shares a test pattern instead of anything on screen. Two app instances can share at once this way.
 - Without a terminal the app logs to `~/Library/Logs/Quipcall/`, which is the user's log. Run test instances under `script -q <logfile> <app> …` to keep them out of it.

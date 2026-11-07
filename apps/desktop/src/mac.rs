@@ -33,17 +33,19 @@ pub enum Mask {
 }
 
 /// Which point of the window stays put when it's resized.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Anchor {
     Center,
     /// Resize handles: the corner opposite the handle stays put.
     TopLeft,
-    /// The middle of the left edge: a capsule growing to the right.
-    Left,
-    /// The middle of the right edge: a capsule docked on the right.
-    Right,
-    /// The middle of the top edge: a vertical capsule growing down.
-    Top,
+    /// A line across the window, `before` points from its top now and
+    /// `after` points from the top once resized, stays put; so does the
+    /// horizontal centre. The capsule's main row, with things growing above
+    /// and below it.
+    Row {
+        before: f32,
+        after: f32,
+    },
 }
 
 /// A borderless panel above all apps and Spaces that never takes focus.
@@ -140,17 +142,9 @@ pub fn resize(window: &Window, size: Size<f32>, mask: Mask, anchor: Anchor, cx: 
                     frame.origin.y + (frame.size.height - h) / 2.0,
                 ),
                 Anchor::TopLeft => (frame.origin.x, frame.origin.y + frame.size.height - h),
-                Anchor::Left => (
-                    frame.origin.x,
-                    frame.origin.y + (frame.size.height - h) / 2.0,
-                ),
-                Anchor::Right => (
-                    frame.origin.x + frame.size.width - w,
-                    frame.origin.y + (frame.size.height - h) / 2.0,
-                ),
-                Anchor::Top => (
+                Anchor::Row { before, after } => (
                     frame.origin.x + (frame.size.width - w) / 2.0,
-                    frame.origin.y + frame.size.height - h,
+                    frame.origin.y + frame.size.height - before as f64 + after as f64 - h,
                 ),
             };
             let mut target = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));

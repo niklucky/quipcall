@@ -113,6 +113,16 @@ pub struct Member {
     pub screen: Option<Video>,
     pub speaking: bool,
     pub mic_muted: bool,
+    /// When they last joined, unmuted or spoke: the capsule shows whoever
+    /// was active last.
+    pub last_active: Option<Instant>,
+}
+
+impl Member {
+    /// Speaking now, or active within `quiet`, and not muted.
+    pub fn is_active(&self, quiet: Duration) -> bool {
+        !self.mic_muted && (self.speaking || self.last_active.is_some_and(|t| t.elapsed() <= quiet))
+    }
 }
 
 pub struct Screen {
@@ -204,6 +214,7 @@ impl Call {
             screen: None,
             speaking: false,
             mic_muted: true,
+            last_active: None,
         });
 
         let join = engine.join(&args.server, &room.id, &identity, &args.name);
@@ -363,6 +374,23 @@ impl Call {
         });
         self.share_preset = preset;
         cx.notify();
+    }
+
+    /// Who is sharing their screen (identities), besides you.
+    pub fn sharers(&self, cx: &App) -> Vec<String> {
+        self.screens
+            .iter()
+            .map(|s| s.read(cx).key.participant.clone())
+            .collect()
+    }
+
+    /// Someone's floating share window, to bring it to the front.
+    pub fn share_window_of(&self, identity: &str) -> Option<WindowHandle<ScreenWindow>> {
+        self.windows
+            .screens
+            .iter()
+            .find(|(key, _)| key.participant == identity)
+            .map(|(_, handle)| *handle)
     }
 
     pub fn is_fullscreen(&self, key: &TrackKey) -> bool {
@@ -537,6 +565,7 @@ impl Call {
                         screen: None,
                         speaking: false,
                         mic_muted: false,
+                        last_active: Some(Instant::now()),
                     });
                     self.others.push(member);
                     windows_changed = true;
@@ -608,6 +637,9 @@ impl Call {
                 for member in self.members().cloned().collect::<Vec<_>>() {
                     member.update(cx, |m, cx| {
                         let speaking = speakers.contains(&m.identity);
+                        if speaking {
+                            m.last_active = Some(Instant::now());
+                        }
                         if m.speaking != speaking {
                             m.speaking = speaking;
                             cx.notify();
@@ -618,6 +650,9 @@ impl Call {
             Event::ParticipantMic { identity, muted } => {
                 if let Some(member) = self.member(&identity, cx) {
                     member.update(cx, |m, cx| {
+                        if m.mic_muted && !muted {
+                            m.last_active = Some(Instant::now());
+                        }
                         m.mic_muted = muted;
                         cx.notify();
                     });
