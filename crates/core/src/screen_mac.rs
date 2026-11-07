@@ -1,6 +1,6 @@
 //! Screen sharing on macOS with ScreenCaptureKit.
 //!
-//! - [`list_sources`]: screens and windows, each with a small thumbnail, for
+//! - [`list_sources`]: screens and windows, followed by small thumbnails, for
 //!   our own share picker.
 //! - [`Capture`]: frames of one screen or window arrive as full-range NV12
 //!   IOSurface `CVPixelBuffer`s at the preset's frame rate and go to WebRTC
@@ -13,13 +13,14 @@
 //! moving test pattern instead, for headless tests: nothing on screen is
 //! captured and no permission is needed.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
+use futures_util::{StreamExt, stream};
 use livekit::webrtc::prelude::{BoxVideoBuffer, VideoFrame, VideoRotation};
 use livekit::webrtc::video_frame::native::NativeBuffer;
 use livekit::webrtc::video_source::native::NativeVideoSource;
@@ -35,6 +36,7 @@ use objc2_screen_capture_kit::{
     SCStreamConfiguration, SCStreamDelegate, SCStreamOutput, SCStreamOutputType,
 };
 use parking_lot::Mutex;
+use tokio::sync::Semaphore;
 
 use crate::FrameSink;
 use crate::pixel_buffer::{PixelBufferPool, paint_test_pattern};
@@ -59,6 +61,23 @@ pub struct ShareSource {
     pub thumbnail: Option<Thumbnail>,
 }
 
+/// Choices are usable before any screenshot has finished. Preview failures
+/// leave the corresponding choice's icon in place.
+pub enum ShareSourceUpdate {
+    Sources(Vec<ShareSource>),
+    Thumbnail(SourceId, Thumbnail),
+}
+
+const CONTENT_TIMEOUT: Duration = Duration::from_secs(10);
+const THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_THUMBNAILS: usize = 4;
+// Shared by every picker and engine. A timed-out or dismissed picker cannot
+// reclaim capacity from a native request that is still running.
+static THUMBNAIL_BUDGET: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(MAX_THUMBNAILS)));
+
+type PreviewCallback<P> = Box<dyn FnOnce(Option<P>) + Send>;
+
 /// Screen Recording permission is off (ScreenCaptureKit's "user declined").
 #[derive(Debug)]
 pub struct NoPermission;
@@ -75,9 +94,9 @@ impl std::error::Error for NoPermission {}
 const USER_DECLINED: isize = -3801;
 
 /// Moves an Objective-C object between threads. ScreenCaptureKit's content
-/// objects are immutable snapshots.
+/// objects are immutable snapshots; filters are fully configured before moving.
 struct Shared<T>(T);
-// SAFETY: see above; used only for SCK snapshot objects and results.
+// SAFETY: see above; used only for SCK snapshots and immutable content filters.
 unsafe impl<T> Send for Shared<T> {}
 
 /// Apps whose on-screen "windows" are system chrome, not something to share.
@@ -144,11 +163,8 @@ fn fit(width: f64, height: f64, scale: f64, max_width: u32) -> (usize, usize) {
     (even(w), even(h))
 }
 
-fn thumbnail(
-    filter: &SCContentFilter,
-    max_width: u32,
-) -> async_channel::Receiver<Option<Thumbnail>> {
-    let (tx, rx) = async_channel::bounded(1);
+fn thumbnail(filter: &SCContentFilter, max_width: u32, complete: PreviewCallback<Thumbnail>) {
+    let complete = Mutex::new(Some(complete));
     // SAFETY: plain configuration of fresh objects; the handler is 'static.
     unsafe {
         let rect = filter.contentRect();
@@ -168,7 +184,11 @@ fn thumbnail(
                 .as_ref()
                 .and_then(|s| s.image_buffer())
                 .map(Thumbnail);
-            let _ = tx.try_send(thumb);
+            // Release the native-operation permit on callback completion even
+            // if ScreenCaptureKit keeps the block alive afterwards.
+            if let Some(complete) = complete.lock().take() {
+                complete(thumb);
+            }
         });
         SCScreenshotManager::captureSampleBufferWithFilter_configuration_completionHandler(
             filter,
@@ -176,7 +196,6 @@ fn thumbnail(
             Some(&handler),
         );
     }
-    rx
 }
 
 fn own_app(content: &SCShareableContent) -> Option<Retained<SCRunningApplication>> {
@@ -187,10 +206,17 @@ fn own_app(content: &SCShareableContent) -> Option<Retained<SCRunningApplication
         .find(|app| unsafe { app.processID() } == pid)
 }
 
-/// Screens first, then windows (front to back), each with a thumbnail up to
-/// `thumb_width` pixels wide.
-pub async fn list_sources(thumb_width: u32) -> anyhow::Result<Vec<ShareSource>> {
-    let content = shareable_content().await?;
+/// Run on the engine's blocking pool, with its timer runtime entered.
+pub(crate) async fn list_sources(
+    thumb_width: u32,
+    updates: &async_channel::Sender<anyhow::Result<ShareSourceUpdate>>,
+) -> anyhow::Result<()> {
+    if !crate::permissions::screen_recording_allowed() {
+        return Err(NoPermission.into());
+    }
+    let content = tokio::time::timeout(CONTENT_TIMEOUT, shareable_content())
+        .await
+        .context("macOS took too long to list screens and windows; try again")??;
     let pid = std::process::id() as i32;
     let mut sources = Vec::new();
     let mut thumbs = Vec::new();
@@ -209,7 +235,7 @@ pub async fn list_sources(thumb_width: u32) -> anyhow::Result<Vec<ShareSource>> 
                 &ours,
                 &NSArray::new(),
             );
-            thumbs.push(thumbnail(&filter, thumb_width));
+            thumbs.push((SourceId::Display(display.displayID()), Shared(filter)));
             sources.push(ShareSource {
                 id: SourceId::Display(display.displayID()),
                 title: if many {
@@ -247,7 +273,7 @@ pub async fn list_sources(thumb_width: u32) -> anyhow::Result<Vec<ShareSource>> 
                 SCContentFilter::alloc(),
                 &window,
             );
-            thumbs.push(thumbnail(&filter, thumb_width));
+            thumbs.push((SourceId::Window(window.windowID()), Shared(filter)));
             sources.push(ShareSource {
                 id: SourceId::Window(window.windowID()),
                 title,
@@ -257,11 +283,79 @@ pub async fn list_sources(thumb_width: u32) -> anyhow::Result<Vec<ShareSource>> 
         }
     }
 
-    // The screenshots were all requested above and run in parallel.
-    for (source, thumb) in sources.iter_mut().zip(thumbs) {
-        source.thumbnail = thumb.recv().await.ok().flatten();
+    tracing::debug!(count = sources.len(), "screen share choices ready");
+    if updates
+        .send(Ok(ShareSourceUpdate::Sources(sources)))
+        .await
+        .is_err()
+    {
+        return Ok(());
     }
-    Ok(sources)
+    // Bound the native screenshot work, and deliver in completion order: one
+    // unresponsive window must not hold up every other preview.
+    let previews = preview_stream(
+        thumbs,
+        THUMBNAIL_TIMEOUT,
+        THUMBNAIL_BUDGET.clone(),
+        move |Shared(filter), complete| thumbnail(&filter, thumb_width, complete),
+    );
+    futures_util::pin_mut!(previews);
+    while let Some((id, thumbnail)) = previews.next().await {
+        if let Some(thumbnail) = thumbnail
+            && updates
+                .send(Ok(ShareSourceUpdate::Thumbnail(id, thumbnail)))
+                .await
+                .is_err()
+        {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn preview_stream<T: Send + 'static, P: Send + 'static>(
+    jobs: Vec<(SourceId, T)>,
+    timeout: Duration,
+    budget: Arc<Semaphore>,
+    capture: impl Fn(T, PreviewCallback<P>) + Send + Sync + 'static,
+) -> impl futures_util::Stream<Item = (SourceId, Option<P>)> {
+    let capture = Arc::new(capture);
+    stream::iter(jobs)
+        .map(move |(id, job)| {
+            let budget = budget.clone();
+            let capture = capture.clone();
+            async move {
+                // The deadline includes capacity, worker scheduling, native
+                // submission (which can block), and callback delivery.
+                let preview = tokio::time::timeout(timeout, async move {
+                    let permit = Arc::new(budget.acquire_owned().await.ok()?);
+                    let (tx, rx) = async_channel::bounded(1);
+                    tokio::task::spawn_blocking(move || {
+                        // Keep capacity until BOTH the submission returns and
+                        // its native callback completes or is discarded.
+                        let _worker_permit = permit.clone();
+                        if tx.is_closed() {
+                            return;
+                        }
+                        crate::autorelease_pool(|| {
+                            capture(
+                                job,
+                                Box::new(move |preview| {
+                                    let _ = tx.try_send(preview);
+                                    drop(permit);
+                                }),
+                            );
+                        });
+                    });
+                    rx.recv().await.ok().flatten()
+                })
+                .await
+                .ok()
+                .flatten();
+                (id, preview)
+            }
+        })
+        .buffer_unordered(MAX_THUMBNAILS)
 }
 
 /// Dev and tests: the largest window of this process, to exercise screen
@@ -677,5 +771,192 @@ impl Drop for Synthetic {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn held_previews(
+        count: u32,
+        timeout: Duration,
+        budget: Arc<Semaphore>,
+    ) -> (
+        impl futures_util::Stream<Item = (SourceId, Option<u32>)>,
+        async_channel::Receiver<PreviewCallback<u32>>,
+    ) {
+        let (tx, callbacks) = async_channel::unbounded();
+        let previews = preview_stream(
+            (0..count).map(|id| (SourceId::Window(id), id)).collect(),
+            timeout,
+            budget,
+            move |_, complete| {
+                let _ = tx.try_send(complete);
+            },
+        );
+        (previews, callbacks)
+    }
+
+    #[tokio::test]
+    async fn native_submission_stall_does_not_block_previews_or_deadlines() {
+        let budget = Arc::new(Semaphore::new(MAX_THUMBNAILS));
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let (started_tx, started_rx) = async_channel::bounded(1);
+        let previews = preview_stream(
+            vec![
+                (SourceId::Window(1), Some(blocked)),
+                (SourceId::Window(2), None),
+            ],
+            Duration::from_millis(100),
+            budget.clone(),
+            move |blocked, complete| {
+                if let Some(blocked) = blocked {
+                    started_tx.try_send(()).unwrap();
+                    // Safety net for a regression that blocks the test executor.
+                    let _ = blocked.recv_timeout(Duration::from_secs(2));
+                }
+                complete(Some(42));
+            },
+        );
+        let started = Instant::now();
+        let results = tokio::time::timeout(Duration::from_secs(1), previews.collect::<Vec<_>>())
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        started_rx.try_recv().unwrap();
+        assert_eq!(
+            results,
+            vec![(SourceId::Window(2), Some(42)), (SourceId::Window(1), None)]
+        );
+        assert_eq!(budget.available_permits(), MAX_THUMBNAILS - 1);
+        release.send(()).unwrap();
+        // Wait for the native worker's eventual return, without using real capture.
+        let _all = tokio::time::timeout(
+            Duration::from_secs(1),
+            budget.acquire_many(MAX_THUMBNAILS as u32),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn callback_before_submission_returns_keeps_worker_capacity() {
+        let budget = Arc::new(Semaphore::new(1));
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let mut previews = Box::pin(preview_stream(
+            vec![(SourceId::Window(1), blocked)],
+            Duration::from_secs(1),
+            budget.clone(),
+            |blocked, complete| {
+                complete(Some(42));
+                let _ = blocked.recv_timeout(Duration::from_secs(2));
+            },
+        ));
+        assert_eq!(previews.next().await, Some((SourceId::Window(1), Some(42))));
+        drop(previews);
+        assert_eq!(budget.available_permits(), 0);
+        release.send(()).unwrap();
+        let _all = tokio::time::timeout(Duration::from_secs(1), budget.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn timeouts_keep_native_capture_budget_across_picker_sessions() {
+        let budget = Arc::new(Semaphore::new(MAX_THUMBNAILS));
+        let (previews, callbacks) = held_previews(12, Duration::from_millis(50), budget.clone());
+        let results = previews.collect::<Vec<_>>().await;
+        assert_eq!(results.len(), 12);
+        assert!(results.iter().all(|(_, preview)| preview.is_none()));
+        // Native callbacks still exist after the receivers timed out.
+        assert_eq!(callbacks.len(), MAX_THUMBNAILS);
+        assert_eq!(budget.available_permits(), 0);
+
+        let (reopened, new_callbacks) = held_previews(8, Duration::from_millis(20), budget.clone());
+        assert!(
+            reopened
+                .collect::<Vec<_>>()
+                .await
+                .iter()
+                .all(|(_, preview)| preview.is_none())
+        );
+        assert!(new_callbacks.is_empty());
+        assert_eq!(budget.available_permits(), 0);
+
+        callbacks.recv().await.unwrap()(Some(1));
+        let mut next = Box::pin(preview_stream(
+            vec![(SourceId::Window(99), ())],
+            Duration::from_secs(1),
+            budget.clone(),
+            |_, complete| complete(Some(99)),
+        ));
+        assert_eq!(next.next().await, Some((SourceId::Window(99), Some(99))));
+        drop(next);
+        drop(callbacks);
+        let _all = tokio::time::timeout(
+            Duration::from_secs(1),
+            budget.acquire_many(MAX_THUMBNAILS as u32),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn closing_picker_keeps_inflight_budget_and_discards_queued_jobs() {
+        let budget = Arc::new(Semaphore::new(MAX_THUMBNAILS));
+        let (previews, callbacks) = held_previews(20, Duration::from_secs(10), budget.clone());
+        let loading = tokio::spawn(previews.collect::<Vec<_>>());
+        let mut active = Vec::new();
+        for _ in 0..MAX_THUMBNAILS {
+            active.push(
+                tokio::time::timeout(Duration::from_secs(1), callbacks.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        loading.abort();
+        assert!(loading.await.unwrap_err().is_cancelled());
+        assert_eq!(budget.available_permits(), 0);
+        let (reopened, new_callbacks) = held_previews(8, Duration::from_millis(20), budget.clone());
+        assert!(
+            reopened
+                .collect::<Vec<_>>()
+                .await
+                .iter()
+                .all(|(_, preview)| preview.is_none())
+        );
+        assert!(new_callbacks.is_empty());
+        assert!(callbacks.is_empty());
+        drop(active);
+        let _all = tokio::time::timeout(
+            Duration::from_secs(1),
+            budget.acquire_many(MAX_THUMBNAILS as u32),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_capture_releases_capacity_for_next_preview() {
+        let budget = Arc::new(Semaphore::new(1));
+        let previews = preview_stream(
+            vec![(SourceId::Window(1), false), (SourceId::Window(2), true)],
+            Duration::from_secs(1),
+            budget.clone(),
+            |success, complete| complete(success.then_some(42)),
+        );
+        let results = previews.collect::<Vec<_>>().await;
+        assert!(results.contains(&(SourceId::Window(1), None)));
+        assert!(results.contains(&(SourceId::Window(2), Some(42))));
+        let _all = tokio::time::timeout(Duration::from_secs(1), budget.acquire())
+            .await
+            .unwrap()
+            .unwrap();
     }
 }
