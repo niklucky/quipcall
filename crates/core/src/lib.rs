@@ -334,7 +334,9 @@ impl Engine {
     /// Lists share choices first, then delivers previews as they arrive. Native
     /// screen APIs may block even before calling their completion handlers, so
     /// keep the entire operation off both the UI and media executor threads.
-    /// Dropping the receiver cancels loading; a new picker gets its own stream.
+    /// Dropping the receiver stops queuing and waiting for previews. In-flight
+    /// native requests retain their shared budget until completion, including
+    /// when another picker opens with its own stream.
     #[cfg(target_os = "macos")]
     pub fn screen_sources(
         &self,
