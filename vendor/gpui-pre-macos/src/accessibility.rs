@@ -37,9 +37,13 @@ define_class!(
     pub(crate) struct AccessibleContentView;
 
     impl AccessibleContentView {
+        // AccessKit can notify AppKit synchronously while the state is borrowed.
+        // Re-entrant queries use NSView until that update finishes.
         #[unsafe(method(accessibilityChildren))]
         fn children(&self) -> *mut AnyObject {
-            if let Some(ax) = self.ivars().borrow_mut().as_mut() {
+            if let Ok(mut state) = self.ivars().try_borrow_mut()
+                && let Some(ax) = state.as_mut()
+            {
                 return ax.adapter.view_children(&mut ax.activate).cast();
             }
             unsafe { msg_send![super(self), accessibilityChildren] }
@@ -47,7 +51,9 @@ define_class!(
 
         #[unsafe(method(accessibilityFocusedUIElement))]
         fn focus(&self) -> *mut AnyObject {
-            if let Some(ax) = self.ivars().borrow_mut().as_mut() {
+            if let Ok(mut state) = self.ivars().try_borrow_mut()
+                && let Some(ax) = state.as_mut()
+            {
                 return ax.adapter.focus(&mut ax.activate).cast();
             }
             unsafe { msg_send![super(self), accessibilityFocusedUIElement] }
@@ -56,7 +62,8 @@ define_class!(
         #[unsafe(method(accessibilityHitTest:))]
         fn hit_test(&self, point: NSPoint) -> *mut AnyObject {
             if self.window().is_some()
-                && let Some(ax) = self.ivars().borrow_mut().as_mut()
+                && let Ok(mut state) = self.ivars().try_borrow_mut()
+                && let Some(ax) = state.as_mut()
             {
                 let point = accesskit_macos::NSPoint::new(point.x, point.y);
                 return ax.adapter.hit_test(point, &mut ax.activate).cast();

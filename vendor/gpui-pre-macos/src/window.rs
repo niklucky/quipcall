@@ -1,3 +1,4 @@
+// quipcall patch: use a fixed accessibility content view class.
 use crate::accessibility::AccessibleContentView;
 use crate::{
     BoolExt, MacDisplay, MetalFrames, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
@@ -702,6 +703,8 @@ struct MacWindowState {
     toggle_tab_bar_callback: Option<Box<dyn FnMut()>>,
     activated_least_once: bool,
     closed: Arc<AtomicBool>,
+    // quipcall patch: weak because the content view owns GPUIView, which holds
+    // this state. Retaining it here would leak each window and its Metal layer.
     accessibility_view: objc2::rc::Weak<AccessibleContentView>,
     // The parent window if this window is a sheet (Dialog kind)
     sheet_parent: Option<*mut AnyObject>,
@@ -1109,6 +1112,7 @@ impl MacWindow {
                 setReleasedWhenClosed: Bool::NO
             ];
 
+            // quipcall patch: install the fixed content view before focus or KVO.
             let original_content: *mut AnyObject = msg_send![native_window, contentView];
             let content_bounds: NSRect = msg_send![original_content, bounds];
             let content_view = AccessibleContentView::new(marker, content_bounds);
@@ -1172,6 +1176,7 @@ impl MacWindow {
                 toggle_tab_bar_callback: None,
                 activated_least_once: false,
                 closed: Arc::new(AtomicBool::new(false)),
+                // quipcall patch: track the content view without retaining its state cycle.
                 accessibility_view: objc2::rc::Weak::new(&content_view),
                 sheet_parent: None,
             }));
@@ -1229,6 +1234,7 @@ impl MacWindow {
             ];
 
             let native_view: *mut AnyObject = msg_send![native_view, autorelease];
+            // quipcall patch: attach the renderer view to the fixed content view.
             let _: () = msg_send![&*content_view, addSubview: native_view];
             let _: Bool = msg_send![native_window, makeFirstResponder: native_view];
 
@@ -1408,6 +1414,7 @@ impl MacWindow {
 
 impl Drop for MacWindow {
     fn drop(&mut self) {
+        // quipcall patch: clear accessibility without changing the view class.
         // Dropping an active accessibility tree can notify AppKit synchronously.
         let view = self.0.lock().accessibility_view.load();
         if let Some(view) = view {
@@ -2409,6 +2416,7 @@ impl PlatformWindow for MacWindow {
         this.renderer.render_to_image(scene)
     }
 
+    // quipcall patch: the fixed content view owns AccessKit and its callbacks.
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
         let view = self.0.lock().accessibility_view.load();
         if let Some(view) = view {
@@ -2416,6 +2424,7 @@ impl PlatformWindow for MacWindow {
         }
     }
 
+    // quipcall patch: release the window lock before AccessKit can call AppKit.
     fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
         let view = self.0.lock().accessibility_view.load();
         if let Some(events) = view.and_then(|view| view.update_tree(tree_update)) {
@@ -2427,6 +2436,8 @@ impl PlatformWindow for MacWindow {
         // macOS handles window bounds tracking automatically via NSAccessibility.
     }
 }
+
+// quipcall patch: accessibility callback wrappers now live in accessibility.rs.
 
 impl rwh::HasWindowHandle for MacWindow {
     fn window_handle(&self) -> Result<rwh::WindowHandle<'_>, rwh::HandleError> {
@@ -3215,6 +3226,7 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
     let executor = lock.foreground_executor.clone();
     drop(lock);
 
+    // quipcall patch: forward focus through the fixed content view outside the lock.
     let view = window_state.lock().accessibility_view.load();
     if let Some(events) = view.and_then(|view| view.update_focus(is_active)) {
         events.raise();

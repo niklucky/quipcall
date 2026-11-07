@@ -54,6 +54,12 @@ name = "gpui_macos"
 path = "src/gpui_macos.rs"
 doctest = false
 
+# quipcall patch: AppKit regression checks run on the process main thread.
+[[test]]
+name = "accessibility"
+path = "tests/accessibility.rs"
+harness = false
+
 [dependencies.gpui]
 version = "=0.3.11"
 default-features = false

@@ -32,6 +32,7 @@ Read README.md first. Plan: docs/PLAN.md. Decisions: docs/ARCHITECTURE.md.
 - Ask for mic and camera access with AVCaptureDevice before WebRTC touches them. A prompt raised by WebRTC itself blocks its audio thread and freezes the call.
 - Any thread that handles libwebrtc Objective-C frames needs an autorelease pool per frame (`autorelease_pool`).
 - Never change a window's style mask at runtime: it crashes Macs with a Touch Bar. Floating windows are created borderless through the patched GPUI in `vendor/`.
+- Never change an NSView's class at runtime (`object_setClass`, AccessKit's `SubclassingAdapter`). AppKit's Touch Bar observes the responder chain with KVO and can throw when removing its observer after a class change. Use a fixed view class and AccessKit's plain adapter.
 - Defer AppKit frame changes with a `foreground_executor` spawn. Defer opening a window from inside an entity update with `cx.defer`, or GPUI panics.
 - Keep the camera on H.264 with zero-copy rendering: it uses about 40% less CPU than VP8.
 - Mac builds need `MACOSX_DEPLOYMENT_TARGET=12.3`. Below that, the Swift libraries link via `@rpath` and the app won't start. Dev builds are ad-hoc signed, so macOS asks for permissions again after every build. Releases are signed with the certificate in `~/Library/Keychains/quipcall-signing.keychain-db` so they keep them; never delete or regenerate it.

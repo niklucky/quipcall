@@ -4,6 +4,7 @@
 //! macOS screens have a y axis that goes up from the bottom of the screen and
 //! an origin at the bottom left of the main display.
 
+// quipcall patch: a fixed content view class preserves Touch Bar KVO registrations.
 mod accessibility;
 mod display;
 mod display_link;
