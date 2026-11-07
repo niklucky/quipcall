@@ -14,7 +14,7 @@ use objc2::rc::Retained;
 use objc2_app_kit::{
     NSApplicationDidBecomeActiveNotification, NSApplicationDidChangeScreenParametersNotification,
     NSApplicationDidHideNotification, NSApplicationDidResignActiveNotification,
-    NSApplicationDidUnhideNotification, NSView, NSWindow,
+    NSApplicationDidUnhideNotification, NSEvent, NSView, NSWindow,
     NSWindowDidChangeOcclusionStateNotification, NSWindowDidChangeScreenNotification,
     NSWindowOcclusionState, NSWindowSharingType, NSWindowStyleMask, NSWindowWillCloseNotification,
     NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
@@ -40,8 +40,8 @@ pub enum Anchor {
     TopLeft,
     /// A line across the window, `before` points from its top now and
     /// `after` points from the top once resized, stays put; so does the
-    /// horizontal centre. The capsule's main row, with things growing above
-    /// and below it.
+    /// right edge. The call widget's main row, with things growing above and
+    /// below it and its buttons at the right end.
     Row {
         before: f32,
         after: f32,
@@ -120,6 +120,20 @@ pub fn make_shape(window: &Window, mask: Mask, cx: &App) {
         .detach();
 }
 
+/// Whether the mouse cursor is over `window` right now (`None` if the
+/// window can't be found).
+pub fn cursor_inside(window: &Window) -> Option<bool> {
+    let ns = ns_window(window)?;
+    let p = NSEvent::mouseLocation();
+    let f = ns.frame();
+    Some(
+        p.x >= f.origin.x
+            && p.x <= f.origin.x + f.size.width
+            && p.y >= f.origin.y
+            && p.y <= f.origin.y + f.size.height,
+    )
+}
+
 /// Resize to `size`, keeping `anchor` where it is, and re-apply `mask`. A
 /// window that was fully on its screen stays on it, except while a resize
 /// handle is dragged: moving the corner under the cursor would feed back into
@@ -143,7 +157,7 @@ pub fn resize(window: &Window, size: Size<f32>, mask: Mask, anchor: Anchor, cx: 
                 ),
                 Anchor::TopLeft => (frame.origin.x, frame.origin.y + frame.size.height - h),
                 Anchor::Row { before, after } => (
-                    frame.origin.x + (frame.size.width - w) / 2.0,
+                    frame.origin.x + frame.size.width - w,
                     frame.origin.y + frame.size.height - before as f64 + after as f64 - h,
                 ),
             };

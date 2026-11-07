@@ -2,12 +2,13 @@
 //!
 //! The main row holds up to three people who were active last (spoke,
 //! unmuted or joined; a newcomer takes the place of whoever has been quiet
-//! longest), then you, then a stack with everyone muted or quiet for two
-//! minutes, then Share, Mic and Leave. People with their camera on show as
+//! longest), then you (muted or not, so muting moves nothing), then a stack
+//! with everyone muted or quiet for two minutes, then Share, Mic and Leave. People with their camera on show as
 //! video tiles above the row; while you share, your screen's preview sits on
 //! top. Hovering the buttons, the stack or a face opens a row underneath
-//! (above the main row instead when the screen ends first). The main row
-//! never moves: the window grows around it.
+//! (above the main row instead when the screen ends first) and closes once
+//! the cursor leaves. The main row never moves: the window grows around it,
+//! and Share, Mic and Leave stay put as it gets wider or narrower.
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -59,6 +60,10 @@ const CONTROLS_H: f32 = 73.0;
 const LINE_H: f32 = 37.0;
 /// Rows open and close after the cursor settles this long.
 const HOVER_DELAY: Duration = Duration::from_millis(250);
+/// While a row is open, where the cursor is gets checked this often: GPUI
+/// reports hovering only while the mouse moves inside the window, so
+/// nothing says the cursor has left.
+const CURSOR_POLL: Duration = Duration::from_millis(150);
 /// Repaints at most this often. Everyone's frames arrive out of step, so
 /// without a cap the widget redraws at the display's rate (up to 120 Hz);
 /// cameras send 30 fps at most.
@@ -106,7 +111,7 @@ struct Plan {
     tiles: Vec<Entity<Member>>,
     /// In the row with the camera off. You last.
     faces: Vec<Entity<Member>>,
-    /// Muted or quiet, the most recently active first; you last when muted.
+    /// Others muted or quiet, the most recently active first.
     stack: Vec<Entity<Member>>,
     /// Identities of people sharing their screen.
     sharers: Vec<String>,
@@ -123,9 +128,15 @@ pub struct Capsule {
     size: Size<f32>,
     /// Height above the main row.
     above: f32,
+    /// [`Self::above`] for the window's frame as it is now: a resize lands a
+    /// frame later, and until then the main row is drawn here, so it stays
+    /// put.
+    shown_above: f32,
     /// The drawer opens above the main row: no room under it.
     drawer_above: bool,
     hover_task: Option<Task<()>>,
+    /// Closes the open row once the cursor has left the window.
+    cursor_task: Option<Task<()>>,
     /// Repaint subscriptions for every person in the call.
     watched: HashMap<EntityId, Subscription>,
     /// A repaint is already scheduled (see [`FRAME`]).
@@ -166,8 +177,10 @@ impl Capsule {
             open: None,
             size,
             above: 0.0,
+            shown_above: 0.0,
             drawer_above: false,
             hover_task: None,
+            cursor_task: None,
             watched: HashMap::new(),
             repaint_pending: false,
             _subscriptions: subscriptions,
@@ -262,11 +275,8 @@ impl Capsule {
     fn plan(&self, cx: &App) -> Plan {
         let call = self.call.read(cx);
         let me = call.me.clone();
-        let me_muted = me.read(cx).mic_muted;
         let mut row = self.slots.clone();
-        if !me_muted {
-            row.push(me.clone());
-        }
+        row.push(me.clone());
         let (tiles, faces) = row.into_iter().partition(|e| e.read(cx).video.is_some());
         let mut stack: Vec<Entity<Member>> = call
             .others
@@ -275,9 +285,6 @@ impl Capsule {
             .cloned()
             .collect();
         stack.sort_by_key(|e| Reverse(e.read(cx).last_active));
-        if me_muted {
-            stack.push(me.clone());
-        }
         Plan {
             tiles,
             faces,
@@ -310,7 +317,7 @@ impl Capsule {
         let drawer_above = drawer_h > 0.0
             && window.display(cx).is_some_and(|d| {
                 let area = d.visible_bounds();
-                let row_bottom = window.bounds().origin.y + px(self.above + MAIN);
+                let row_bottom = window.bounds().origin.y + px(self.shown_above + MAIN);
                 (area.origin.y + area.size.height - row_bottom) / px(1.0) < drawer_h + 12.0
             });
         let above = base + if drawer_above { drawer_h } else { 0.0 };
@@ -336,19 +343,54 @@ impl Capsule {
         plan
     }
 
-    fn set_open(&mut self, open: Option<Drawer>, cx: &mut Context<Self>) {
+    fn set_open(&mut self, open: Option<Drawer>, window: &mut Window, cx: &mut Context<Self>) {
         self.hover_task = None;
         if self.open != open {
             self.open = open;
             cx.notify();
         }
+        if self.open.is_some() && self.cursor_task.is_none() {
+            self.watch_cursor(window, cx);
+        }
     }
 
-    /// Open (or close) a row once the cursor has settled.
-    fn open_after(&mut self, open: Option<Drawer>, window: &mut Window, cx: &mut Context<Self>) {
+    /// Open a row once the cursor has settled.
+    fn open_after(&mut self, open: Drawer, window: &mut Window, cx: &mut Context<Self>) {
         self.hover_task = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(HOVER_DELAY).await;
-            let _ = this.update(cx, |this, cx| this.set_open(open, cx));
+            let _ = this.update_in(cx, |this, window, cx| this.set_open(Some(open), window, cx));
+        }));
+    }
+
+    /// Close the open row once the cursor has been outside the window for
+    /// [`HOVER_DELAY`].
+    fn watch_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cursor_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let mut outside = Duration::ZERO;
+            loop {
+                cx.background_executor().timer(CURSOR_POLL).await;
+                let done = this.update_in(cx, |this, window, cx| {
+                    if this.open.is_none() {
+                        return true;
+                    }
+                    if mac::cursor_inside(window) == Some(false) {
+                        outside += CURSOR_POLL;
+                    } else {
+                        outside = Duration::ZERO;
+                    }
+                    if outside >= HOVER_DELAY {
+                        this.hover_task = None;
+                        this.open = None;
+                        cx.notify();
+                        return true;
+                    }
+                    false
+                });
+                if done.unwrap_or(true) {
+                    let _ = this.update(cx, |this, _| this.cursor_task = None);
+                    break;
+                }
+            }
         }));
     }
 
@@ -359,7 +401,9 @@ impl Capsule {
             "people" => Drawer::People,
             _ => Drawer::Controls,
         };
-        self.set_open(Some(open), cx);
+        // Not through set_open: the cursor is elsewhere in tests.
+        self.open = Some(open);
+        cx.notify();
     }
 }
 
@@ -375,17 +419,15 @@ fn preview_aspect(me: &Member) -> Option<f32> {
     )
 }
 
-fn stack_width(n: usize) -> f32 {
-    let ghosts = n.saturating_sub(1).min(2) as f32;
-    let count = if n > 1 { GAP + 2.0 + COUNT } else { 0.0 };
-    2.0 + FACE + ghosts * GHOST + count + 9.0
-}
+/// The stack keeps one width whatever it holds, so people coming and going
+/// don't shift the row.
+const STACK_W: f32 = 2.0 + FACE + 2.0 * GHOST + GAP + 2.0 + COUNT + 9.0;
 
 fn row_width(plan: &Plan) -> f32 {
     let mut items: Vec<f32> = plan.faces.iter().map(|_| FACE).collect();
     let mut extra = 0.0;
     if !plan.stack.is_empty() {
-        items.push(stack_width(plan.stack.len()));
+        items.push(STACK_W);
         if !plan.faces.is_empty() {
             extra += GAP;
         }
@@ -480,31 +522,39 @@ impl Render for Capsule {
         } else {
             (None, drawer)
         };
+        // Until a resize lands, draw the main row where it is on screen now,
+        // and keep the right end (the buttons) in place.
+        let viewport = window.viewport_size();
+        if (viewport.width / px(1.0) - self.size.width).abs() < 0.5
+            && (viewport.height / px(1.0) - self.size.height).abs() < 0.5
+        {
+            self.shown_above = self.above;
+        }
+        let top = self.shown_above - self.above;
 
         div()
             .id("capsule")
             .size_full()
-            .flex()
-            .flex_col()
+            .relative()
+            .overflow_hidden()
             .bg(glass_tint())
             .text_color(rgb(TEXT))
             .text_size(px(13.0))
-            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
-                if *hovered {
-                    // Back in before the row closed: keep it.
-                    if this.open.is_some() {
-                        this.hover_task = None;
-                    }
-                } else {
-                    this.open_after(None, window, cx);
-                }
-            }))
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
-            .children(preview)
-            .children(strip)
-            .children(drawer_above)
-            .child(main)
-            .children(drawer_below)
+            .child(
+                div()
+                    .absolute()
+                    .right_0()
+                    .top(px(top))
+                    .w(px(width))
+                    .flex()
+                    .flex_col()
+                    .children(preview)
+                    .children(strip)
+                    .children(drawer_above)
+                    .child(main)
+                    .children(drawer_below),
+            )
     }
 }
 
@@ -588,7 +638,8 @@ impl Capsule {
                 .h(px(PAD + TILE_H))
                 .pt(px(PAD))
                 .flex()
-                .justify_center()
+                .justify_end()
+                .px(px(PAD))
                 .gap(px(GAP))
                 .children(tiles),
         )
@@ -712,9 +763,9 @@ impl Capsule {
             .id("controls")
             .flex()
             .gap(px(GAP))
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
                 if *hovered {
-                    this.set_open(Some(Drawer::Controls), cx);
+                    this.set_open(Some(Drawer::Controls), window, cx);
                 }
             }))
             .child(
@@ -751,7 +802,7 @@ impl Capsule {
             .px(px(PAD))
             .flex()
             .items_center()
-            .justify_center()
+            .justify_end()
             .gap(px(GAP))
             .children(faces)
             .children(stack)
@@ -779,8 +830,8 @@ impl Capsule {
             .size(px(FACE))
             .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
                 if *hovered {
-                    this.open_after(Some(Drawer::Name(identity.clone())), window, cx);
-                } else if this.open.is_none() {
+                    this.open_after(Drawer::Name(identity.clone()), window, cx);
+                } else {
                     this.hover_task = None;
                 }
             }))
@@ -823,9 +874,9 @@ impl Capsule {
             .rounded_full()
             .bg(white(if open { 0.12 } else { 0.06 }))
             .hover(|s| s.bg(white(0.12)))
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+            .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
                 if *hovered {
-                    this.set_open(Some(Drawer::People), cx);
+                    this.set_open(Some(Drawer::People), window, cx);
                 }
             }))
             .child(
@@ -833,7 +884,7 @@ impl Capsule {
                     .relative()
                     .flex_none()
                     .h(px(FACE))
-                    .w(px(FACE + ghosts as f32 * GHOST))
+                    .w(px(FACE + 2.0 * GHOST))
                     .when(ghosts > 1, |el| el.child(ghost(2.0 * GHOST, 0x373a44)))
                     .when(ghosts > 0, |el| el.child(ghost(GHOST, 0x4a4e59)))
                     .child(
@@ -845,17 +896,15 @@ impl Capsule {
                             .when(front.mic_muted, |el| el.child(mute_badge())),
                     ),
             )
-            .when(n > 1, |el| {
-                el.child(
-                    div()
-                        .w(px(COUNT))
-                        .ml(px(2.0))
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT_DIM))
-                        .child(format!("+{}", n - 1)),
-                )
-            })
+            .child(
+                div()
+                    .w(px(COUNT))
+                    .ml(px(2.0))
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(TEXT_DIM))
+                    .when(n > 1, |el| el.child(format!("+{}", n - 1))),
+            )
     }
 
     fn drawer_view(
@@ -873,7 +922,6 @@ impl Capsule {
             Drawer::Notice => self.notice_line(cx),
         };
         let line = || div().flex_none().h(px(1.0)).mx(px(12.0)).bg(white(0.08));
-        let keep_open = matches!(drawer, Drawer::Controls | Drawer::People);
         div()
             .id("drawer")
             .flex_none()
@@ -881,14 +929,6 @@ impl Capsule {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .when(keep_open, |el| {
-                // Hovering the row keeps it open.
-                el.on_hover(cx.listener(|this, hovered: &bool, _, _| {
-                    if *hovered {
-                        this.hover_task = None;
-                    }
-                }))
-            })
             .when(above, |el| el.pt(px(10.0)))
             .when(!above, |el| el.child(line().mb(px(8.0))))
             .child(div().flex_1().min_h_0().child(body))

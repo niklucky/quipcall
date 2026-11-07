@@ -45,14 +45,14 @@ One window (960 × 640), two panes:
 
 One small glass widget floats above all apps and Spaces and never takes focus. Prototype: [prototype/call-widget.html](prototype/call-widget.html).
 
-- **The row** shows up to three people who were active last (spoke, unmuted or joined). When someone new speaks and the row is full, they take the place of whoever has been quiet longest; the others stay where they are. **You** come last in the row while unmuted and don't count toward the three.
-- **The stack**, a grey pill with one face and "+N", holds everyone muted or quiet for two minutes (you too while muted).
+- **The row** shows up to three people who were active last (spoke, unmuted or joined). When someone new speaks and the row is full, they take the place of whoever has been quiet longest; the others stay where they are. **You** are always last in the row (a red badge while muted) and don't count toward the three, so muting moves nothing.
+- **The stack**, a grey pill with one face and "+N", holds everyone else muted or quiet for two minutes. It keeps one width whatever it holds.
 - **Cameras**: people in the row with their camera on (you included) show as video tiles above the row, named on the tile. Faces in the row are avatars.
 - **Three buttons, always**: Share, Mic, Leave. Hovering them opens a row underneath with Camera, Copy link and Call window.
 - **Hovering the stack** opens a row with everyone in it (name, mic state). **Hovering a face** for a moment shows the name and what they're doing ("speaking", "active 40 s ago").
 - **While you share**, the widget grows upward with your screen's live preview on top, and a Stop button.
 - **Someone sharing** has a screen badge on their face or tile; click it to bring their share window to the front. Anyone sharing stays in the row.
-- **The main row never moves**: the widget grows around it, up for tiles and your preview, down for the hover rows. Near the bottom of the screen the hover rows open above it instead.
+- **The main row never moves**: the widget grows around it, up for tiles and your preview, down for the hover rows, and sideways from its left end, so Share, Mic and Leave stay under the cursor. Near the bottom of the screen the hover rows open above it instead. A row closes once the cursor has been outside the widget for a quarter of a second.
 - "Joining…", permission prompts and errors show in a slim row under the main one.
 - **Drag** the widget by any empty spot.
 - Someone else's **screen share** floats as its own rounded rectangle you can move and resize. **Double-click** it, or press ⤢ on it, to watch it **fullscreen** (macOS fullscreen in its own Space). Esc, a double-click or ⤡ brings it back.
