@@ -306,6 +306,14 @@ impl Call {
         cx.notify();
     }
 
+    /// Load picker choices and previews on the engine's worker pool.
+    pub fn screen_sources(
+        &self,
+        thumb_width: u32,
+    ) -> async_channel::Receiver<anyhow::Result<quipcall_core::ShareSourceUpdate>> {
+        self.engine.screen_sources(thumb_width)
+    }
+
     /// Stop sharing, or open the picker to start.
     pub fn toggle_share(&mut self, cx: &mut Context<Self>) {
         if self.sharing.is_some() {
