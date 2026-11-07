@@ -1,18 +1,21 @@
 mod assets;
-mod bubble;
 mod call;
+mod capsule;
 mod fullscreen;
 mod handle;
 mod home;
 mod mac;
+mod onboarding;
 mod regular;
 mod screen_window;
 mod share_picker;
 #[cfg(feature = "snapshot")]
 mod snapshot;
 mod store;
+mod text_input;
 mod theme;
-mod toolbar;
+mod timeline;
+mod ui;
 mod video_mac;
 
 use std::io::IsTerminal as _;
@@ -33,6 +36,8 @@ pub struct Args {
     /// Base URL of the web client, for call links.
     pub web: String,
     pub name: String,
+    /// `--name` was given: don't ask for a name on first launch.
+    pub name_given: bool,
     /// Join this room right away instead of showing home (dev and tests).
     pub room: Option<String>,
     /// Turn the camera on as soon as the call starts.
@@ -59,6 +64,7 @@ fn parse_args() -> Args {
         server: SERVER.into(),
         web: WEB.into(),
         name: default_name(),
+        name_given: false,
         room: None,
         camera: false,
         regular: false,
@@ -74,7 +80,10 @@ fn parse_args() -> Args {
                     "--server" => args.server = value,
                     "--web" => args.web = value,
                     "--room" => args.room = Some(value),
-                    _ => args.name = value,
+                    _ => {
+                        args.name = value;
+                        args.name_given = true;
+                    }
                 }
             }
             _ => usage(),
@@ -172,9 +181,52 @@ impl Shell {
         self.start_call(room, cx);
     }
 
-    pub fn new_room(&mut self, cx: &mut Context<Self>) {
+    /// A new room with a placeholder name; returns its id.
+    pub fn new_room(&mut self, cx: &mut Context<Self>) -> String {
         let name = self.store.next_room_name();
-        self.store.add_room(&name);
+        let room = self.store.add_room(&name);
+        self.store.save();
+        cx.notify();
+        room.id
+    }
+
+    pub fn rename_room(&mut self, id: &str, name: &str, cx: &mut Context<Self>) {
+        self.store.rename_room(id, name);
+        self.store.save();
+        cx.notify();
+    }
+
+    /// Keep a quick call's room in the rooms list.
+    pub fn keep_room(&mut self, id: &str, name: &str, cx: &mut Context<Self>) {
+        self.store.keep_room(id, name);
+        self.store.save();
+        cx.notify();
+    }
+
+    /// Call a room from history again (same room, same link).
+    pub fn join_again(&mut self, id: &str, name: &str, one_time: bool, cx: &mut Context<Self>) {
+        self.start_call(
+            RoomRef {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                one_time,
+            },
+            cx,
+        );
+    }
+
+    /// The call link for a room.
+    pub fn link_for(&self, id: &str) -> String {
+        call::link(&self.args.web, id)
+    }
+
+    pub fn set_name(&mut self, name: &str, cx: &mut Context<Self>) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        self.args.name = name.to_owned();
+        self.store.name = Some(name.to_owned());
         self.store.save();
         cx.notify();
     }
@@ -228,7 +280,7 @@ impl Shell {
     }
 
     /// Deferred: the home window reads the shell while it's being built.
-    fn open_home(&mut self, cx: &mut Context<Self>) {
+    pub fn open_home(&mut self, cx: &mut Context<Self>) {
         if self.home.is_some() || self.home_pending || self.quitting {
             return;
         }
@@ -307,9 +359,17 @@ fn main() {
         }
     });
     app.run(move |cx: &mut App| {
+        let store = Store::load();
+        let mut args = args.clone();
+        let first_run = store.name.is_none() && !args.name_given && args.room.is_none();
+        if !args.name_given
+            && let Some(name) = &store.name
+        {
+            args.name = name.clone();
+        }
         let shell = cx.new(|_| Shell {
-            args: args.clone(),
-            store: Store::load(),
+            args,
+            store,
             call: None,
             home: None,
             home_pending: false,
@@ -318,6 +378,7 @@ fn main() {
         cx.set_global(GlobalShell(shell.clone()));
         share_picker::bind_keys(cx);
         fullscreen::bind_keys(cx);
+        text_input::bind_keys(cx);
         mac::log_window_events();
 
         shell.update(cx, |shell, cx| match shell.args.room.clone() {
@@ -329,6 +390,7 @@ fn main() {
                 },
                 cx,
             ),
+            None if first_run => cx.defer(onboarding::open_first_run),
             None => shell.open_home(cx),
         });
 

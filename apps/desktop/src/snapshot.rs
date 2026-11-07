@@ -5,7 +5,9 @@
 //! - `QUIPCALL_SCRIPT="4:regular 8:minimal 12:leave"`: runs the same actions as
 //!   the buttons at the given second: `regular`, `minimal`, `leave`, `quick`
 //!   (quick call from home), `mic`, `camera`, `share` (opens the picker),
-//!   `knobs` (every circle acts as hovered, to see the resize knob),
+//!   `hover` (the capsule acts as hovered, to see all its controls), `dock`
+//!   (the capsule turns vertical, as at a screen edge), `panel` / `people`
+//!   (the call window's side panel, on the transcript or people tab),
 //!   `share-own` / `share-own-60` (shares one of Quipcall's own windows with
 //!   that preset, so tests never capture anything else on screen; with
 //!   `QUIPCALL_FAKE_SCREEN` set, a synthetic test pattern instead),
@@ -81,10 +83,21 @@ fn act(action: &str, cx: &mut App) {
     use crate::Shell;
     use crate::call::{Call, Mode};
 
-    if action == "knobs" {
+    if action == "hover" || action == "dock" {
         for handle in cx.windows() {
-            if let Some(bubble) = handle.downcast::<crate::bubble::Bubble>() {
-                let _ = bubble.update(cx, |b, window, cx| b.set_hovered(true, window, cx));
+            if let Some(capsule) = handle.downcast::<crate::capsule::Capsule>() {
+                let _ = capsule.update(cx, |c, window, cx| match action {
+                    "hover" => c.hover(window, cx),
+                    _ => c.dock(window, cx),
+                });
+            }
+        }
+        return;
+    }
+    if action == "panel" || action == "people" {
+        for handle in cx.windows() {
+            if let Some(regular) = handle.downcast::<crate::regular::Regular>() {
+                let _ = regular.update(cx, |r, _, cx| r.show_panel(action == "people", cx));
             }
         }
         return;

@@ -7,7 +7,9 @@
 use std::ptr::NonNull;
 
 use block2::RcBlock;
-use gpui::{App, Size, Window};
+use gpui::{
+    App, Size, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
+};
 use objc2::rc::Retained;
 use objc2_app_kit::{
     NSApplicationDidBecomeActiveNotification, NSApplicationDidChangeScreenParametersNotification,
@@ -17,12 +19,10 @@ use objc2_app_kit::{
     NSWindowOcclusionState, NSWindowSharingType, NSWindowStyleMask, NSWindowWillCloseNotification,
     NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
 };
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_core_graphics::CGMutablePath;
 use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSNotificationName, NSPoint, NSRect, NSSize,
 };
-use objc2_quartz_core::{CAShapeLayer, CATransaction};
+use objc2_quartz_core::CATransaction;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 /// The visible shape of a floating window.
@@ -30,31 +30,37 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 pub enum Mask {
     /// Rounded rectangle with this corner radius.
     Rounded(f64),
-    /// The union of these circles, each `(x, y, diameter)` with `(x, y)` the
-    /// top-left of its bounding box in window coordinates.
-    Circles(Vec<(f64, f64, f64)>),
-}
-
-impl Mask {
-    /// A circle filling a `diameter`-sized window, plus an optional knob.
-    pub fn circle(diameter: f32, knob: Option<(f32, f32, f32)>) -> Self {
-        let mut circles = vec![(0.0, 0.0, diameter as f64)];
-        circles.extend(knob.map(|(x, y, d)| (x as f64, y as f64, d as f64)));
-        Mask::Circles(circles)
-    }
 }
 
 /// Which point of the window stays put when it's resized.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Anchor {
     Center,
     /// Resize handles: the corner opposite the handle stays put.
     TopLeft,
-    /// The toolbar grows upwards from where it sits.
-    BottomCenter,
-    /// Your circle turning into a screen preview: it sits in the
-    /// bottom-right corner by default, so it grows away from it.
-    BottomRight,
+    /// The middle of the left edge: a capsule growing to the right.
+    Left,
+    /// The middle of the right edge: a capsule docked on the right.
+    Right,
+    /// The middle of the top edge: a vertical capsule growing down.
+    Top,
+}
+
+/// A borderless panel above all apps and Spaces that never takes focus.
+pub fn floating_options(bounds: WindowBounds) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(bounds),
+        titlebar: None,
+        focus: false,
+        show: true,
+        kind: WindowKind::PopUp,
+        is_movable: true,
+        app_owns_titlebar_drag: true,
+        is_resizable: false,
+        is_minimizable: false,
+        window_background: WindowBackgroundAppearance::Transparent,
+        ..Default::default()
+    }
 }
 
 fn ns_window(window: &Window) -> Option<Retained<NSWindow>> {
@@ -78,31 +84,11 @@ fn apply_mask(window: &NSWindow, mask: &Mask) {
     // No implicit animation: the shape must follow the window instantly.
     CATransaction::begin();
     CATransaction::setDisableActions(true);
-    match mask {
-        Mask::Rounded(radius) => {
-            // SAFETY: clearing the mask; we're on the main thread.
-            unsafe { layer.setMask(None) };
-            layer.setCornerRadius(*radius);
-            layer.setMasksToBounds(true);
-        }
-        Mask::Circles(circles) => {
-            let height = content.frame().size.height;
-            let path = CGMutablePath::new();
-            for &(x, y, d) in circles {
-                // Layer coordinates have their origin at the bottom-left.
-                let rect = CGRect::new(CGPoint::new(x, height - y - d), CGSize::new(d, d));
-                // SAFETY: valid path, no transform.
-                unsafe { CGMutablePath::add_ellipse_in_rect(Some(&path), std::ptr::null(), rect) };
-            }
-            let shape = CAShapeLayer::new();
-            shape.setFrame(layer.bounds());
-            shape.setPath(Some(&path));
-            layer.setCornerRadius(0.0);
-            layer.setMasksToBounds(false);
-            // SAFETY: a fresh shape layer not used anywhere else.
-            unsafe { layer.setMask(Some(&shape)) };
-        }
-    }
+    let Mask::Rounded(radius) = mask;
+    // SAFETY: clearing any mask; we're on the main thread.
+    unsafe { layer.setMask(None) };
+    layer.setCornerRadius(*radius);
+    layer.setMasksToBounds(true);
     CATransaction::commit();
 }
 
@@ -132,17 +118,6 @@ pub fn make_shape(window: &Window, mask: Mask, cx: &App) {
         .detach();
 }
 
-/// Change the window's visible shape (e.g. show a knob on hover).
-pub fn set_mask(window: &Window, mask: Mask, cx: &App) {
-    let Some(ns) = ns_window(window) else {
-        return;
-    };
-    // Queued behind any pending resize, so the mask matches the new size.
-    cx.foreground_executor()
-        .spawn(async move { apply_mask(&ns, &mask) })
-        .detach();
-}
-
 /// Resize to `size`, keeping `anchor` where it is, and re-apply `mask`. A
 /// window that was fully on its screen stays on it, except while a resize
 /// handle is dragged: moving the corner under the cursor would feed back into
@@ -165,11 +140,18 @@ pub fn resize(window: &Window, size: Size<f32>, mask: Mask, anchor: Anchor, cx: 
                     frame.origin.y + (frame.size.height - h) / 2.0,
                 ),
                 Anchor::TopLeft => (frame.origin.x, frame.origin.y + frame.size.height - h),
-                Anchor::BottomCenter => (
-                    frame.origin.x + (frame.size.width - w) / 2.0,
-                    frame.origin.y,
+                Anchor::Left => (
+                    frame.origin.x,
+                    frame.origin.y + (frame.size.height - h) / 2.0,
                 ),
-                Anchor::BottomRight => (frame.origin.x + frame.size.width - w, frame.origin.y),
+                Anchor::Right => (
+                    frame.origin.x + frame.size.width - w,
+                    frame.origin.y + (frame.size.height - h) / 2.0,
+                ),
+                Anchor::Top => (
+                    frame.origin.x + (frame.size.width - w) / 2.0,
+                    frame.origin.y + frame.size.height - h,
+                ),
             };
             let mut target = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
             if !matches!(anchor, Anchor::TopLeft)

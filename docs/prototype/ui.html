@@ -1,0 +1,1061 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quipcall UI prototypes</title>
+<style>
+:root{color-scheme:light dark}
+html,body{margin:0}
+body{font-family:var(--font-sans,-apple-system,BlinkMacSystemFont,"Inter",system-ui,sans-serif);color:var(--foreground,#1d1d1f);-webkit-font-smoothing:antialiased}
+body.standalone{background:#0e0f12;color:#e8e9ec;--foreground:#e8e9ec;--muted-foreground:#8f95a0;--border:rgba(255,255,255,.12);--secondary:rgba(255,255,255,.08);--background:#0e0f12}
+#board{max-width:1120px;margin:0 auto;padding:4px 0 32px}
+body.standalone #board{padding:32px 24px 64px}
+body:not(.standalone) .head h1{display:none}
+.head h1{font-size:20px;line-height:1.25;margin:0 0 6px;font-weight:650;letter-spacing:-.01em}
+.head p{margin:0;font-size:13.5px;line-height:1.55;color:var(--muted-foreground,#8a8f98);max-width:74ch}
+.knobs,.pctl{display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;font-size:12px;color:var(--muted-foreground,#8a8f98)}
+.knobs{margin-top:14px}.pctl{margin-top:12px}
+.knobs>span,.pctl>span{display:flex;align-items:center;gap:8px}
+.seg{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--border,rgba(128,128,128,.3));border-radius:8px}
+.seg button{all:unset;cursor:pointer;padding:3px 10px;border-radius:6px;font-size:12px;line-height:18px;color:var(--muted-foreground,#8a8f98)}
+.seg button:hover{color:var(--foreground,#1d1d1f)}
+.seg button[aria-pressed="true"]{background:var(--secondary,rgba(128,128,128,.16));color:var(--foreground,#1d1d1f)}
+.sws{display:inline-flex;gap:9px}
+.sw{all:unset;cursor:pointer;width:16px;height:16px;border-radius:50%}
+.sw[aria-pressed="true"]{box-shadow:0 0 0 2px var(--background,#fff),0 0 0 3.5px var(--foreground,#1d1d1f)}
+.toc{display:flex;flex-wrap:wrap;gap:6px;margin-top:14px}
+.toc a{font-size:12px;color:var(--foreground,#1d1d1f);text-decoration:none;border:1px solid var(--border,rgba(128,128,128,.3));border-radius:999px;padding:3px 10px}
+.toc a:hover{background:var(--secondary,rgba(128,128,128,.12))}
+section{margin-top:44px;scroll-margin-top:12px}
+section h2{font-size:16px;margin:0;font-weight:650;letter-spacing:-.005em}
+.lede{margin:4px 0 0;font-size:13.5px;line-height:1.55;color:var(--muted-foreground,#8a8f98);max-width:76ch}
+.stage{position:relative;margin-top:10px;border-radius:var(--radius,12px);overflow:hidden}
+.canvas{position:absolute;left:0;top:0;transform-origin:0 0}
+.notes{margin:14px 0 0;padding-left:20px;font-size:13.5px;line-height:1.55;max-width:84ch}
+.notes li{margin:6px 0;padding-left:2px}
+.notes b{font-weight:600}
+.notes code{font-family:var(--font-mono,ui-monospace,Menlo,monospace);font-size:12px;background:var(--secondary,rgba(128,128,128,.14));padding:1px 4px;border-radius:4px}
+
+/* ───────── app tokens ───────── */
+#board{
+ --q-accent:#4f8cff;--q-on-accent:#fff;
+ --q-bg:#141519;--q-side:#18191e;--q-raised:#22242b;--q-raised2:#2c2f38;--q-hover:rgba(255,255,255,.05);--q-sel:rgba(255,255,255,.09);
+ --q-line:rgba(255,255,255,.08);--q-text:#f2f3f5;--q-dim:#9ba1ac;--q-faint:#676d78;--q-field:#0f1013;
+ --q-glass:rgba(28,30,38,.6);--q-glass-line:rgba(255,255,255,.14);--q-gbtn:rgba(255,255,255,.09);--q-gbtn-h:rgba(255,255,255,.18);
+ --q-live:#3fd07a;--q-danger:#e5484d;--q-rec:#ff453a;--q-stage:#0e0f12;
+ --q-me:color-mix(in srgb,var(--q-accent) 28%,#1c1e25);
+ --q-shadow:0 0 0 .5px rgba(0,0,0,.6),inset 0 0 0 .5px rgba(255,255,255,.09),0 28px 70px rgba(0,0,0,.45),0 4px 14px rgba(0,0,0,.25);
+ --ed-bg:#1a1c22;--ed-top:#202229;--q-pop:rgba(32,34,42,.88);
+}
+#board[data-appearance="light"]{
+ --q-bg:#ffffff;--q-side:#f5f5f7;--q-raised:#efeff2;--q-raised2:#e4e4e9;--q-hover:rgba(0,0,0,.04);--q-sel:rgba(0,0,0,.07);
+ --q-line:rgba(0,0,0,.09);--q-text:#1c1d21;--q-dim:#666a73;--q-faint:#9ca0a8;--q-field:#ffffff;
+ --q-glass:rgba(250,250,252,.62);--q-glass-line:rgba(255,255,255,.8);--q-gbtn:rgba(0,0,0,.06);--q-gbtn-h:rgba(0,0,0,.12);
+ --q-stage:#ebecf0;--q-me:color-mix(in srgb,var(--q-accent) 17%,#fff);
+ --q-shadow:0 0 0 .5px rgba(0,0,0,.2),0 28px 70px rgba(40,40,80,.22),0 4px 14px rgba(0,0,0,.08);
+ --ed-bg:#fbfbfc;--ed-top:#f1f1f4;--q-pop:rgba(250,250,252,.9);
+}
+.wall{background:radial-gradient(70% 60% at 8% 4%,#5d6fe0 0%,transparent 62%),radial-gradient(60% 70% at 96% 100%,#c2578f 0%,transparent 60%),radial-gradient(50% 50% at 72% 18%,#2e9f97 0%,transparent 60%),#1b1f3d}
+#board[data-appearance="light"] .wall{background:radial-gradient(70% 60% at 8% 4%,#aebbff 0%,transparent 62%),radial-gradient(60% 70% at 96% 100%,#ffb8d2 0%,transparent 60%),radial-gradient(50% 50% at 72% 18%,#a6e8dd 0%,transparent 60%),#e8ebf7}
+.lbl{position:absolute;font:600 13px/1 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:rgba(255,255,255,.94);text-shadow:0 1px 3px rgba(0,0,0,.35)}
+.lbl span{font-weight:500;opacity:.72;margin-left:8px}
+#board[data-appearance="light"] .lbl{color:#23253a;text-shadow:none}
+
+.app{font:13px/1.38 -apple-system,BlinkMacSystemFont,"SF Pro Text","Inter",system-ui,sans-serif;color:var(--q-text);-webkit-font-smoothing:antialiased;text-align:left;letter-spacing:-.003em}
+.app *{box-sizing:border-box}
+:where(.app) button{font:inherit;color:inherit;border:0;background:none;padding:0;cursor:pointer}
+:where(.app) input{font:inherit;color:var(--q-text);background:none;border:0;outline:0;padding:0;min-width:0}
+.i{flex:none;display:block}
+.win{position:absolute;background:var(--q-bg);border-radius:12px;overflow:hidden;box-shadow:var(--q-shadow)}
+.lights{position:absolute;top:18px;left:18px;display:flex;gap:8px;z-index:6}
+.lights i{width:12px;height:12px;border-radius:50%;background:#ff5f57;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.18)}
+.lights i+i{background:#febc2e}.lights i+i+i{background:#28c840}
+.dim{color:var(--q-dim)}.faint{color:var(--q-faint)}.sp{flex:1}
+
+/* avatars & fake video */
+.av{width:var(--s);height:var(--s);border-radius:50%;display:inline-grid;place-items:center;flex:none;color:#fff;font-weight:600;font-size:calc(var(--s)*.38);letter-spacing:0;line-height:1;user-select:none;background:linear-gradient(135deg,hsl(var(--h) 55% 52%),hsl(calc(var(--h) + 29) 60% 38%))}
+.avs{display:flex;align-items:center}
+.avs .av{box-shadow:0 0 0 2px var(--ring,var(--q-bg))}
+.avs .av+.av,.avs .av+.more-n{margin-left:calc(var(--s)*-.28)}
+.more-n{height:var(--s);min-width:var(--s);padding:0 5px;border-radius:999px;background:var(--q-raised2);color:var(--q-dim);font-size:calc(var(--s)*.42);font-weight:650;display:grid;place-items:center;box-shadow:0 0 0 2px var(--ring,var(--q-bg))}
+.stack{position:relative;width:36px;height:36px;flex:none}
+.stack .plus{position:absolute;right:-6px;bottom:-4px;height:18px;min-width:18px;padding:0 5px;border-radius:9px;background:var(--q-raised2);color:var(--q-text);font-size:10px;font-weight:650;display:grid;place-items:center;box-shadow:0 0 0 2px var(--ring,var(--q-side))}
+.vid{position:absolute;inset:0;overflow:hidden;background:radial-gradient(55% 45% at 78% 12%,hsl(var(--h) 45% 62% / .55),transparent 70%),radial-gradient(40% 60% at 8% 90%,hsl(calc(var(--h) + 60) 40% 40% / .5),transparent 70%),linear-gradient(170deg,hsl(var(--h) 24% 30%),hsl(calc(var(--h) + 30) 26% 13%))}
+.vid::before{content:"";position:absolute;left:50%;top:22%;height:44%;aspect-ratio:.8;transform:translateX(-50%);border-radius:48% 48% 44% 44%;background:linear-gradient(hsl(var(--hr)) 0 30%,transparent 30%),radial-gradient(circle at 42% 45%,hsl(var(--k)),color-mix(in srgb,hsl(var(--k)) 78%,#000))}
+.vid::after{content:"";position:absolute;left:50%;bottom:-22%;height:52%;aspect-ratio:1.9;transform:translateX(-50%);border-radius:50% 50% 0 0;background:linear-gradient(hsl(calc(var(--h) + 200) 22% 36%),hsl(calc(var(--h) + 200) 22% 24%))}
+.vid.mirror{transform:scaleX(-1)}
+
+/* buttons */
+.btn{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 12px;border-radius:8px;font-weight:600 !important;font-size:12.5px !important;background:var(--q-raised);white-space:nowrap}
+.btn:hover{filter:brightness(1.1)}
+.btn.pri{background:var(--q-accent);color:var(--q-on-accent) !important}
+.btn.live{background:var(--q-live);color:#052a12 !important}
+.btn.sm{height:24px;padding:0 9px;font-size:12px !important;border-radius:7px;gap:5px}
+.ibtn{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;color:var(--q-dim);flex:none}
+.ibtn:hover{background:var(--q-hover);color:var(--q-text)}
+.live-dot{width:7px;height:7px;border-radius:50%;background:var(--q-live);flex:none;animation:pulse 2s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--q-live) 60%,transparent)}70%{box-shadow:0 0 0 6px transparent}100%{box-shadow:0 0 0 0 transparent}}
+@keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}
+.switch{width:30px;height:18px;border-radius:9px;background:var(--q-raised2);position:relative;flex:none;transition:background .2s;cursor:pointer}
+.switch::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.3);transition:left .2s}
+.switch.on{background:var(--q-accent)}.switch.on::after{left:14px}
+[data-tip]{position:relative}
+[data-tip]:hover::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 9px);left:50%;transform:translateX(-50%);white-space:nowrap;background:rgba(18,18,22,.94);color:#fff;font-size:11px;font-weight:500;padding:4px 7px;border-radius:6px;pointer-events:none;z-index:30}
+
+/* ───────── onboarding ───────── */
+.onb{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;padding:66px 40px 22px;text-align:center}
+.logo{width:60px;height:60px;border-radius:17px;position:relative;flex:none;background:linear-gradient(150deg,color-mix(in srgb,var(--q-accent) 75%,#fff),color-mix(in srgb,var(--q-accent) 75%,#000));box-shadow:0 10px 26px color-mix(in srgb,var(--q-accent) 38%,transparent),inset 0 1px 0 rgba(255,255,255,.35)}
+.logo span{position:absolute;border-radius:50%;background:#fff}
+.logo span:first-child{width:25px;height:25px;left:11px;top:12px}
+.logo span:last-child{width:17px;height:17px;right:10px;bottom:11px;opacity:.72}
+.ot{font-size:19px;font-weight:700;letter-spacing:-.015em;margin:18px 0 6px}
+.os{margin:0;color:var(--q-dim);font-size:13px;line-height:1.5}
+.ostack{width:100%;display:flex;flex-direction:column;gap:10px;margin-top:22px;position:relative}
+.field{height:38px;border-radius:9px;background:var(--q-field);box-shadow:inset 0 0 0 1px var(--q-line);display:flex;align-items:center;padding:0 5px 0 12px;gap:8px;text-align:left;cursor:text}
+.field:focus-within{box-shadow:inset 0 0 0 1px var(--q-accent),0 0 0 3px color-mix(in srgb,var(--q-accent) 28%,transparent)}
+.field input{flex:1;height:100%}
+.field input::placeholder{color:var(--q-faint)}
+.kbtn{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;color:var(--q-dim)}
+.kbtn:hover{background:var(--q-hover);color:var(--q-text)}
+.af{position:absolute;top:44px;left:0;right:0;z-index:3;background:var(--q-raised);border-radius:10px;box-shadow:0 0 0 .5px var(--q-line),0 14px 34px rgba(0,0,0,.35);padding:5px;opacity:0;transform:translateY(-4px);transition:.15s;pointer-events:none;text-align:left}
+.field:focus-within+.af{opacity:1;transform:none;pointer-events:auto}
+.af-i{display:flex;align-items:center;gap:10px;padding:7px 9px;border-radius:7px;background:var(--q-accent);color:var(--q-on-accent);cursor:pointer}
+.af-i b{display:block;font-weight:600}.af-i small{display:block;opacity:.8;font-size:11px}
+.af-n{font-size:11px;color:var(--q-faint);padding:6px 9px 3px}
+.bigbtn{height:38px;border-radius:9px;width:100%;font-weight:600 !important;display:flex;align-items:center;justify-content:center;gap:8px}
+.bigbtn.pri{background:var(--q-accent);color:var(--q-on-accent) !important}
+.bigbtn.pri:hover{filter:brightness(1.08)}
+.bigbtn.sec{background:var(--q-raised);box-shadow:inset 0 0 0 1px var(--q-line)}
+.or{width:100%;display:flex;align-items:center;gap:10px;margin:18px 0;color:var(--q-faint);font-size:12px}
+.or::before,.or::after{content:"";flex:1;height:1px;background:var(--q-line)}
+.oauth{width:100%;display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.oauth button{height:38px;border-radius:9px;background:var(--q-raised);box-shadow:inset 0 0 0 1px var(--q-line);display:flex;align-items:center;justify-content:center;gap:7px;font-weight:500 !important;position:relative}
+.oauth button:hover{background:var(--q-raised2)}
+.oauth button.soon{opacity:.5;cursor:default}
+.oauth em{position:absolute;top:-8px;right:-5px;font-style:normal;font-size:9.5px;font-weight:650;padding:1px 6px;border-radius:6px;background:var(--q-raised2);color:var(--q-dim);box-shadow:0 0 0 2px var(--q-bg)}
+.spacer{flex:1}
+.ofoot{font-size:12.5px;color:var(--q-dim);display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:center}
+.ofoot a{color:var(--q-accent);font-weight:600;display:inline-flex;align-items:center;gap:3px;cursor:pointer}
+.oicon{width:60px;height:60px;border-radius:18px;background:color-mix(in srgb,var(--q-accent) 16%,transparent);color:var(--q-accent);display:grid;place-items:center;flex:none}
+.otp{display:flex;gap:8px;margin:24px 0 18px}
+.otp input{width:42px;height:50px;border-radius:10px;background:var(--q-field);box-shadow:inset 0 0 0 1px var(--q-line);text-align:center;font-size:21px;font-weight:600}
+.otp input:focus{box-shadow:inset 0 0 0 1.5px var(--q-accent),0 0 0 3px color-mix(in srgb,var(--q-accent) 28%,transparent)}
+.otp input:nth-child(3){margin-right:10px}
+.pav{position:relative}
+.pcam{position:absolute;right:-2px;bottom:-2px;width:28px;height:28px;border-radius:50%;background:var(--q-raised2);display:grid;place-items:center;box-shadow:0 0 0 3px var(--q-bg)}
+.optrow{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;background:var(--q-raised);text-align:left;cursor:pointer}
+.optrow .oi{color:var(--q-accent)}.optrow .t2{flex:1}
+.optrow b{display:block;font-weight:600}.optrow small{display:block;color:var(--q-dim);font-size:11.5px}
+.gwho{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--q-dim);padding:4px 11px 4px 4px;border-radius:999px;background:var(--q-raised);--ring:var(--q-raised)}
+.gprev{position:relative;margin-top:18px}
+.gcircle{width:112px;height:112px;border-radius:50%;display:grid;place-items:center;background:var(--q-raised);overflow:hidden;position:relative}
+.gtog{display:flex;gap:8px;justify-content:center;margin-top:-17px;position:relative}
+.gt{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:var(--q-raised2);box-shadow:0 0 0 3px var(--q-bg)}
+.gt.off{background:var(--q-text);color:var(--q-danger)}
+
+/* ───────── home ───────── */
+.home{position:absolute;inset:0;display:flex}
+.side{width:280px;flex:none;background:var(--q-side);border-right:1px solid var(--q-line);display:flex;flex-direction:column;--ring:var(--q-side)}
+.side-top{height:52px;flex:none;display:flex;align-items:center;justify-content:flex-end;padding:0 12px}
+.side-ctl{display:flex;align-items:center;gap:6px;padding:0 10px 6px 12px}
+.qseg{flex:1;display:flex;background:var(--q-field);border-radius:8px;padding:2px;box-shadow:inset 0 0 0 1px var(--q-line)}
+.qseg button{flex:1;height:24px;border-radius:6px;font-size:12px !important;font-weight:500 !important;color:var(--q-dim) !important}
+.qseg button.on{background:var(--q-raised2);color:var(--q-text) !important;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+.list{flex:1;overflow:auto;padding:4px 8px 8px}
+.grp{font-size:11px;font-weight:600;color:var(--q-faint);padding:12px 8px 4px}
+.row{display:flex;align-items:center;gap:12px;padding:8px 8px 8px 8px;border-radius:9px;cursor:pointer;position:relative}
+.row:hover{background:var(--q-hover)}
+.row.sel{background:var(--q-sel)}
+.row .main{flex:1;min-width:0}
+.row .name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .meta{font-size:12px;color:var(--q-dim);display:flex;gap:5px;align-items:center;white-space:nowrap;margin-top:1px}
+.row .meta .i{color:var(--q-faint)}
+.row .end{display:flex;align-items:center}
+.row .hov{opacity:0}.row:hover .hov{opacity:1}
+.livetxt{color:var(--q-live);font-weight:600}
+.me-row{border-top:1px solid var(--q-line);padding:10px 10px 10px 14px;display:flex;align-items:center;gap:10px}
+.me-row .name{font-weight:600}.me-row .meta{font-size:11.5px;color:var(--q-dim)}
+.detail{flex:1;display:flex;flex-direction:column;min-width:0;position:relative;--ring:var(--q-bg)}
+.d-top{height:56px;flex:none;display:flex;align-items:center;gap:8px;padding:6px 16px 0 28px}
+.d-top h3{font-size:19px;font-weight:700;margin:0;letter-spacing:-.015em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.d-sub{display:flex;align-items:center;gap:8px;color:var(--q-dim);font-size:12.5px;padding:0 20px 0 28px;height:28px}
+.cnav{display:inline-flex;align-items:center;height:26px;border-radius:8px;background:var(--q-raised);padding:0 2px;font-size:12px;flex:none}
+.cnav button{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;color:var(--q-dim)}
+.cnav button:hover:not(:disabled){background:var(--q-hover);color:var(--q-text)}
+.cnav button:disabled{opacity:.3;cursor:default}
+.cnav span{padding:0 6px;color:var(--q-text);font-variant-numeric:tabular-nums}
+.tabs{display:flex;gap:20px;border-bottom:1px solid var(--q-line);margin-top:10px;padding:0 28px;flex:none}
+.tab{padding:7px 0 9px;color:var(--q-dim) !important;font-weight:500 !important;position:relative}
+.tab:hover{color:var(--q-text) !important}
+.tab.on{color:var(--q-text) !important}
+.tab.on::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--q-text);border-radius:2px}
+.tab .n{font-size:11px;color:var(--q-faint);margin-left:5px}
+.d-body{flex:1;overflow:auto;padding:14px 28px 24px;position:relative;scrollbar-width:thin}
+.livebar{display:flex;align-items:center;gap:10px;margin:2px 20px 0 28px;padding:8px 12px;border-radius:11px;background:color-mix(in srgb,var(--q-live) 11%,transparent);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--q-live) 28%,transparent);font-size:12.5px;--ring:color-mix(in srgb,var(--q-live) 8%,var(--q-bg))}
+.livebar b{font-weight:600}
+.sum{border-radius:12px;padding:12px 14px;margin-bottom:6px;box-shadow:inset 0 0 0 1px var(--q-line);background:linear-gradient(180deg,color-mix(in srgb,var(--q-accent) 8%,transparent),transparent 80%)}
+.sum-h{display:flex;align-items:center;gap:7px;font-weight:600;cursor:pointer;width:100%}
+.sum-h .i{color:var(--q-accent)}
+.sum-h small{font-weight:400;color:var(--q-faint);font-size:11.5px}
+.sum-h .chev{margin-left:auto;color:var(--q-faint)}
+.sum ul{margin:8px 0 0;padding-left:18px;line-height:1.5}
+.sum li{margin:2px 0}
+.sum-h2{font-size:11.5px;font-weight:600;color:var(--q-dim);margin-top:10px}
+.todo{list-style:none;padding:0 !important;margin-top:6px !important;display:grid;gap:5px}
+.todo li{display:flex;align-items:center;gap:8px}
+.cb{width:15px;height:15px;border-radius:4px;box-shadow:inset 0 0 0 1.5px var(--q-faint);flex:none;display:grid;place-items:center;color:var(--q-on-accent)}
+.cb.on{background:var(--q-accent);box-shadow:none}
+.todo .done{color:var(--q-faint);text-decoration:line-through}
+.mg{display:flex;gap:10px;align-items:flex-start;margin-top:12px}
+.mg .col{display:flex;flex-direction:column;align-items:flex-start;gap:3px;min-width:0;max-width:76%}
+.mg .who{font-size:11.5px;color:var(--q-faint);display:flex;gap:6px;margin:0 0 1px 4px}
+.mg .who b{color:var(--q-dim);font-weight:600}
+.bub{background:var(--q-raised);padding:7px 11px;border-radius:16px;line-height:1.42;transition:box-shadow .2s}
+.mg.me{flex-direction:row-reverse}
+.mg.me .col{align-items:flex-end}
+.mg.me .who{margin:0 4px 1px 0}
+.mg.me .bub{background:var(--q-me)}
+.bub[data-a]{cursor:pointer}
+.bub[data-a]:hover{box-shadow:0 0 0 1px var(--q-line),0 0 0 4px var(--q-hover)}
+.bub.now{box-shadow:0 0 0 2px var(--q-accent) !important}
+.bub.file{display:flex;align-items:center;gap:10px;padding:7px 8px 7px 7px;min-width:250px}
+.bub.file .fm{flex:1;min-width:0}
+.ftile{width:32px;height:38px;border-radius:6px;display:grid;place-items:center;color:#fff;font-size:8.5px;font-weight:750;flex:none;letter-spacing:.02em}
+.fn{font-weight:600;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fs{font-size:11.5px;color:var(--q-dim)}
+.bub.partial{color:var(--q-dim)}
+.dots{display:inline-flex;gap:3px;margin-left:6px;vertical-align:middle}
+.dots i{width:4px;height:4px;border-radius:50%;background:currentColor;animation:blink 1.2s infinite}
+.dots i:nth-child(2){animation-delay:.2s}.dots i:nth-child(3){animation-delay:.4s}
+.ev{display:flex;align-items:center;justify-content:center;gap:6px;margin:16px 0 2px;font-size:11.5px;color:var(--q-faint);width:100%}
+.ev::before,.ev::after{content:"";flex:1;height:1px;background:var(--q-line)}
+.ev .lnk{color:var(--q-accent);font-weight:600}
+button.ev:hover .lnk{text-decoration:underline}
+.player{flex:none;margin:0 16px 14px;height:46px;border-radius:13px;background:var(--q-raised);display:flex;align-items:center;gap:10px;padding:0 12px 0 7px;box-shadow:0 0 0 .5px var(--q-line),0 6px 20px rgba(0,0,0,.18)}
+.pbtn{width:32px;height:32px;border-radius:50%;background:var(--q-accent);color:var(--q-on-accent) !important;display:grid;place-items:center;flex:none}
+.tm{font-size:11.5px;color:var(--q-dim);font-variant-numeric:tabular-nums;width:36px;flex:none}
+.wave{flex:1;height:26px;position:relative;cursor:pointer}
+.wave .bars{position:absolute;inset:0;display:flex;align-items:center;gap:2px;pointer-events:none}
+.wave .bars i{flex:1;border-radius:2px;background:var(--q-faint);opacity:.5}
+.wave .bars.on{clip-path:inset(0 calc(100% - var(--p,0%)) 0 0)}
+.wave .bars.on i{background:var(--q-accent);opacity:1}
+.psel{font-size:12px;color:var(--q-dim);display:flex;align-items:center;gap:4px;flex:none}
+.recs{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.rec{cursor:pointer}
+.thumb{position:relative;aspect-ratio:16/9;border-radius:10px;overflow:hidden;background:#0b0c0f}
+.g4{position:absolute;inset:0;display:grid;grid-template-columns:1fr 1fr;gap:2px}
+.g4>div{position:relative;overflow:hidden}
+.thumb .dur{position:absolute;right:8px;bottom:8px;background:rgba(0,0,0,.62);color:#fff;font-size:11px;padding:2px 6px;border-radius:5px;font-variant-numeric:tabular-nums}
+.thumb .pl{position:absolute;inset:0;display:grid;place-items:center;opacity:0;transition:opacity .15s;background:rgba(0,0,0,.25)}
+.rec:hover .pl{opacity:1}
+.pl span{width:44px;height:44px;border-radius:50%;background:rgba(255,255,255,.92);color:#111;display:grid;place-items:center}
+.athumb{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:3px;background:linear-gradient(160deg,#272a35,#14151b);padding:0 20px}
+.athumb i{flex:1;max-width:5px;border-radius:2px;background:color-mix(in srgb,var(--q-accent) 70%,#fff)}
+.rec-t{font-weight:600;margin-top:9px}
+.rec-m{font-size:12px;color:var(--q-dim);margin-top:2px}
+.rec-a{display:flex;gap:2px;margin-top:4px;margin-left:-6px}
+.frow{display:flex;align-items:center;gap:12px;padding:8px;border-radius:9px;margin:0 -8px}
+.frow:hover{background:var(--q-hover)}
+.frow .fm{flex:1;min-width:0}
+.drop{margin-top:14px;border:1.5px dashed color-mix(in srgb,var(--q-text) 18%,transparent);border-radius:12px;padding:18px;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--q-dim);font-size:12.5px}
+.empty{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--q-dim);gap:4px;padding:40px 60px}
+.empty .ei{width:46px;height:46px;border-radius:13px;background:var(--q-raised);display:grid;place-items:center;color:var(--q-faint);margin-bottom:8px}
+.empty b{color:var(--q-text);font-weight:600;font-size:14px}
+.empty p{margin:0;max-width:34ch;line-height:1.5}
+
+/* ───────── call: basic ───────── */
+.call{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--q-stage)}
+.c-top{height:48px;flex:none;display:flex;align-items:center;gap:10px;padding:2px 12px 0 88px;--ring:var(--q-stage)}
+.c-title{display:flex;align-items:baseline;gap:8px}
+.c-title b{font-weight:650;font-size:13.5px}
+.timer{font-variant-numeric:tabular-nums}
+.pill{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 9px;border-radius:999px;font-size:11.5px;font-weight:600;background:var(--q-raised);color:var(--q-dim)}
+.pill.rec{color:var(--q-rec);background:color-mix(in srgb,var(--q-rec) 14%,transparent)}
+.pill.rec i{width:7px;height:7px;border-radius:50%;background:var(--q-rec);animation:blink 1.6s infinite}
+.pill.acc{color:var(--q-accent);background:color-mix(in srgb,var(--q-accent) 15%,transparent)}
+.cbtn{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:8px;background:var(--q-raised);font-weight:600 !important;font-size:12.5px !important}
+.cbtn:hover{background:var(--q-raised2)}
+.c-body{flex:1;display:flex;min-height:0}
+.stagearea{flex:1;position:relative;padding:2px 12px 74px;min-width:0}
+.tiles{position:absolute;inset:2px 12px 74px 12px;display:grid;gap:8px}
+.tiles.grid4{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
+.tiles.spk{display:flex;flex-direction:column}
+.tiles.spk .big{flex:1;display:flex}
+.tiles.spk .strip{height:118px;display:flex;gap:8px;justify-content:flex-end}
+.tiles.spk .strip .tile{width:190px}
+.tiles.shr{display:flex;gap:8px}
+.tiles.shr .faces-col{width:168px;display:flex;flex-direction:column;gap:8px}
+.tiles.shr .faces-col .tile{flex:1}
+.tile{position:relative;border-radius:14px;overflow:hidden;background:var(--q-raised);flex:1;min-height:0}
+.tile::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 2.5px transparent;transition:box-shadow .25s;pointer-events:none}
+.tile.speaking::after{box-shadow:inset 0 0 0 2.5px var(--q-live)}
+.tav{position:absolute;inset:0;display:grid;place-items:center;background:radial-gradient(circle at 50% 45%,hsl(var(--h) 28% 30% / .55),transparent 70%)}
+.nm{position:absolute;left:8px;bottom:8px;display:flex;align-items:center;gap:5px;height:22px;padding:0 8px;border-radius:7px;background:rgba(10,11,14,.55);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);color:#fff;font-size:11.5px;font-weight:600}
+.nm .mo{color:#ff8a80}
+.scrtile{position:relative;flex:1;border-radius:14px;overflow:hidden;background:#0b0c0f}
+.alone{position:absolute;inset:0 0 74px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:6px}
+.alone .me-c{width:132px;height:132px;border-radius:50%;overflow:hidden;position:relative;margin-bottom:14px;box-shadow:0 10px 30px rgba(0,0,0,.3)}
+.alone b{font-size:16px;font-weight:650}
+.linkbox{display:flex;align-items:center;gap:8px;margin-top:12px;height:34px;padding:0 4px 0 12px;border-radius:9px;background:var(--q-raised);font-size:12.5px}
+.toolbar{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);display:flex;align-items:center;gap:6px;padding:6px;border-radius:999px;background:var(--q-glass);backdrop-filter:blur(26px) saturate(1.8);-webkit-backdrop-filter:blur(26px) saturate(1.8);box-shadow:inset 0 0 0 .5px var(--q-glass-line),0 0 0 .5px rgba(0,0,0,.35),0 10px 30px rgba(0,0,0,.28);z-index:5}
+.tb{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;background:var(--q-gbtn)}
+.tb:hover{background:var(--q-gbtn-h)}
+.tb.sel{background:var(--q-text);color:var(--q-bg) !important}
+.tb.acc{background:var(--q-accent);color:var(--q-on-accent) !important}
+.recb{color:var(--q-dim) !important}
+.recb.on{color:var(--q-rec) !important;background:color-mix(in srgb,var(--q-rec) 18%,transparent)}
+.split{display:flex;align-items:center;border-radius:999px;background:var(--q-gbtn)}
+.split .tb{background:none}
+.split .chev{width:20px;height:40px;display:grid;place-items:center;margin-left:-8px;padding-right:4px;color:var(--q-dim);border-radius:0 999px 999px 0}
+.split .chev:hover{color:var(--q-text)}
+.split:hover{background:var(--q-gbtn-h)}
+.split.off{background:var(--q-text);color:var(--q-danger) !important}
+.split.off .chev{color:color-mix(in srgb,var(--q-bg) 60%,transparent)}
+.sep{width:1px;height:22px;background:var(--q-line);margin:0 3px}
+.leave{height:40px;padding:0 16px 0 14px;border-radius:999px;background:var(--q-danger);color:#fff !important;font-weight:600 !important;display:flex;align-items:center;gap:7px}
+.leave:hover{filter:brightness(1.1)}
+.dmenu{position:absolute;bottom:56px;left:0;width:280px;padding:6px;border-radius:13px;background:var(--q-pop);backdrop-filter:blur(30px) saturate(1.8);-webkit-backdrop-filter:blur(30px) saturate(1.8);box-shadow:inset 0 0 0 .5px var(--q-glass-line),0 0 0 .5px rgba(0,0,0,.35),0 16px 40px rgba(0,0,0,.35);font-size:12.5px}
+.dm-h{font-size:11px;font-weight:600;color:var(--q-dim);padding:7px 8px 3px}
+.dm-i{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:6px;cursor:pointer}
+.dm-i:hover{background:var(--q-accent);color:var(--q-on-accent)}
+.dm-i .ck{width:14px;display:grid;place-items:center}
+.dm-sep{height:1px;background:var(--q-line);margin:5px 4px}
+.dm-seg{display:flex;gap:2px;margin:3px 6px 6px;padding:2px;border-radius:8px;background:var(--q-gbtn)}
+.dm-seg button{flex:1;height:24px;border-radius:6px;font-size:11.5px !important;font-weight:500 !important;color:var(--q-dim) !important}
+.dm-seg button.on{background:var(--q-raised2);color:var(--q-text) !important}
+.dm-note{font-size:11px;color:var(--q-faint);padding:0 8px 4px;line-height:1.4}
+.panel{width:300px;flex:none;border-left:1px solid var(--q-line);display:flex;flex-direction:column;background:var(--q-bg);--ring:var(--q-bg)}
+.p-tabs{display:flex;align-items:center;gap:16px;padding:0 8px 0 16px;height:42px;border-bottom:1px solid var(--q-line);flex:none}
+.p-tabs .tab{padding:11px 0 12px}
+.p-tabs .tab.on::after{bottom:0}
+.p-body{flex:1;overflow:auto;padding:4px 14px 16px;scrollbar-width:thin}
+.p-body .mg .col{max-width:86%}
+.p-body .bub{font-size:12.5px;padding:6px 10px}
+.p-body .bub.file{min-width:0;width:100%}
+.p-h{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--q-dim);padding:10px 0 2px}
+.prow{display:flex;align-items:center;gap:10px;padding:7px 0}
+.prow .name{flex:1;font-weight:500}
+.prow .i{color:var(--q-dim)}
+.prow .mo{color:var(--q-danger)}
+
+/* ───────── call: minimal ───────── */
+.menubar{position:absolute;left:0;right:0;top:0;height:26px;display:flex;align-items:center;gap:18px;padding:0 14px;font-size:13px;font-weight:500;color:#fff;background:rgba(18,20,38,.28);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);z-index:4}
+#board[data-appearance="light"] .menubar{color:#16171a;background:rgba(255,255,255,.4)}
+.menubar b{font-weight:700}
+.mb-r{margin-left:auto;display:flex;align-items:center;gap:14px}
+.mb-q{display:flex;align-items:center;gap:6px;height:20px;padding:0 7px;border-radius:5px;cursor:pointer}
+.mb-q:hover,.mb-q.open{background:rgba(255,255,255,.2)}
+#board[data-appearance="light"] .mb-q:hover,#board[data-appearance="light"] .mb-q.open{background:rgba(0,0,0,.1)}
+.mb-pill{display:flex;align-items:center;gap:4px;height:16px;padding:0 6px;border-radius:5px;background:var(--q-live);color:#052a12;font-size:11px;font-weight:700}
+.ed{position:absolute;left:56px;top:58px;width:800px;height:500px;border-radius:12px;overflow:hidden;background:var(--ed-bg);box-shadow:var(--q-shadow)}
+.ed-top{height:38px;background:var(--ed-top);display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--q-dim);position:relative;border-bottom:1px solid var(--q-line)}
+.ed-top .lights{top:13px;left:14px}
+.ed-body{padding:12px 0;font-size:0}
+.cl{display:flex;align-items:center;gap:8px;height:19px;padding-right:20px}
+.cl .ln{width:40px;text-align:right;font:11px ui-monospace,Menlo,monospace;color:var(--q-faint);opacity:.6}
+.cl i{height:8px;border-radius:3px;opacity:.75}
+.capsule{position:absolute;left:50%;bottom:30px;transform:translateX(-50%);display:flex;align-items:center;gap:6px;padding:6px;border-radius:999px;background:var(--q-glass);backdrop-filter:blur(26px) saturate(1.8);-webkit-backdrop-filter:blur(26px) saturate(1.8);box-shadow:inset 0 0 0 .5px var(--q-glass-line),0 0 0 .5px rgba(0,0,0,.35),0 14px 40px rgba(0,0,0,.3);z-index:3;cursor:grab}
+.capsule .faces{display:flex;align-items:center;gap:6px}
+.capsule .tb{width:36px;height:36px}
+.capsule .leave{height:36px;width:36px;padding:0;justify-content:center}
+.vsep{width:1px;height:24px;background:var(--q-line);margin:0 2px;flex:none}
+.more{display:flex;align-items:center;gap:6px;max-width:0;opacity:0;overflow-x:clip;overflow-y:visible;transition:max-width .32s ease,opacity .2s;margin-right:-6px}
+.capsule:hover .more,.cap-big:hover .more,.pin .more{max-width:340px;opacity:1;margin-right:0}
+.more .timer{font-size:12px;color:var(--q-dim);padding:0 6px 0 2px}
+.capsule.col{left:auto;right:18px;bottom:auto;top:50%;transform:translateY(-50%);flex-direction:column;padding:6px}
+.capsule.col .faces{flex-direction:column}
+.capsule.col .vsep{width:24px;height:1px;margin:2px 0}
+.capsule.col .more{flex-direction:column;max-width:none;max-height:0;margin:0 0 -6px;overflow-x:visible;overflow-y:clip}
+.capsule.col [data-tip]:hover::after{bottom:auto;top:50%;left:auto;right:calc(100% + 12px);transform:translateY(-50%)}
+.tb.off{background:var(--q-text);color:var(--q-danger) !important}
+.capsule.col:hover .more,.pin .capsule.col .more{max-height:300px;margin:0}
+.face{width:var(--s);height:var(--s);border-radius:50%;position:relative;flex:none}
+.face .clip{position:absolute;inset:0;border-radius:50%;overflow:hidden;display:grid;place-items:center}
+.face::after{content:"";position:absolute;inset:-4px;border-radius:50%;border:2.5px solid transparent;transition:border-color .25s;pointer-events:none}
+.face.speaking::after{border-color:var(--q-live)}
+.face .badge{position:absolute;right:-3px;bottom:-3px;width:18px;height:18px;border-radius:50%;background:var(--q-danger);color:#fff;display:grid;place-items:center;box-shadow:0 0 0 2px rgba(0,0,0,.28);z-index:2}
+.face .mybadge{background:rgba(20,20,24,.85);opacity:0;transition:opacity .15s}
+.face:hover .mybadge,.face .mybadge.muted{opacity:1}
+.face .mybadge.muted{background:var(--q-danger)}
+.face .tip{position:absolute;bottom:calc(100% + 10px);left:50%;transform:translateX(-50%);white-space:nowrap;padding:4px 8px;border-radius:7px;font-size:11.5px;font-weight:600;background:rgba(18,18,22,.9);color:#fff;opacity:0;transition:opacity .12s;pointer-events:none;z-index:5}
+.face:hover .tip{opacity:1}
+.capsule.col .face .tip{bottom:auto;top:50%;left:auto;right:calc(100% + 12px);transform:translateY(-50%)}
+.face.chip .clip{background:var(--q-raised2);color:var(--q-text);font-weight:650;font-size:13px}
+.cap-big{position:absolute;left:50%;bottom:26px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:12px;z-index:3}
+.cap-big .faces{display:flex;gap:12px}
+.cap-big .face .clip{box-shadow:0 10px 26px rgba(0,0,0,.35)}
+.cap-big .face::after{inset:-5px;border-width:3px}
+.cap-big .capsule{position:static;transform:none}
+.sharewin{position:absolute;left:220px;top:64px;width:640px;height:400px;border-radius:14px;overflow:hidden;background:#0b0c0f;box-shadow:0 0 0 .5px rgba(0,0,0,.5),0 24px 60px rgba(0,0,0,.4);z-index:2}
+.sharewin .nm{top:10px;bottom:auto;left:10px}
+.sw-fs{position:absolute;right:10px;top:10px;width:28px;height:28px;border-radius:8px;display:grid;place-items:center;background:rgba(10,11,14,.55);color:#fff !important;backdrop-filter:blur(10px)}
+.mpop{position:absolute;right:150px;top:30px;width:300px;padding:6px;border-radius:13px;background:var(--q-pop);backdrop-filter:blur(30px) saturate(1.8);-webkit-backdrop-filter:blur(30px) saturate(1.8);box-shadow:inset 0 0 0 .5px var(--q-glass-line),0 0 0 .5px rgba(0,0,0,.35),0 18px 44px rgba(0,0,0,.35);z-index:6;font-size:13px;--ring:var(--q-raised)}
+.mp-call{padding:10px;border-radius:9px;background:var(--q-gbtn)}
+.mp-call .r1{display:flex;align-items:center;gap:8px}
+.mp-call .r1 b{flex:1;font-weight:650}
+.mp-call .r2{display:flex;align-items:center;gap:6px;margin-top:10px}
+.mp-call .tb{width:32px;height:32px}
+.mp-call .leave{height:32px;padding:0 12px;font-size:12px !important}
+.mp-sec{font-size:11px;font-weight:600;color:var(--q-dim);padding:10px 8px 3px}
+.mp-row{display:flex;align-items:center;gap:10px;padding:5px 8px;border-radius:7px}
+.mp-row:hover{background:var(--q-gbtn)}
+.mp-row .name{flex:1;font-weight:500}
+.mp-row .meta{font-size:11.5px;color:var(--q-dim)}
+.mp-row .stack{width:26px;height:26px}
+.mp-row .stack .plus{height:15px;min-width:15px;font-size:9px;right:-5px;bottom:-3px;padding:0 3px;box-shadow:none}
+.mp-sep{height:1px;background:var(--q-line);margin:6px 4px}
+.mp-i{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:7px;cursor:pointer}
+.mp-i:hover{background:var(--q-accent);color:var(--q-on-accent)}
+.mp-i kbd{margin-left:auto;font:inherit;font-size:12px;opacity:.55}
+
+/* screen mocks (designed at 640×400, scaled to fit) */
+.mkwrap{position:absolute;inset:0;overflow:hidden}
+.mk{position:absolute;left:50%;top:50%;width:640px;height:400px;transform-origin:center;transform:translate(-50%,-50%);background:#fbfaf7;color:#1a1b1f;font:13px/1.4 -apple-system,system-ui,sans-serif;padding:20px 34px;box-sizing:border-box;position:relative}
+.mk-nav{display:flex;gap:18px;align-items:center;font-size:12px;color:#666}
+.mk-nav b{color:#1a1b1f;font-size:14px;margin-right:12px}
+.mk-nav .mk-btn{margin-left:auto;padding:4px 10px;border-radius:7px;background:#1a1b1f;color:#fff;font-style:normal}
+.mk-h{font-size:28px;font-weight:750;letter-spacing:-.02em;text-align:center;margin-top:30px}
+.mk-s{text-align:center;color:#777;margin-top:4px}
+.mk-tog{display:flex;justify-content:center;margin:16px auto 0;gap:2px;padding:3px;border-radius:9px;background:#ecebe6;width:max-content;font-size:12px}
+.mk-tog span{padding:3px 12px;border-radius:7px}.mk-tog .on{background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.1)}
+.mk-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:20px}
+.mk-c{border-radius:12px;padding:14px;background:#fff;box-shadow:0 0 0 1px #e8e6df}
+.mk-c.hl{box-shadow:0 0 0 2px #ff7a45}
+.mk-c small{color:#888;font-size:11px}.mk-c b{display:block;font-size:24px;margin:2px 0 8px}
+.mk-c i{display:block;height:6px;border-radius:3px;background:#ecebe6;margin-top:6px}
+.mk-c .cta{display:block;margin-top:12px;text-align:center;padding:5px;border-radius:7px;background:#f1f0eb;font-size:11.5px;font-weight:600}
+.mk-c.hl .cta{background:#ff7a45;color:#fff}
+.mk.chart{background:#111318;color:#d7dae0;padding:18px 24px}
+.mk-ch{display:flex;align-items:center;gap:10px;font-size:13px;font-weight:600}
+.mk-ch span{font-weight:400;color:#8b909b;font-size:12px}
+.mk-k{display:flex;gap:28px;margin-top:14px}
+.mk-k b{display:block;font-size:24px;color:#fff}.mk-k b.bad{color:#ff6b5e}
+.mk-k span{font-size:11px;color:#8b909b}
+.mk.chart svg{display:block;margin-top:14px}
+@media (prefers-reduced-motion:reduce){#board *{animation:none !important;transition:none !important}}
+</style>
+</head>
+<body>
+<div id="board" data-appearance="dark">
+  <header class="head">
+    <h1>Quipcall desktop UI · round 1</h1>
+    <p>My take on every screen you listed, drawn at real size. It's all clickable: room rows, tabs, ▶ on a recording, transcript lines, toolbar buttons, the ▴ next to mic and camera, and the capsule (hover it). Tell me what to change and I'll redraw it; once a screen is settled I build it in GPUI.</p>
+    <div class="knobs">
+      <span>App appearance <span class="seg" id="appearance"><button aria-pressed="true" data-v="dark">Dark</button><button aria-pressed="false" data-v="light">Light</button></span></span>
+      <span>Accent <span class="sws" id="accent"></span></span>
+    </div>
+    <nav class="toc">
+      <a href="#onboarding">1 · Onboarding</a><a href="#home">2 · Home</a><a href="#finished">3 · Finished call</a><a href="#basic">4 · Call: basic</a><a href="#minimal">5 · Call: minimal</a><a href="#questions">Questions for you</a>
+    </nav>
+  </header>
+
+  <section id="onboarding">
+    <h2>1 · Onboarding</h2>
+    <p class="lede">One small window with four states. No passwords anywhere. Click into the email field in 1a, and type a name in 1c or 1d.</p>
+    <div class="stage" data-w="900" data-h="1218"><div class="canvas wall" id="cv-onb"></div></div>
+    <ol class="notes">
+      <li><b>Sign in and sign up are the same screen.</b> The email decides: a new address gets one extra step (1c).</li>
+      <li><b>One email with a magic link and a 6-digit code.</b> The link opens <code>quipcall://auth/…</code> (we already handle <code>quipcall://join</code>). The code is for people who read their mail on a phone.</li>
+      <li><b>Passkey: yes, but not as a button.</b> A new user doesn't have one yet, so the app offers it once after the first sign-in (1c, Touch ID). After that, macOS suggests it as soon as you focus the email field (see 1a), and the key icon asks for it directly.</li>
+      <li><b>GitHub and Google</b> work now. Apple is greyed out with "soon", or hidden until it works. Your call.</li>
+      <li><b>Guest means just a name.</b> Opened from a call link, the screen shows the room and who's in it, with mic and camera toggles, so it doubles as the pre-join screen. Guests keep nothing, and the footer says what signing in adds.</li>
+    </ol>
+  </section>
+
+  <section id="home">
+    <h2>2 · Home</h2>
+    <p class="lede">Rooms and history on the left, the selected call on the right. Design review is live right now. Click the other rooms, the History tab and ‹ ›.</p>
+    <div class="stage" data-w="1000" data-h="700"><div class="canvas wall" id="cv-home"></div></div>
+    <ol class="notes">
+      <li><b>Two panes.</b> The list is on the left and the selected call on the right. Narrowed below ~600 px, the window turns into today's single list, and a click opens the call view over it.</li>
+      <li><b>A room row</b> has one avatar (whoever you talk to most there) with +N, the name, and the last call's date and length. Clicking a row opens the latest call. It doesn't join.</li>
+      <li><b>Live rooms</b> get a pulsing dot, the running time and a Join button. Other rooms show a call button on hover.</li>
+      <li><b>History</b> lists every call by day, quick calls included, with small marks for a transcript, a recording and files.</li>
+      <li><b>Quick call</b> stays at the top. <b>+</b> makes a room (with a real name field this time). Your account sits at the bottom.</li>
+      <li>A live room's transcript can be read before you join. Late joiners get the history anyway (ARCHITECTURE.md).</li>
+    </ol>
+  </section>
+
+  <section id="finished">
+    <h2>3 · Finished call</h2>
+    <p class="lede">The same window with a call that's over: a summary, the transcript as a chat, recordings and files. Press ▶, or click any line to play from there.</p>
+    <div class="stage" data-w="1000" data-h="700"><div class="canvas wall" id="cv-fin"></div></div>
+    <ol class="notes">
+      <li><b>The transcript is a chat.</b> Others are on the left with avatars, you're on the right. Joins, screen shares and files appear in the timeline where they happened.</li>
+      <li><b>The summary comes first</b> (Stage 10), with action items. It folds away.</li>
+      <li><b>The transcript follows the recording.</b> When there is a recording, a player docks at the bottom. Click any line to play from there, and the line being spoken gets an outline. The screen-share marker in the timeline opens that recording.</li>
+      <li><b>‹ ›</b> steps through earlier calls in the same room.</li>
+      <li><b>Recordings and files</b> each get a tab with a count. Zero is fine, and the empty state says how to get some (open Family, or the solo quick call in History).</li>
+      <li>A quick call gets <b>Keep as room</b>, for when a one-off call becomes a regular one.</li>
+    </ol>
+  </section>
+
+  <section id="basic">
+    <h2>4 · Call: basic</h2>
+    <p class="lede">One window: tiles, a floating glass toolbar, and a side panel for the live transcript, files and people.</p>
+    <div class="pctl">
+      <span>Layout <span class="seg" id="ctl-layout"><button data-v="grid" aria-pressed="true">Grid</button><button data-v="speaker" aria-pressed="false">Speaker</button><button data-v="share" aria-pressed="false">Someone shares</button><button data-v="alone" aria-pressed="false">Alone</button></span></span>
+      <span>Side panel <span class="seg" id="ctl-panel"><button data-v="on" aria-pressed="true">Open</button><button data-v="off" aria-pressed="false">Closed</button></span></span>
+    </div>
+    <div class="stage" data-w="1080" data-h="720"><div class="canvas wall" id="cv-basic"></div></div>
+    <ol class="notes">
+      <li><b>The layout picks itself.</b> Alone, you get a waiting card with the link. With 2–4 people it's a grid, with 5 or more a speaker view with a strip. When anyone shares, the share goes big and faces move to a column. Switch above to see each.</li>
+      <li><b>Toolbar:</b> mic ▴, camera ▴, share, record | panel, minimal | Leave. That's today's set plus record. Invite moved to the title bar and the People tab.</li>
+      <li><b>The ▴ next to mic and camera</b> picks devices. The noise filter switch lives there too: Strong (DeepFilterNet), Light (WebRTC), Off for music. That's the Stage 4 switch.</li>
+      <li><b>Recording and transcribing</b> show as pills in the title bar, so nobody is recorded without seeing it.</li>
+      <li><b>Side panel:</b> the live transcript (with who's transcribing and an off switch), files, and people with the invite link. Drop a file anywhere on the window to add it to the call.</li>
+      <li>⤡ switches to the capsule and closes the window, like today. Closing the window does the same. Only Leave ends the call.</li>
+    </ol>
+  </section>
+
+  <section id="minimal">
+    <h2>5 · Call: minimal</h2>
+    <p class="lede">Everyone in one floating capsule over your work. Hover it for the rest of the controls, and click the green timer in the menu bar.</p>
+    <div class="pctl">
+      <span>Variant <span class="seg" id="ctl-mini"><button data-v="row" aria-pressed="true">Row</button><button data-v="col" aria-pressed="false">Column (at an edge)</button><button data-v="big" aria-pressed="false">Big faces</button><button data-v="nine" aria-pressed="false">9 people</button><button data-v="share" aria-pressed="false">Someone shares</button></span></span>
+      <span>Controls <span class="seg" id="ctl-pin"><button data-v="hover" aria-pressed="true">On hover</button><button data-v="pin" aria-pressed="false">Always</button></span></span>
+    </div>
+    <div class="stage" data-w="1080" data-h="660"><div class="canvas wall" id="cv-mini"></div></div>
+    <ol class="notes">
+      <li><b>One window holds all the faces.</b> A glass capsule replaces both the window per person and the separate toolbar. Mic and Leave are always there. Camera, share, record, link and expand slide out on hover.</li>
+      <li><b>Drag it anywhere.</b> Dropped near the left or right edge, it turns vertical (Column).</li>
+      <li><b>Scroll or pinch over the faces to resize them</b> (36–96 px; Big faces is 84). The speaking ring, muted badge, name on hover and the mic button on your own face work as they do today.</li>
+      <li><b>More than 6 people:</b> a +N chip opens the rest, and the active speaker always gets a visible slot.</li>
+      <li><b>Shares keep their own floating window</b> because they need the room. Fullscreen works as it does today.</li>
+      <li><b>Menu bar:</b> the call's time sits in the menu bar. Its menu has the call controls, your rooms with call buttons, and Quick call. That's the start of Stage 4's menu-bar mode.</li>
+      <li><b>Build cost:</b> faces in one window lose the free compositor clip that each circle window gets today. There are two options: draw each face with <code>round_video</code>'s bands (already exists, ~25 clipped strips per face), or teach our vendored GPUI to round a <code>surface</code> in its shader. I'd patch the shader: one quad per face and no extra CPU.</li>
+    </ol>
+  </section>
+
+  <section id="questions">
+    <h2>Questions for you</h2>
+    <ol class="notes">
+      <li><b>Who can read a room's transcripts and recordings:</b> everyone who was in that call, or every room member (including the live transcript before joining)?</li>
+      <li><b>Where do recordings live:</b> on the Mac of whoever pressed record (free, but only they have it until it's uploaded), or on the server through LiveKit egress (everyone gets it, but it costs VPS CPU and disk)?</li>
+      <li><b>Text chat in a call:</b> none (the transcript is the chat and files drop in), or a small message box under the transcript?</li>
+      <li><b>Light mode:</b> follow macOS, or stay dark only? Compare with the switch at the top.</li>
+      <li><b>Accent:</b> keep today's blue, or pick another swatch.</li>
+      <li><b>Default call mode:</b> the capsule (like today) or the basic window? Should a 1:1 call start differently from a group call?</li>
+    </ol>
+  </section>
+</div>
+
+<script>
+(() => {
+"use strict";
+/* ───────── icons (Lucide, ISC) ───────── */
+const IC = {
+ mic:'<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/>',
+ micoff:'<path d="m2 2 20 20"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><path d="M12 19v3"/>',
+ video:'<path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/>',
+ videooff:'<path d="M10.66 6H14a2 2 0 0 1 2 2v2.5l5.248-3.062A.5.5 0 0 1 22 7.87v8.196"/><path d="M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2"/><path d="m2 2 20 20"/>',
+ share:'<path d="m9 10 3-3 3 3"/><path d="M12 13V7"/><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M12 17v4"/><path d="M8 21h8"/>',
+ phoneoff:'<path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/><path d="M22 2 2 22"/>',
+ phone:'<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>',
+ link:'<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+ userplus:'<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6"/><path d="M22 11h-6"/>',
+ user:'<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+ max:'<path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/>',
+ min:'<path d="M4 14h6v6"/><path d="M20 10h-6V4"/><path d="M14 10l7-7"/><path d="M3 21l7-7"/>',
+ plus:'<path d="M5 12h14"/><path d="M12 5v14"/>',
+ x:'<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+ down:'<path d="m6 9 6 6 6-6"/>', up:'<path d="m18 15-6-6-6 6"/>', left:'<path d="m15 18-6-6 6-6"/>', right:'<path d="m9 18 6-6-6-6"/>',
+ play:'<path d="M7 4.5v15a1 1 0 0 0 1.5.86l12-7.5a1 1 0 0 0 0-1.72l-12-7.5A1 1 0 0 0 7 4.5Z" fill="currentColor" stroke="none"/>',
+ pause:'<rect x="6" y="4" width="4" height="16" rx="1" fill="currentColor" stroke="none"/><rect x="14" y="4" width="4" height="16" rx="1" fill="currentColor" stroke="none"/>',
+ download:'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+ upload:'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
+ mail:'<rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
+ key:'<path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/>',
+ finger:'<path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M2 12a10 10 0 0 1 18-6"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M9 6.8a6 6 0 0 1 9 5.2v2"/>',
+ arrow:'<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+ check:'<path d="M20 6 9 17l-5-5"/>',
+ sparkles:'<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>',
+ cc:'<rect width="18" height="14" x="3" y="5" rx="2" ry="2"/><path d="M7 15h4M15 15h2M7 11h2M13 11h4"/>',
+ panel:'<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/>',
+ grid:'<rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/>',
+ dots:'<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
+ zap:'<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>',
+ copy:'<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+ clip:'<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
+ settings:'<path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
+ camera:'<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>',
+ rec:'<circle cx="12" cy="12" r="6.5" fill="currentColor" stroke="none"/>',
+ recring:'<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/>',
+ folder:'<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+ login:'<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/>',
+ audio:'<path d="M2 10v3"/><path d="M6 6v11"/><path d="M10 3v18"/><path d="M14 8v7"/><path d="M18 5v13"/><path d="M22 10v3"/>',
+ wifi:'<path d="M12 20h.01"/><path d="M2 8.82a15 15 0 0 1 20 0"/><path d="M5 12.859a10 10 0 0 1 14 0"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/>',
+ battery:'<rect width="16" height="10" x="2" y="7" rx="2" ry="2"/><path d="M22 11v2"/><rect x="4" y="9" width="9" height="6" rx="1" fill="currentColor" stroke="none"/>',
+ search:'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+ ccoff:'<path d="M10.5 5H19a2 2 0 0 1 2 2v8.5"/><path d="M17 11h-.5"/><path d="M19 19H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2"/><path d="m2 2 20 20"/><path d="M7 11h4"/><path d="M7 15h2.5"/>',
+ users:'<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'
+};
+const BR = {
+ github:'<path fill="currentColor" d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/>',
+ google:'<path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>',
+ apple:'<path fill="currentColor" d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/>'
+};
+const ic = (n, s = 16) => `<svg class="i" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${IC[n]}</svg>`;
+const brand = (n, s = 16) => `<svg class="i" width="${s}" height="${s}" viewBox="0 0 24 24" aria-hidden="true">${BR[n]}</svg>`;
+const LIGHTS = '<div class="lights"><i></i><i></i><i></i></div>';
+
+/* ───────── people (avatar colours use theme.rs's FNV hash) ───────── */
+function hue(seed) { let h = 2166136261; for (const b of new TextEncoder().encode(seed)) { h ^= b; h = Math.imul(h, 16777619) >>> 0; } return h % 360; }
+const initials = n => n.trim().split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('');
+const first = n => n.split(' ')[0];
+const P = {
+ me:{id:'nikita',name:'Nikita',k:'28 38% 66%',hr:'25 25% 20%'},
+ anna:{id:'anna',name:'Anna Petrova',k:'24 52% 76%',hr:'40 62% 64%'},
+ max:{id:'max',name:'Max Orlov',k:'26 42% 64%',hr:'24 30% 20%'},
+ lee:{id:'lee',name:'Lee Chen',k:'32 42% 70%',hr:'220 15% 12%'},
+ sofia:{id:'sofia',name:'Sofia Rossi',k:'22 38% 58%',hr:'12 45% 24%'},
+ tom:{id:'tom',name:'Tom Becker',k:'20 40% 74%',hr:'30 35% 46%'},
+ mia:{id:'mia',name:'Mia Kovač',k:'25 40% 70%',hr:'5 50% 30%'},
+ dan:{id:'dan',name:'Daniel Park',k:'30 40% 66%',hr:'220 10% 14%'},
+ kai:{id:'kai',name:'Kai Müller',k:'26 40% 72%',hr:'40 50% 55%'},
+ mom:{id:'mom',name:'Mom',k:'26 40% 72%',hr:'0 0% 70%'},
+ alex:{id:'alex',name:'Alex',k:'28 40% 68%',hr:'25 30% 25%'}
+};
+for (const k in P) P[k].key = k;
+const av = (p, s, id) => `<span class="av"${id ? ` id="${id}"` : ''} style="--s:${s}px;--h:${hue(p.id)}">${initials(p.name)}</span>`;
+const vid = (p) => `<div class="vid${p.key === 'me' ? ' mirror' : ''}" style="--h:${hue(p.id)};--k:${p.k};--hr:${p.hr}"></div>`;
+function avs(keys, s, max = 5) {
+  const shown = keys.slice(0, max).map(k => av(P[k], s)).join('');
+  const rest = keys.length - max;
+  return `<span class="avs" style="--s:${s}px">${shown}${rest > 0 ? `<span class="more-n">+${rest}</span>` : ''}</span>`;
+}
+function names(keys) {
+  const o = keys.filter(k => k !== 'me').map(k => first(P[k].name)), me = keys.includes('me');
+  if (o.length > 3) return `${o.slice(0, 3).join(', ')} and ${o.length - 3 + (me ? 1 : 0)} others`;
+  const parts = [...o, ...(me ? ['you'] : [])];
+  return parts.length < 2 ? (parts[0] || '') : parts.slice(0, -1).join(', ') + ' and ' + parts.at(-1);
+}
+function mulberry(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+/* ───────── data ───────── */
+const ROOMS = [
+ {id:'design',name:'Design review',members:['anna','lee','tom','sofia','me'],calls:['design-live','design-1'],link:'quipcall.com/r/design-review'},
+ {id:'standup',name:'Team standup',members:['anna','max','lee','sofia','me'],calls:['standup-12','standup-11'],link:'quipcall.com/r/team-standup'},
+ {id:'family',name:'Family',members:['mom','alex','me'],calls:['family-8'],link:'quipcall.com/r/family'},
+ {id:'alpha',name:'Quipcall alpha',members:['max','mia','dan','kai','lee','tom','sofia','anna','me'],calls:['alpha-5'],link:'quipcall.com/r/alpha'},
+ {id:'max',name:'Max Orlov',members:['max','me'],calls:['max-3'],link:'quipcall.com/r/max'}
+];
+const CALLS = {
+ 'design-live':{live:true,day:'Today',start:'11:02',people:['anna','lee','tom'],recs:[],
+   files:[{name:'pricing-v3.fig',size:'4.8 MB',who:'anna',t:60}],
+   tx:[{ev:'start',t:0,text:'Anna started the call'},
+     {who:'anna',t:20,text:"Let's start with the new pricing page."},
+     {who:'anna',t:60,file:'pricing-v3.fig'},
+     {who:'lee',t:95,text:'The cards look heavy. Could we drop the borders and use spacing instead?'},
+     {who:'anna',t:140,text:'Agree. And the monthly/yearly toggle should sit above the cards.'},
+     {ev:'join',who:'tom',t:410,text:'Tom joined'},
+     {who:'tom',t:430,text:"Hi! I'll stay muted, it's loud in this café."},
+     {who:'anna',t:700,text:'Tom, can you check the illustration sizes on mobile after the call?'},
+     {who:'lee',t:742,partial:true,text:'I also think the FAQ could move'}]},
+ 'design-1':{day:'Yesterday',start:'16:00',dur:'41 min',people:['anna','lee','sofia','me'],recs:[],files:[],
+   tx:[{who:'anna',t:10,text:'Last thing for today: the onboarding illustrations.'},
+     {who:'sofia',t:40,text:"I'll send two options tomorrow morning."},
+     {who:'me',t:62,text:'Great, thanks.'}]},
+ 'standup-12':{day:'Today',start:'10:02',dur:'32 min',people:['anna','max','lee','sofia','me'],
+   summary:{points:['Export: CSV is done; PDF still breaks on long tables. Max and Sofia pair on it, splitting tables per page first.','Staging p95 went from 180 to 900 ms after Tuesday’s release. Rolling back the pool change brought it back to 190 ms.','The onboarding emails are ready for review (magic link and code in one email).'],
+     todo:[['max','Fix PDF export for long tables',false],['lee','Post p95 numbers after the rollback',true],['sofia','Final email copy by Friday',false],['me','Add an alert on staging p95',false]]},
+   recs:[{title:'Whole call',from:0,dur:1930,kind:'Video · 1080p',size:'212 MB',thumb:'grid'},{title:"Lee's screen",from:372,dur:508,kind:'Screen · 15 fps',size:'96 MB',thumb:'chart'}],
+   files:[{name:'export-spec.md',size:'8 KB',who:'max',t:52},{name:'onboarding-emails.pdf',size:'240 KB',who:'sofia',t:150},{name:'p95-latency.png',size:'1.2 MB',who:'lee',t:410}],
+   tx:[{ev:'start',t:0,text:'Call started'},
+     {who:'anna',t:8,text:"Morning! Let's keep it short, Lee has a demo at half past."},
+     {who:'max',t:31,text:'Yesterday I finished the export flow. CSV works, PDF still breaks on long tables.'},
+     {who:'max',t:44,text:"I'll pair with Sofia on it after lunch."},
+     {who:'max',t:52,file:'export-spec.md'},
+     {who:'me',t:65,text:'Did you try splitting the table per page before rendering?'},
+     {who:'max',t:78,text:"Not yet. Good idea, I'll try that first."},
+     {ev:'join',who:'sofia',t:130,text:'Sofia joined'},
+     {who:'sofia',t:136,text:'Sorry, train wifi. The onboarding emails are ready for review, magic link copy included.'},
+     {who:'sofia',t:150,file:'onboarding-emails.pdf'},
+     {who:'anna',t:171,text:"Nice. I'll read them today."},
+     {who:'lee',t:280,text:"Heads-up: staging has been slow since Tuesday's deploy. I think it's the database pool."},
+     {ev:'share',who:'lee',t:372,rec:1,text:'Lee shared a screen · 8 min'},
+     {who:'lee',t:380,text:'Here. p95 went from 180 to 900 ms right after the release.'},
+     {who:'lee',t:410,file:'p95-latency.png'},
+     {who:'anna',t:432,text:'Can we roll back the pool change and compare?'},
+     {who:'lee',t:441,text:"Yes, doing it now. I'll post numbers after."},
+     {who:'me',t:455,text:"If it's the pool, let's add an alert on p95 so we catch it next time."},
+     {who:'sofia',t:905,text:'About the emails: do we send the magic link and the code in one message?'},
+     {who:'anna',t:921,text:'Yes, one email. The code is for people who read mail on their phone.'},
+     {who:'max',t:1230,text:'Can someone review my PR for the export queue today?'},
+     {who:'me',t:1241,text:"I'll take it after this."},
+     {who:'lee',t:1610,text:'Rollback is done. p95 is back to 190 ms.'},
+     {who:'anna',t:1622,text:'So it was the pool. 🎉'},
+     {who:'anna',t:1790,text:'Okay. Max: PDF tables. Lee: numbers. Sofia: email copy by Friday. Anything else?'},
+     {who:'me',t:1902,text:'All good. Thanks everyone 👋'},
+     {ev:'end',t:1930,text:'Call ended · 32 min'}]},
+ 'standup-11':{day:'Yesterday',start:'10:01',dur:'28 min',people:['anna','max','lee','me'],recs:[],files:[],
+   tx:[{who:'anna',t:6,text:'Morning all. Max, how is the export going?'},{who:'max',t:20,text:'CSV is nearly there, PDF next.'}]},
+ 'family-8':{day:'Yesterday',start:'20:15',dur:'1 h 04 min',people:['mom','alex','me'],recs:[],txOff:true,
+   files:[{name:'IMG_2041.jpg',size:'3.1 MB',who:'mom',t:300}],tx:[]},
+ 'alpha-5':{day:'Wednesday',start:'18:40',dur:'47 min',people:['max','mia','dan','kai','lee','tom','sofia','anna','me'],files:[],
+   recs:[{title:'Whole call',from:0,dur:2822,kind:'Audio only',size:'22 MB',thumb:'audio'}],
+   tx:[{who:'max',t:15,text:'Build 0.3 is out, please update before we start.'},
+     {who:'dan',t:60,text:'Screen share is way smoother on my Intel Mac now.'},
+     {who:'mia',t:122,text:'The echo is gone on laptop speakers too.'},
+     {who:'me',t:180,text:"Great. Let's try ten people with cameras on."}]},
+ 'max-3':{day:'Nov 2',start:'14:20',dur:'12 min',people:['max','me'],recs:[],files:[],
+   tx:[{who:'max',t:5,text:'Got a minute for the invoice question?'},{who:'me',t:12,text:'Sure, go ahead.'},{who:'max',t:30,text:'Should we bill yearly plans upfront or monthly?'}]},
+ 'quick-lee':{quick:true,day:'Today',start:'09:15',dur:'5 min',people:['lee','me'],recs:[],files:[],
+   tx:[{who:'lee',t:3,text:'Can you hear me? Testing the new mic.'},{who:'me',t:9,text:"Loud and clear. Much less noise than yesterday."},{who:'lee',t:20,text:'Great, the noise filter really works.'}]},
+ 'quick-solo':{quick:true,day:'Wednesday',start:'12:10',dur:'2 min',people:['me'],recs:[],files:[],tx:[],nobody:true}
+};
+const HISTORY = [['Today',['design-live','standup-12','quick-lee']],['Yesterday',['family-8','design-1','standup-11']],['Wednesday',['alpha-5','quick-solo']],['Nov 2',['max-3']]];
+const SHORT = {Today:'Today',Yesterday:'Yesterday',Wednesday:'Wed','Nov 2':'Nov 2'};
+const roomOf = id => ROOMS.find(r => r.calls.includes(id));
+const titleOf = id => { const r = roomOf(id); if (r) return r.name; const o = CALLS[id].people.filter(k => k !== 'me'); return o.length ? `Quick call with ${first(P[o[0]].name)}` : 'Quick call'; };
+const fmt = t => `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+function clock(c, t) { const [h, m] = c.start.split(':').map(Number); const tot = h * 60 + m + Math.floor(t / 60); return `${String(Math.floor(tot / 60) % 24).padStart(2, '0')}:${String(tot % 60).padStart(2, '0')}`; }
+const EXT = {pdf:['#e5484d','PDF'],png:['#8b5cf6','PNG'],jpg:['#8b5cf6','JPG'],md:['#64748b','MD'],fig:['#a259ff','FIG']};
+function ftile(name) { const e = EXT[name.split('.').pop()] || ['#64748b', 'FILE']; return `<span class="ftile" style="background:${e[0]}">${e[1]}</span>`; }
+
+/* ───────── screen mocks ───────── */
+function mockPricing() {
+  const cards = [['Starter', 'Free'], ['Team', '$8'], ['Business', '$16']].map((c, i) => `<div class="mk-c${i === 1 ? ' hl' : ''}"><small>${c[0]}</small><b>${c[1]}</b><i></i><i></i><i style="width:60%"></i><span class="cta">Choose</span></div>`).join('');
+  return `<div class="mkwrap"><div class="mk"><div class="mk-nav"><b>Acme</b><span>Product</span><span>Pricing</span><span>Docs</span><i class="mk-btn">Sign in</i></div><div class="mk-h">Simple pricing</div><div class="mk-s">Start free. Upgrade when your team grows.</div><div class="mk-tog"><span class="on">Monthly</span><span>Yearly −20%</span></div><div class="mk-cards">${cards}</div></div></div>`;
+}
+function mockChart() {
+  const rnd = mulberry(3); let pts = [];
+  for (let i = 0; i <= 60; i++) { const base = i < 34 ? 70 : (i < 52 ? 210 : 80); pts.push(`${i * 10},${200 - base - rnd() * 22}`); }
+  return `<div class="mkwrap"><div class="mk chart"><div class="mk-ch">staging · p95 latency <span>last 7 days</span></div><div class="mk-k"><div><b class="bad">912 ms</b><span>p95 now</span></div><div><b>184 ms</b><span>last week</span></div><div><b>+396%</b><span>change</span></div></div><svg width="592" height="250" viewBox="0 0 600 220" preserveAspectRatio="none"><g stroke="#2a2e38" stroke-width="1">${[40, 90, 140, 190].map(y => `<line x1="0" x2="600" y1="${y}" y2="${y}"/>`).join('')}</g><line x1="340" x2="340" y1="10" y2="210" stroke="#ff6b5e" stroke-dasharray="4 4"/><text x="346" y="22" fill="#ff8a80" font-size="11">deploy · Tue</text><polyline fill="none" stroke="#7aa2ff" stroke-width="2.4" points="${pts.join(' ')}"/></svg></div></div>`;
+}
+function fitMocks(root) {
+  root.querySelectorAll('.mkwrap').forEach(w => { const mk = w.firstElementChild; const s = Math.min(w.offsetWidth / 640, w.offsetHeight / 400); mk.style.transform = `translate(-50%,-50%) scale(${s})`; });
+}
+
+/* ───────── shared bits ───────── */
+function bubbles(c, items, seekable) {
+  return items.map(m => {
+    if (m.file) { const f = c.files.find(x => x.name === m.file); return `<div class="bub file" data-t="${m.t}">${ftile(f.name)}<div class="fm"><div class="fn">${f.name}</div><div class="fs">${f.size}</div></div><button class="ibtn" title="Download">${ic('download', 15)}</button></div>`; }
+    const seek = seekable ? ` data-a="seek" data-v="${m.t}" title="Play from ${fmt(m.t)}"` : '';
+    return `<div class="bub${m.partial ? ' partial' : ''}" data-t="${m.t}"${seek}>${m.text}${m.partial ? '<span class="dots"><i></i><i></i><i></i></span>' : ''}</div>`;
+  }).join('');
+}
+function timeline(c, opts = {}) {
+  const out = []; let g = null; const s = opts.av || 28; const seekable = c.recs && c.recs.length > 0;
+  const flush = () => { if (!g) return; const me = g.who === 'me', p = P[g.who];
+    out.push(`<div class="mg${me ? ' me' : ''}">${me ? '' : av(p, s)}<div class="col"><div class="who">${me ? '' : `<b>${first(p.name)}</b>`}<span>${clock(c, g.t)}</span></div>${bubbles(c, g.items, seekable)}</div></div>`); g = null; };
+  for (const m of c.tx) {
+    if (m.ev) { flush();
+      if (m.rec != null && seekable) out.push(`<button class="ev" data-a="playrec" data-v="${m.rec}">${ic('share', 12)}${m.text} · <span class="lnk">Watch</span></button>`);
+      else out.push(`<div class="ev">${m.ev === 'end' ? ic('phoneoff', 12) : m.ev === 'start' ? ic('phone', 12) : m.ev === 'share' ? ic('share', 12) : ic('login', 12)}${m.text} · ${clock(c, m.t)}</div>`);
+      continue; }
+    if (!g || g.who !== m.who || m.t - g.last > 120) { flush(); g = {who: m.who, t: m.t, last: m.t, items: []}; }
+    g.items.push(m); g.last = m.t;
+  }
+  flush(); return out.join('');
+}
+function empty(icon, title, text) { return `<div class="empty"><div class="ei">${ic(icon, 22)}</div><b>${title}</b><p>${text}</p></div>`; }
+
+/* ───────── 1 · onboarding ───────── */
+function onboarding() {
+  const W = (x, y, inner, lbl, sub) => `<div class="lbl" style="left:${x + 2}px;top:${y - 26}px">${lbl}<span>${sub}</span></div><div class="win app" style="left:${x}px;top:${y}px;width:400px;height:540px">${LIGHTS}${inner}</div>`;
+  const signIn = `<div class="onb"><div class="logo"><span></span><span></span></div><h2 class="ot">Welcome to Quipcall</h2><p class="os">Small, fast calls with the people you work with.</p>
+    <div class="ostack"><label class="field"><input placeholder="Email" autocomplete="off" spellcheck="false"><button class="kbtn" data-tip="Sign in with a passkey">${ic('key', 15)}</button></label>
+      <div class="af"><div class="af-i">${ic('key', 16)}<span><b>nikita@example.com</b><small>Passkey · Touch ID</small></span></div><div class="af-n">Suggested by macOS when this Mac has a passkey</div></div>
+      <button class="bigbtn pri">Continue with email</button></div>
+    <div class="or">or</div>
+    <div class="oauth"><button>${brand('github', 15)}GitHub</button><button>${brand('google', 15)}Google</button><button class="soon" title="Coming later">${brand('apple', 15)}Apple<em>soon</em></button></div>
+    <div class="spacer"></div><div class="ofoot">Just joining a call? <a>Continue as guest ${ic('arrow', 13)}</a></div></div>`;
+  const check = `<div class="onb"><div class="oicon">${ic('mail', 26)}</div><h2 class="ot">Check your inbox</h2><p class="os">We sent a sign-in link to <b style="color:var(--q-text)">nikita@example.com</b>.<br>Open it on this Mac, or type the code from the email.</p>
+    <div class="otp">${['4', '8', '2', '', '', ''].map(v => `<input maxlength="1" inputmode="numeric" value="${v}">`).join('')}</div>
+    <button class="bigbtn sec" style="width:auto;padding:0 18px">${ic('mail', 15)}Open Mail</button>
+    <div class="spacer"></div><div class="ofoot"><span class="faint">Resend in 0:24</span>·<a>Use another email</a></div></div>`;
+  const profile = `<div class="onb"><div class="pav">${av(P.me, 84, 'pav-me')}<button class="pcam" data-tip="Add a photo">${ic('camera', 13)}</button></div><h2 class="ot">What should people call you?</h2><p class="os">Shown on your circle and in transcripts.</p>
+    <div class="ostack"><label class="field"><input class="namein" data-target="pav-me" value="Nikita" spellcheck="false"></label>
+      <div class="optrow" data-toggle><span class="oi">${ic('finger', 20)}</span><span class="t2"><b>Use Touch ID next time</b><small>Saves a passkey to iCloud Keychain</small></span><span class="switch on"></span></div>
+      <button class="bigbtn pri">Continue</button></div>
+    <div class="spacer"></div><div class="ofoot faint">Signed up as nikita@example.com</div></div>`;
+  const guest = `<div class="onb"><div class="gwho">${avs(['anna', 'lee', 'tom'], 22)}<span class="live-dot"></span>Anna, Lee and Tom are in the call</div><h2 class="ot" style="margin-top:14px">Join Design review</h2>
+    <div class="gprev"><div class="gcircle"><span class="av" id="gav" style="--s:112px;--h:210;background:var(--q-raised2);color:var(--q-dim)">${ic('user', 40)}</span></div><div class="gtog"><button class="gt" data-tip="Mic on">${ic('mic', 16)}</button><button class="gt off" data-tip="Camera off">${ic('videooff', 16)}</button></div></div>
+    <div class="ostack" style="margin-top:18px"><label class="field"><input class="namein" data-target="gav" placeholder="Your name" spellcheck="false"></label><button class="bigbtn pri">Join as guest</button></div>
+    <div class="spacer"></div><div class="ofoot"><a>Sign in</a><span class="faint">to keep rooms, history and transcripts</span></div></div>`;
+  return W(40, 50, signIn, '1a', 'Sign in or sign up') + W(460, 50, check, '1b', 'Link or code') + W(40, 642, profile, '1c', 'First sign-in: name and passkey') + W(460, 642, guest, '1d', 'Guest, opened from a call link');
+}
+function wireOnboarding(root) {
+  root.querySelectorAll('.namein').forEach(inp => inp.addEventListener('input', () => {
+    const t = document.getElementById(inp.dataset.target), v = inp.value.trim();
+    if (!v) { if (t.id === 'gav') { t.style.cssText = '--s:112px;--h:210;background:var(--q-raised2);color:var(--q-dim)'; t.innerHTML = ic('user', 40); } else t.textContent = ''; return; }
+    t.style.background = ''; t.style.color = ''; t.style.setProperty('--h', hue(v.toLowerCase())); t.textContent = initials(v);
+  }));
+  const otp = [...root.querySelectorAll('.otp input')];
+  otp.forEach((inp, i) => {
+    inp.addEventListener('input', () => { inp.value = inp.value.replace(/\D/g, '').slice(-1); if (inp.value && otp[i + 1]) otp[i + 1].focus(); });
+    inp.addEventListener('keydown', e => { if (e.key === 'Backspace' && !inp.value && otp[i - 1]) otp[i - 1].focus(); });
+  });
+  root.querySelectorAll('[data-toggle]').forEach(r => r.addEventListener('click', () => r.querySelector('.switch').classList.toggle('on')));
+}
+
+/* ───────── 2/3 · home window ───────── */
+class Home {
+  constructor(root, init) {
+    this.root = root;
+    this.s = Object.assign({side: 'rooms', sel: 'standup-12', ctab: 'transcript', pos: 0, playing: false, sum: true}, init);
+    root.addEventListener('click', e => this.onClick(e));
+    this.render();
+  }
+  onClick(e) {
+    const a = e.target.closest('[data-a]'); if (!a || !this.root.contains(a)) return;
+    const s = this.s, v = a.dataset.v, c = CALLS[s.sel];
+    switch (a.dataset.a) {
+      case 'side': s.side = v; break;
+      case 'sel': if (s.sel !== v) { this.stop(); Object.assign(s, {sel: v, ctab: 'transcript', pos: 0}); } break;
+      case 'ctab': s.ctab = v; break;
+      case 'nav': { const r = roomOf(s.sel), id = r && r.calls[r.calls.indexOf(s.sel) + Number(v)]; if (id) { this.stop(); Object.assign(s, {sel: id, ctab: 'transcript', pos: 0}); } break; }
+      case 'sum': s.sum = !s.sum; break;
+      case 'todo': { const t = c.summary.todo[Number(v)]; t[2] = !t[2]; break; }
+      case 'seek': s.pos = Number(v); this.play(); return;
+      case 'play': if (s.playing) { this.stop(); this.update(); } else this.play(); return;
+      case 'wave': { const r = a.getBoundingClientRect(); s.pos = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * c.recs[0].dur; this.update(true); return; }
+      case 'playrec': s.ctab = 'transcript'; s.pos = c.recs[Number(v)].from; this.render(); this.play(); return;
+      case 'join': go('basic'); return;
+      default: return;
+    }
+    this.render();
+  }
+  play() { const s = this.s, dur = CALLS[s.sel].recs[0].dur; clearInterval(this.iv); s.playing = true; if (s.pos >= dur) s.pos = 0;
+    this.iv = setInterval(() => { s.pos += 2; if (s.pos >= dur) { s.pos = dur; this.stop(); } this.update(true); }, 100); this.update(true); }
+  stop() { this.s.playing = false; clearInterval(this.iv); }
+  update(follow) {
+    const s = this.s, c = CALLS[s.sel]; if (!c.recs.length || s.ctab !== 'transcript') return;
+    const dur = c.recs[0].dur, pct = Math.min(100, s.pos / dur * 100);
+    const on = this.root.querySelector('.bars.on'); if (on) on.style.setProperty('--p', pct + '%');
+    const cur = this.root.querySelector('.tm.cur'); if (cur) cur.textContent = fmt(s.pos);
+    const pb = this.root.querySelector('.pbtn'); if (pb) pb.innerHTML = ic(s.playing ? 'pause' : 'play', 15);
+    let now = null; this.root.querySelectorAll('.d-body .bub[data-t]').forEach(b => { b.classList.remove('now'); if ((s.pos > 0 || s.playing) && Number(b.dataset.t) <= s.pos) now = b; });
+    if (now) { now.classList.add('now'); if (follow) { const body = this.root.querySelector('.d-body'); const top = now.offsetTop; if (top < body.scrollTop + 20 || top > body.scrollTop + body.clientHeight - 70) body.scrollTo({top: top - 90, behavior: 'smooth'}); } }
+  }
+  sidebar() {
+    const s = this.s; let list;
+    if (s.side === 'rooms') {
+      list = ROOMS.map(r => { const c = CALLS[r.calls[0]], other = r.members.filter(k => k !== 'me'), n = other.length - 1;
+        const meta = c.live ? `<span class="live-dot"></span><span class="livetxt">Live · <span class="timer">12:31</span></span>` : `${SHORT[c.day]} ${c.start} · ${c.dur}`;
+        const end = c.live ? `<button class="btn sm live" data-a="join">Join</button>` : `<button class="ibtn hov" data-a="join" data-tip="Start a call">${ic('phone', 14)}</button>`;
+        return `<div class="row${r.calls.includes(s.sel) ? ' sel' : ''}" data-a="sel" data-v="${r.calls[0]}"><div class="stack">${av(P[other[0]], 36)}${n > 0 ? `<span class="plus">+${n}</span>` : ''}</div><div class="main"><div class="name">${r.name}</div><div class="meta">${meta}</div></div><div class="end">${end}</div></div>`; }).join('');
+    } else {
+      list = HISTORY.map(([day, ids]) => `<div class="grp">${day}</div>` + ids.map(id => { const c = CALLS[id], r = roomOf(id);
+        const other = (r ? r.members : c.people).filter(k => k !== 'me'), n = other.length - 1;
+        const stack = other.length ? `<div class="stack">${av(P[other[0]], 36)}${n > 0 ? `<span class="plus">+${n}</span>` : ''}</div>` : `<div class="stack">${av(P.me, 36)}</div>`;
+        const marks = (c.tx.length ? ic('cc', 12) : '') + (c.recs.length ? ic('recring', 12) : '') + (c.files.length ? ic('clip', 12) : '');
+        const meta = c.live ? `<span class="live-dot"></span><span class="livetxt">Live · <span class="timer">12:31</span></span>` : `${c.start} · ${c.dur}${c.nobody ? ' · nobody joined' : ''}<span class="sp"></span>${marks}`;
+        return `<div class="row${s.sel === id ? ' sel' : ''}" data-a="sel" data-v="${id}">${stack}<div class="main"><div class="name">${titleOf(id)}</div><div class="meta">${meta}</div></div></div>`; }).join('')).join('');
+    }
+    return `<aside class="side"><div class="side-top"><button class="btn sm pri" data-a="join" data-tip="A one-time room · ⌘N">${ic('zap', 13)}Quick call</button></div>
+      <div class="side-ctl"><div class="qseg"><button class="${s.side === 'rooms' ? 'on' : ''}" data-a="side" data-v="rooms">Rooms</button><button class="${s.side === 'history' ? 'on' : ''}" data-a="side" data-v="history">History</button></div><button class="ibtn" data-tip="New room">${ic('plus', 16)}</button></div>
+      <div class="list">${list}</div>
+      <div class="me-row">${av(P.me, 26)}<div class="main" style="flex:1"><div class="name">Nikita</div><div class="meta">Signed in with GitHub</div></div><button class="ibtn" data-tip="Settings">${ic('settings', 15)}</button></div></aside>`;
+  }
+  detail() {
+    const s = this.s, id = s.sel, c = CALLS[id], r = roomOf(id);
+    const actions = c.live ? `<button class="ibtn" data-tip="Copy link">${ic('link', 15)}</button><button class="btn live" data-a="join">${ic('phone', 13)}Join call</button>`
+      : r ? `<button class="ibtn" data-tip="Copy link">${ic('link', 15)}</button><button class="btn pri" data-a="join">${ic('phone', 13)}Call</button>`
+      : `<button class="btn">${ic('plus', 13)}Keep as room</button><button class="btn pri" data-a="join">${ic('phone', 13)}Call again</button>`;
+    let sub;
+    if (c.live) sub = `<div class="livebar"><span class="live-dot"></span><b>Live</b><span class="timer">12:31</span><span class="dim">·</span>${avs(c.people, 20)}<span>${names(c.people)} are in the call</span></div>`;
+    else { const i = r ? r.calls.indexOf(id) : 0, older = r && r.calls[i + 1], newer = r && i > 0;
+      sub = `<div class="d-sub">${avs(c.people, 20)}<span>${names(c.people)}</span><span class="sp"></span><div class="cnav"><button data-a="nav" data-v="1" ${older ? '' : 'disabled'} title="Earlier call">${ic('left', 14)}</button><span>${c.day} ${c.start} · ${c.dur}</span><button data-a="nav" data-v="-1" ${newer ? '' : 'disabled'} title="Later call">${ic('right', 14)}</button></div></div>`; }
+    const tabs = c.live ? [['transcript', 'Transcript', ''], ['files', 'Files', c.files.length]] : [['transcript', 'Transcript', ''], ['recordings', 'Recordings', c.recs.length], ['files', 'Files', c.files.length]];
+    const tabHtml = `<div class="tabs">${tabs.map(([k, l, n]) => `<button class="tab${s.ctab === k ? ' on' : ''}" data-a="ctab" data-v="${k}">${l}${n !== '' ? `<span class="n">${n}</span>` : ''}</button>`).join('')}</div>`;
+    let body = '', player = '';
+    if (s.ctab === 'transcript') {
+      if (c.nobody) body = empty('users', 'Nobody else joined', `The link still works if you want to try again: ${'quipcall.com/q/7hk2'}`);
+      else if (c.txOff) body = empty('ccoff', 'No transcript', 'Transcription was off for this call. Turn it on from the side panel during a call.');
+      else {
+        const sum = c.summary ? `<div class="sum"><button class="sum-h" data-a="sum">${ic('sparkles', 15)}Summary <small>written after the call</small><span class="chev">${ic(s.sum ? 'up' : 'down', 14)}</span></button>${s.sum ? `<ul>${c.summary.points.map(p => `<li>${p}</li>`).join('')}</ul><div class="sum-h2">Action items</div><ul class="todo">${c.summary.todo.map(([w, t, d], i) => `<li><button class="cb${d ? ' on' : ''}" data-a="todo" data-v="${i}">${d ? ic('check', 11) : ''}</button>${av(P[w], 18)}<span class="${d ? 'done' : ''}">${t}</span></li>`).join('')}</ul>` : ''}</div>` : '';
+        body = sum + timeline(c);
+      }
+      if (c.recs.length) {
+        const rnd = mulberry(11), dur = c.recs[0].dur, bars = Array.from({length: 96}, (_, i) => { const t0 = i / 96 * dur, t1 = (i + 1) / 96 * dur; const talk = c.tx.some(m => !m.ev && m.t >= t0 - 25 && m.t <= t1 + 25); return Math.round((talk ? .45 + rnd() * .55 : .14 + rnd() * .22) * 100); });
+        const b = bars.map(h => `<i style="height:${h}%"></i>`).join('');
+        player = `<div class="player"><button class="pbtn" data-a="play">${ic('play', 15)}</button><span class="tm cur">00:00</span><div class="wave" data-a="wave"><div class="bars">${b}</div><div class="bars on">${b}</div></div><span class="tm">${fmt(dur)}</span><span class="psel">${c.recs[0].title}${ic('down', 12)}</span></div>`;
+      }
+    } else if (s.ctab === 'recordings') {
+      body = c.recs.length ? `<div class="recs">${c.recs.map((rc, i) => {
+        const th = rc.thumb === 'grid' ? `<div class="g4">${['anna', 'max', 'lee', 'sofia'].map(k => `<div>${vid(P[k])}</div>`).join('')}</div>` : rc.thumb === 'chart' ? mockChart() : `<div class="athumb">${Array.from({length: 48}, (_, j) => `<i style="height:${18 + Math.round(Math.abs(Math.sin(j * 1.7) * 60))}%"></i>`).join('')}</div>`;
+        const when = rc.from ? `${clock(c, rc.from)}–${clock(c, rc.from + rc.dur)}` : `${c.start}–${clock(c, rc.dur)}`;
+        return `<div class="rec" data-a="playrec" data-v="${i}"><div class="thumb">${th}<span class="dur">${fmt(rc.dur)}</span><div class="pl"><span>${ic('play', 18)}</span></div></div><div class="rec-t">${rc.title}</div><div class="rec-m">${when} · ${rc.kind} · ${rc.size}</div><div class="rec-a"><button class="ibtn" data-tip="Show in Finder">${ic('folder', 14)}</button><button class="ibtn" data-tip="Copy link">${ic('link', 14)}</button><button class="ibtn" data-tip="More">${ic('dots', 14)}</button></div></div>`; }).join('')}</div>`
+        : empty('recring', 'No recordings', 'Press ⏺ during a call to record it. Everyone in the call sees a Recording pill while it runs.');
+    } else {
+      body = (c.files.length ? `<div>${c.files.map(f => `<div class="frow">${ftile(f.name)}<div class="fm"><div class="fn">${f.name}</div><div class="fs">${f.size} · ${first(P[f.who].name)} at ${clock(c, f.t)}</div></div><button class="ibtn" data-tip="Download">${ic('download', 15)}</button></div>`).join('')}</div>` : '')
+        + `<div class="drop">${ic('upload', 15)}Drop files here to add them to this call</div>`;
+    }
+    return `<main class="detail"><div class="d-top"><h3>${titleOf(id)}</h3><span class="sp"></span>${actions}</div>${sub}${tabHtml}<div class="d-body">${body}</div>${player}</main>`;
+  }
+  render() { this.root.innerHTML = `${LIGHTS}<div class="home">${this.sidebar()}${this.detail()}</div>`; fitMocks(this.root); tickTimers(); this.update(false); }
+}
+
+/* ───────── 4 · call: basic ───────── */
+function tile(k, o = {}) {
+  const p = P[k];
+  const inner = o.video ? vid(p) : `<div class="tav" style="--h:${hue(p.id)}">${av(p, o.avs || 72)}</div>`;
+  return `<div class="tile" data-p="${k}">${inner}<div class="nm">${o.muted ? `<span class="mo">${ic('micoff', 12)}</span>` : ''}${k === 'me' ? 'You' : first(p.name)}</div></div>`;
+}
+class Basic {
+  constructor(root) {
+    this.root = root; this.s = {layout: 'grid', panel: true, ptab: 'transcript', mic: true, cam: true, rec: true, cc: true, share: false, menu: null};
+    root.addEventListener('click', e => this.onClick(e)); this.render();
+  }
+  set(k, v) { this.s[k] = v; this.render(); }
+  onClick(e) {
+    const a = e.target.closest('[data-a]'); const s = this.s;
+    if (!a) { if (s.menu && !e.target.closest('.dmenu')) { s.menu = null; this.render(); } return; }
+    const v = a.dataset.v;
+    switch (a.dataset.a) {
+      case 'mic': s.mic = !s.mic; break;
+      case 'cam': s.cam = !s.cam; break;
+      case 'share': s.share = !s.share; break;
+      case 'rec': s.rec = !s.rec; break;
+      case 'cc': s.cc = !s.cc; break;
+      case 'panel': s.panel = v ? true : !s.panel; if (v) s.ptab = v; syncSeg('ctl-panel', s.panel ? 'on' : 'off'); break;
+      case 'ptab': s.ptab = v; break;
+      case 'menu': s.menu = s.menu === v ? null : v; break;
+      case 'mini': go('minimal'); return;
+      case 'noop': return;
+      default: return;
+    }
+    this.render();
+  }
+  stage() {
+    const s = this.s, me = tile('me', {video: s.cam, muted: !s.mic});
+    if (s.layout === 'alone') return `<div class="alone"><div class="me-c">${s.cam ? vid(P.me) : `<div class="tav" style="--h:${hue(P.me.id)}">${av(P.me, 132)}</div>`}</div><b>Waiting for others</b><span class="dim">The link is copied. Anyone with it can join.</span><div class="linkbox">quipcall.com/r/design-review<button class="btn sm pri">${ic('copy', 12)}Copy</button></div></div>`;
+    if (s.layout === 'speaker') return `<div class="tiles spk"><div class="big">${tile('anna', {video: 1})}</div><div class="strip">${tile('lee', {video: 1})}${tile('tom', {muted: 1, avs: 48})}${me}</div></div>`;
+    if (s.layout === 'share') return `<div class="tiles shr"><div class="scrtile">${mockPricing()}<div class="nm">${ic('share', 12)}Lee's screen</div></div><div class="faces-col">${tile('anna', {video: 1})}${tile('lee', {video: 1})}${tile('tom', {muted: 1, avs: 44})}${me}</div></div>`;
+    return `<div class="tiles grid4">${tile('anna', {video: 1})}${tile('lee', {video: 1})}${tile('tom', {muted: 1})}${me}</div>`;
+  }
+  menu() {
+    const s = this.s; if (!s.menu) return '';
+    const item = (on, t) => `<div class="dm-i"><span class="ck">${on ? ic('check', 13) : ''}</span>${t}</div>`;
+    if (s.menu === 'mic') return `<div class="dmenu"><div class="dm-h">Microphone</div>${item(1, 'MacBook Pro Microphone')}${item(0, 'AirPods Pro')}<div class="dm-h">Speaker</div>${item(1, 'MacBook Pro Speakers')}${item(0, 'AirPods Pro')}<div class="dm-sep"></div><div class="dm-h">Noise filter</div><div class="dm-seg"><button class="on">Strong</button><button>Light</button><button>Off · music</button></div><div class="dm-note">Strong is DeepFilterNet, Light is WebRTC's filter.</div></div>`;
+    return `<div class="dmenu" style="left:56px"><div class="dm-h">Camera</div>${item(1, 'FaceTime HD Camera')}${item(0, 'iPhone camera (Continuity)')}<div class="dm-sep"></div><div class="dm-i"><span class="ck"></span>Mirror my video<span class="sp"></span><span class="switch on"></span></div><div class="dm-i"><span class="ck"></span>Show my own tile<span class="sp"></span><span class="switch on"></span></div></div>`;
+  }
+  panel() {
+    const s = this.s; if (!s.panel) return '';
+    const c = CALLS['design-live'];
+    const tabs = [['transcript', 'Transcript'], ['files', 'Files'], ['people', 'People']].map(([k, l]) => `<button class="tab${s.ptab === k ? ' on' : ''}" data-a="ptab" data-v="${k}">${l}${k === 'files' ? '<span class="n">1</span>' : k === 'people' ? '<span class="n">4</span>' : ''}</button>`).join('');
+    let body;
+    if (s.ptab === 'transcript') body = s.cc ? `<div class="p-h"><span class="live-dot"></span>Live · transcribed on Anna's Mac<span class="sp"></span><span class="switch on" data-a="cc"></span></div>${timeline(c, {av: 22})}` : `<div class="p-h">Transcription is off<span class="sp"></span><span class="switch" data-a="cc"></span></div>${empty('ccoff', 'Not transcribing', 'Turn it on and one Mac in the call transcribes for everyone.')}`;
+    else if (s.ptab === 'files') body = `<div class="frow" style="margin-top:6px">${ftile('pricing-v3.fig')}<div class="fm"><div class="fn">pricing-v3.fig</div><div class="fs">4.8 MB · Anna at 11:03</div></div><button class="ibtn">${ic('download', 15)}</button></div><div class="drop">${ic('upload', 15)}Drop a file anywhere on the call</div>`;
+    else body = `<div class="linkbox" style="margin:10px 0 8px;justify-content:space-between"><span class="dim">quipcall.com/r/design-review</span><button class="btn sm pri">${ic('copy', 12)}Copy</button></div>
+      ${[['anna', 'speaking'], ['lee', ''], ['tom', 'muted'], ['me', s.mic ? '' : 'muted']].map(([k, st]) => `<div class="prow">${av(P[k], 28)}<span class="name">${k === 'me' ? 'Nikita (you)' : P[k].name}</span>${st === 'muted' ? `<span class="mo">${ic('micoff', 15)}</span>` : ic('mic', 15)}</div>`).join('')}`;
+    return `<aside class="panel"><div class="p-tabs">${tabs}<span class="sp"></span><button class="ibtn" data-a="panel">${ic('x', 15)}</button></div><div class="p-body">${body}</div></aside>`;
+  }
+  render() {
+    const s = this.s;
+    const people = s.layout === 'alone' ? ['me'] : ['anna', 'lee', 'tom', 'me'];
+    const pills = (s.rec ? '<span class="pill rec"><i></i>Recording</span>' : '') + (s.cc && s.layout !== 'alone' ? `<span class="pill">${ic('cc', 13)}Transcribing</span>` : '') + (s.share ? `<span class="pill acc">${ic('share', 13)}You're sharing</span>` : '');
+    const toolbar = `<div class="toolbar">
+      <div class="split${s.mic ? '' : ' off'}"><button class="tb" style="background:none" data-a="mic" data-tip="${s.mic ? 'Mute' : 'Unmute'} · ⌘D">${ic(s.mic ? 'mic' : 'micoff', 18)}</button><button class="chev" data-a="menu" data-v="mic">${ic('up', 13)}</button></div>
+      <div class="split${s.cam ? '' : ' off'}"><button class="tb" style="background:none" data-a="cam" data-tip="Camera · ⌘E">${ic(s.cam ? 'video' : 'videooff', 18)}</button><button class="chev" data-a="menu" data-v="cam">${ic('up', 13)}</button></div>
+      <button class="tb${s.share ? ' acc' : ''}" data-a="share" data-tip="${s.share ? 'Stop sharing' : 'Share screen'}">${ic('share', 18)}</button>
+      <button class="tb recb${s.rec ? ' on' : ''}" data-a="rec" data-tip="${s.rec ? 'Stop recording' : 'Record'}">${ic('recring', 18)}</button>
+      <span class="sep"></span>
+      <button class="tb${s.panel ? ' sel' : ''}" data-a="panel" data-tip="Transcript, files, people">${ic('panel', 18)}</button>
+      <button class="tb" data-a="mini" data-tip="Minimal: one floating capsule">${ic('min', 18)}</button>
+      <button class="leave" data-a="noop">${ic('phoneoff', 16)}Leave</button>${this.menu()}</div>`;
+    this.root.innerHTML = `<div class="win app" style="left:20px;top:20px;width:1040px;height:680px" data-livecall data-mic="${s.mic ? 'on' : 'off'}">${LIGHTS}<div class="call">
+      <div class="c-top"><div class="c-title"><b>Design review</b><span class="timer dim">12:31</span></div>${pills}<span class="sp"></span>${avs(people, 22)}<button class="cbtn" data-a="panel" data-v="people">${ic('userplus', 14)}Invite</button></div>
+      <div class="c-body"><div class="stagearea">${this.stage()}${toolbar}</div>${this.panel()}</div></div></div>`;
+    fitMocks(this.root); tickTimers(); speak();
+  }
+}
+
+/* ───────── 5 · call: minimal ───────── */
+function editor() {
+  const rnd = mulberry(7), cols = ['#c792ea', '#82aaff', '#c3e88d', '#f78c6c', '#89ddff', '#9aa3b2', '#ffcb6b']; let lines = '';
+  for (let i = 0; i < 24; i++) { const ind = [0, 16, 32, 16][Math.floor(rnd() * 4)]; let segs = ''; const n = 1 + Math.floor(rnd() * 4);
+    for (let j = 0; j < n; j++) segs += `<i style="width:${Math.round(18 + rnd() * 110)}px;background:${cols[Math.floor(rnd() * cols.length)]}"></i>`;
+    lines += `<div class="cl"><span class="ln">${i + 1}</span><span style="width:${ind}px"></span>${i % 7 === 3 ? '' : segs}</div>`; }
+  return `<div class="ed app"><div class="ed-top">${LIGHTS}call.rs — quipcall</div><div class="ed-body">${lines}</div></div>`;
+}
+class Mini {
+  constructor(root) { this.root = root; this.s = {v: 'row', pin: false, menu: false, mic: true}; root.addEventListener('click', e => this.onClick(e)); this.render(); }
+  set(k, v) { this.s[k] = v; this.render(); }
+  onClick(e) {
+    const a = e.target.closest('[data-a]'), s = this.s;
+    if (!a) { if (s.menu && !e.target.closest('.mpop')) { s.menu = false; this.render(); } return; }
+    switch (a.dataset.a) {
+      case 'menu': s.menu = !s.menu; break;
+      case 'mic': s.mic = !s.mic; break;
+      case 'expand': go('basic'); return;
+      case 'more': s.v = 'row'; syncSeg('ctl-mini', 'row'); break;
+      default: return;
+    }
+    this.render();
+  }
+  face(k, size) {
+    const p = P[k], s = this.s, video = ['anna', 'lee', 'max', 'me'].includes(k), muted = k === 'tom';
+    const badge = k === 'me' ? `<button class="badge mybadge${s.mic ? '' : ' muted'}" data-a="mic">${ic(s.mic ? 'mic' : 'micoff', 10)}</button>` : muted ? `<span class="badge">${ic('micoff', 10)}</span>` : '';
+    return `<div class="face" data-p="${k}" style="--s:${size}px"><div class="clip">${video ? vid(p) : av(p, size)}</div>${badge}<span class="tip">${k === 'me' ? 'You' : p.name}</span></div>`;
+  }
+  capsule() {
+    const s = this.s, v = s.v, size = v === 'big' ? 84 : 44;
+    const keys = v === 'nine' ? ['anna', 'lee', 'tom', 'max', 'sofia', 'me'] : ['anna', 'lee', 'tom', 'me'];
+    const faces = keys.map(k => this.face(k, size)).join('') + (v === 'nine' ? `<div class="face chip" style="--s:${size}px" data-a="more"><div class="clip">+3</div><span class="tip">Mia, Daniel, Kai</span></div>` : '');
+    const tb = (a, icon, tip, cls = '') => `<button class="tb ${cls}" data-a="${a}" data-tip="${tip}">${ic(icon, 16)}</button>`;
+    const more = `<div class="more">${v !== 'col' ? '<span class="timer">12:31</span>' : ''}${tb('noop', 'video', 'Camera')}${tb('noop', 'share', 'Share screen')}${tb('noop', 'recring', 'Record', 'recb')}${tb('noop', 'link', 'Copy link')}${tb('expand', 'max', 'Open the call window')}</div>`;
+    const ctl = `${more}<button class="tb${s.mic ? '' : ' off'}" data-a="mic" data-tip="${s.mic ? 'Mute' : 'Unmute'}">${ic(s.mic ? 'mic' : 'micoff', 16)}</button><button class="leave" data-tip="Leave">${ic('phoneoff', 15)}</button>`;
+    if (v === 'big') return `<div class="cap-big"><div class="faces">${faces}</div><div class="capsule">${ctl}</div></div>`;
+    return `<div class="capsule${v === 'col' ? ' col' : ''}"><div class="faces">${faces}</div><span class="vsep"></span>${ctl}</div>`;
+  }
+  render() {
+    const s = this.s;
+    const menubar = `<div class="menubar">${brand('apple', 14)}<b>Code</b><span>File</span><span>Edit</span><span>Selection</span><span>View</span><span>Window</span>
+      <div class="mb-r"><span class="mb-q${s.menu ? ' open' : ''}" data-a="menu"><svg width="18" height="14" viewBox="0 0 18 14" aria-hidden="true"><circle cx="6" cy="7" r="5" fill="currentColor"/><circle cx="14" cy="9" r="3.2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span class="mb-pill"><span class="timer">12:31</span></span></span>${ic('wifi', 15)}${ic('battery', 19)}<span>Sat 7 Nov  11:14</span></div></div>`;
+    const pop = s.menu ? `<div class="mpop app"><div class="mp-call"><div class="r1"><span class="live-dot"></span><b>Design review</b><span class="timer dim">12:31</span></div><div class="r2"><button class="tb" data-a="mic">${ic(s.mic ? 'mic' : 'micoff', 15)}</button><button class="tb">${ic('video', 15)}</button><button class="tb">${ic('share', 15)}</button><button class="tb" data-a="expand">${ic('max', 15)}</button><span class="sp"></span><button class="leave">Leave</button></div></div>
+      <div class="mp-sec">Rooms</div>${ROOMS.filter(r => r.id !== 'design').map(r => { const c = CALLS[r.calls[0]], o = r.members.filter(k => k !== 'me'); return `<div class="mp-row"><div class="stack">${av(P[o[0]], 26)}${o.length > 1 ? `<span class="plus">+${o.length - 1}</span>` : ''}</div><div class="name">${r.name}<div class="meta">${SHORT[c.day]} · ${c.dur}</div></div><button class="ibtn">${ic('phone', 14)}</button></div>`; }).join('')}
+      <div class="mp-sep"></div><div class="mp-i">${ic('zap', 14)}Quick call<kbd>⌘N</kbd></div><div class="mp-i">${ic('panel', 14)}Open Quipcall<kbd>⌘O</kbd></div><div class="mp-i">${ic('settings', 14)}Settings…<kbd>⌘,</kbd></div></div>` : '';
+    const share = s.v === 'share' ? `<div class="sharewin app">${mockPricing()}<div class="nm">${ic('share', 12)}Lee's screen · 15 fps</div><button class="sw-fs" data-tip="Fullscreen">${ic('max', 14)}</button></div>` : '';
+    this.root.innerHTML = `${menubar}${editor()}${share}<div class="app${s.pin ? ' pin' : ''}" data-livecall data-mic="${s.mic ? 'on' : 'off'}">${this.capsule()}</div>${pop}`;
+    fitMocks(this.root); tickTimers(); speak();
+  }
+}
+
+/* ───────── page plumbing ───────── */
+const board = document.getElementById('board');
+if (!getComputedStyle(document.documentElement).getPropertyValue('--background').trim()) document.body.classList.add('standalone');
+function go(id) { const el = document.getElementById(id); if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'}); }
+function syncSeg(id, v) { document.querySelectorAll(`#${id} button`).forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === v))); }
+function seg(id, fn) { document.getElementById(id).addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; syncSeg(id, b.dataset.v); fn(b.dataset.v); }); }
+const ACCENTS = [['#4f8cff', '#fff', 'Blue (today)'], ['#7c6cff', '#fff', 'Indigo'], ['#2fcf96', '#052a12', 'Mint'], ['#ff6b4a', '#fff', 'Coral']];
+const accEl = document.getElementById('accent');
+accEl.innerHTML = ACCENTS.map(([c, , n], i) => `<button class="sw" style="background:${c}" title="${n}" aria-label="${n}" aria-pressed="${i === 0}" data-i="${i}"></button>`).join('');
+accEl.addEventListener('click', e => { const b = e.target.closest('.sw'); if (!b) return; const [c, on] = ACCENTS[Number(b.dataset.i)]; board.style.setProperty('--q-accent', c); board.style.setProperty('--q-on-accent', on); accEl.querySelectorAll('.sw').forEach(x => x.setAttribute('aria-pressed', String(x === b))); });
+seg('appearance', v => board.dataset.appearance = v);
+
+const T0 = Date.now() - (12 * 60 + 31) * 1000;
+function tickTimers() { const t = Math.floor((Date.now() - T0) / 1000); document.querySelectorAll('.timer').forEach(el => { el.textContent = fmt(t); }); }
+const SEQ = ['anna', 'anna', 'lee', 'lee', 'anna', 'me', 'me', 'anna', 'lee'];
+let seqI = 0;
+function speak() { const who = SEQ[seqI % SEQ.length];
+  document.querySelectorAll('[data-livecall]').forEach(root => { const w = who === 'me' && root.dataset.mic === 'off' ? null : who;
+    root.querySelectorAll('[data-p]').forEach(el => el.classList.toggle('speaking', el.dataset.p === w)); }); }
+setInterval(tickTimers, 1000);
+setInterval(() => { seqI++; speak(); }, 1700);
+
+const cvOnb = document.getElementById('cv-onb'); cvOnb.innerHTML = onboarding(); wireOnboarding(cvOnb);
+new Home(document.getElementById('cv-home').appendChild(Object.assign(document.createElement('div'), {className: 'win app', style: 'left:20px;top:20px;width:960px;height:660px'})), {sel: 'design-live'});
+new Home(document.getElementById('cv-fin').appendChild(Object.assign(document.createElement('div'), {className: 'win app', style: 'left:20px;top:20px;width:960px;height:660px'})), {sel: 'standup-12', side: 'history', pos: 380});
+const basic = new Basic(document.getElementById('cv-basic'));
+seg('ctl-layout', v => basic.set('layout', v));
+seg('ctl-panel', v => basic.set('panel', v === 'on'));
+const mini = new Mini(document.getElementById('cv-mini'));
+seg('ctl-mini', v => mini.set('v', v));
+seg('ctl-pin', v => mini.set('pin', v === 'pin'));
+
+function fit() {
+  document.querySelectorAll('.stage').forEach(st => {
+    const W = Number(st.dataset.w), H = Number(st.dataset.h), cw = st.clientWidth, k = Math.min(1, cw / W), c = st.firstElementChild;
+    c.style.width = W + 'px'; c.style.height = H + 'px'; c.style.transform = `scale(${k})`;
+    c.style.left = cw > W ? `${(cw - W) / 2}px` : '0'; st.style.height = Math.round(H * k) + 'px';
+  });
+}
+fit(); addEventListener('resize', fit);
+})();
+</script>
+</body>
+</html>

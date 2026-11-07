@@ -9,7 +9,6 @@ use gpui::{
 };
 
 use crate::assets::Icon;
-use crate::bubble::floating_options;
 use crate::call::{Call, Screen};
 use crate::handle::{self, Resizable};
 use crate::mac;
@@ -30,7 +29,7 @@ pub fn open(
 ) -> Option<WindowHandle<ScreenWindow>> {
     let width = bounds.size.width / px(1.0);
     cx.open_window(
-        floating_options(WindowBounds::Windowed(bounds)),
+        mac::floating_options(WindowBounds::Windowed(bounds)),
         |window, cx| cx.new(|cx| ScreenWindow::new(call, screen, width, window, cx)),
     )
     .inspect_err(|e| tracing::warn!("open screen window: {e:#}"))

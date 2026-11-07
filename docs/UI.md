@@ -1,80 +1,83 @@
 # Quipcall UI
 
-Less is more. Outside a call the app is a small list. During a call there is no window at all by default: just faces floating over whatever you're working on.
+Less is more. Outside a call the app is one window: your rooms and their calls. During a call there is no window by default, just one small capsule of faces floating over whatever you're working on.
+
+The clickable prototype these screens were built from is [prototype/ui.html](prototype/ui.html) (open it in a browser). Some of it waits for the backend: sign-in, transcripts, recordings, files.
+
+## First launch
+
+A small window asks what people should call you, with your avatar updating as you type. The name stays on this Mac (`local.json`) until accounts exist; the pencil next to your name on home changes it. `--name` skips the question.
+
+Signing in comes with accounts (Stage 3/4): one screen for sign-in and sign-up (email with a magic link and a 6-digit code, GitHub, Google, Apple later), passkeys offered after the first sign-in and suggested by macOS in the email field, and a guest screen (just a name) that doubles as the pre-join screen for call links. See the prototype.
 
 ## Home
 
-A small window (about 380 × 560):
+One window (960 × 640), two panes:
 
 ```
-┌──────────────────────────────┐
-│ Quipcall               ⚡ Quick │   ← one-time room, starts a call right away
-│                              │
-│ Rooms                      + │
-│  ● Team standup         2 in │   ← persistent rooms (● = call in progress)
-│  ○ Design                    │
-│  ○ Family                    │
-│                              │
-│ Recent                       │
-│  Team standup   today 10:02  32 min · Anna, Max
-│  Quick call     yesterday    5 min · Lee
-└──────────────────────────────┘
+┌──────────────┬───────────────────────────────────────────────┐
+│ ●●●  ⚡Quick │ Team standup ✎                  🔗  🗑  [Call] │
+│ [Rooms|History] +  (A)(M)(L) Anna, Max and you  ‹ Today 10:02 · 32 min › │
+│ (A+3) Team standup │ Transcript   Recordings 0   Files 0    │
+│       Today 10:02 · 32 min │ ┌ Transcripts are on their way… ┐ │
+│ (M+1) Family │ ── Call started · 10:02 ──                     │
+│ …            │ ── Anna joined · 10:02 ──                      │
+│ (N) Nikita ✎ │ ── Call ended · 10:34 · 32 min ──              │
+└──────────────┴───────────────────────────────────────────────┘
 ```
 
-- **Rooms** are persistent (saved, reusable link) or one-time (Quick call: a fresh room that only shows up in history).
-- **Recent** is the call history.
-- Clicking a room joins it. The home window hides and the call starts in minimal mode. Leaving brings it back.
+- **Rooms**: one avatar (whoever you've talked to most there) with "+N", the name, and the last call's day, time and length. Clicking a row shows its latest call; the phone that appears on hover joins.
+- **History**: every call by day (Today, Yesterday, weekday, then the date), quick calls included.
+- **The selected call**: title (rename with the pencil), copy link, remove (press twice), **Call**. Below it, who was there and ‹ › through the room's earlier calls. A quick call offers **Keep as room** and **Call again** instead.
+- **Tabs**: *Transcript* shows the call's timeline (who joined, left and shared, with times) until speech-to-text exists, then transcript lines join it as a chat. *Recordings* and *Files* show empty states until those features exist.
+- **Quick call** is top left; **+** makes a room and puts its name in edit mode.
+- When a call ends, home opens on it.
 
 ## Call: minimal mode (default)
 
 ```
                                    your other apps…
-                                                           ╭────╮
-                                                           │ 🙂 │  Anna
-                                                           ╰────╯
-                                                        ╭────────╮
-                                                        │  you   │
-                                                        ╰────────╯
-              ╭─────────────────────────────────────╮
-              │ 🎙  📷  🖥  🔗  ＋  ⤢  ⏻            │   ← glass toolbar
-              ╰─────────────────────────────────────╯
+
+              ╭──────────────────────────────────────────────────────╮
+              │ (A)(L)(T)(you) │ 4:05  📷  🖥  🔗  ⤢  🎙  ⏻ │   ← one glass capsule
+              ╰──────────────────────────────────────────────────────╯
 ```
 
-- Every participant, you included, is a **floating circle** above all apps and on every Space. Circles never take focus away from what you're doing.
-- A circle shows the person's camera, or their avatar (initials on a colour picked from their name) when the camera is off.
-- **Move** a circle by dragging it. **Resize** by scrolling or pinching over it, or drag the knob with arrows that sits on its rim while you hover, from 64 to 480 px. Every circle starts at 96 px.
-- A soft ring shows who is speaking; a small badge shows a muted mic. Hovering someone's circle shows their name.
-- On **your own circle** the mic badge is a button: click it to mute or unmute. It shows while you're muted, and while you hover otherwise.
-- Someone else's **screen share** floats as a rounded rectangle you can move and resize the same way. **Double-click** it, or press ⤢ on it, to watch it **fullscreen**: macOS fullscreen in its own Space, with the circles and toolbar still on top. Esc, a double-click or ⤡ brings the floating window back where it was.
-- While **you share**, your own circle turns into a live **preview** of what you share: a rounded rectangle in the shape of the screen or window. Your circle (camera or initials, with its mic button) sits in the preview's top-right corner, 96 px across (up to 60% of the preview's height). Stop sharing and it's a circle again.
-- **Several people can share at once**: each share gets its own floating window (one share per person).
-- The **glass toolbar** has: mic · camera · screen share · copy call link · invite · expand to regular mode · leave. Drag it by its empty space.
-- **Screen share** opens a picker window with live thumbnails of your screens and windows and the frame-rate presets (5 / 15 fps for text, 30 / 60 fps for motion). Double-click a thumbnail or press Enter to share. Clicking the share button again stops sharing.
+- Everyone, you included, is a **face** in one floating glass capsule: their camera, or their avatar (initials on a colour picked from their name). The capsule floats above all apps and Spaces and never takes focus.
+- **Mic** and **Leave** are always there. Hovering slides out the rest: the call's time (or the name of the face under the cursor), camera, screen share, copy link, and expand to regular mode. Mic and Leave stay where they are; the faces move left to make room.
+- A green ring shows who's speaking; a red badge, who's muted. On **your own face** the mic badge is a button. It shows while you're muted, and while you hover otherwise.
+- **While you share**, your face turns into a live preview of what you share: a rounded rectangle in the shape of the screen or window.
+- **More than 6 people**: the first few show with a "+N" chip; whoever is speaking always gets a place. Click the chip to see everyone (until the cursor leaves).
+- **Drag** the capsule by any empty spot. Left near the left or right edge of the screen, it turns into a column. **Scroll or pinch** over it to resize the faces (32–96 px, 44 to start).
+- "Joining…", permission prompts and errors show as a line of text in the capsule.
+- Someone else's **screen share** floats as its own rounded rectangle you can move and resize. **Double-click** it, or press ⤢ on it, to watch it **fullscreen** (macOS fullscreen in its own Space). Esc, a double-click or ⤡ brings it back.
+- **Screen share** opens a picker with live thumbnails of your screens and windows and the frame-rate presets (5 / 15 fps for text, 30 / 60 fps for motion). Clicking share again stops sharing.
 
 ## Call: regular mode
 
-One ordinary window with video tiles and the same toolbar at the bottom. The collapse button returns to circles. What you share gets a tile of its own; double-click someone else's share for fullscreen.
+One window (1040 × 680): the room's name and the call's time in the title bar, with "Invite" (copies the link). Tiles sit on a dark stage, a control bar floats under them, and a side panel opens on the right.
+
+- **The layout picks itself**: alone, a card with your face and the call link; 2–4 people, a grid; more, whoever is speaking big with a strip of the others (as many as fit, then "+N"); anyone sharing, the share big and faces in a column. Your own share gets the big tile when nobody else shares.
+- **Controls**: mic, camera, share | side panel, minimal | Leave.
+- **Side panel**: *Transcript* (the live timeline, and transcripts later) and *People* (the call link and everyone, with their mic state).
+- Double-click someone's share for fullscreen. Closing the window doesn't end the call; it goes back to the capsule. Leaving is the red button.
 
 ## Decisions so far (easy to change)
 
-- Every circle starts at 96 px, yours too.
-- Other people's circles show their video when their camera is on (avatars otherwise).
-- Screen shares are rounded rectangles, not circles.
-- Your own share shows as a preview in place of your circle, repainted at up to 15 fps, 320 px along its longer edge to start with.
-- Fullscreen is the native kind (its own Space), so you can still swipe back to your apps while watching.
-- *Invite* copies the call link until accounts and contacts exist; then it lets you pick people to ring.
+- Dark only, with today's blue accent. Colours are named by use in `theme.rs`, so a light set can follow the system later.
+- Avatar colours come from the name, not the call identity, so people keep their colour from call to call.
+- One capsule instead of a window per face (asked for after the prototype). The faces lose the compositor's free circle clip; see below.
+- Recording, files and the device menus (mic/speaker choice, noise filter) wait for their backends; the prototype shows where they go.
 - Rooms and history are stored on this Mac until the backend exists; then they move to the server so everyone in a room sees it.
-- New rooms are named "Room 1", "Room 2", … until there's a text field to rename them.
-- Closing the regular window doesn't end the call; it goes back to circles. Leaving is the red button.
-- Your own circle isn't mirrored yet (GPUI can't flip video; needs its own fix).
-- The share picker needs macOS's Screen Recording permission once (the system picker didn't, but it has no previews).
+- Your own camera isn't mirrored yet (GPUI can't flip video).
+- The share picker needs macOS's Screen Recording permission once.
 - Shares are always H.264, for both text and motion (VP9 cost too much; see FOOTPRINT.md).
 
 ## How it's built
 
-- Each circle and the toolbar is its own borderless, transparent, non-activating panel (GPUI `WindowKind::PopUp`): above other apps, on all Spaces, never steals focus.
-- macOS clips each window's layer to a circle (corner radius = half the size), so video is clipped by the compositor with no extra CPU or GPU work on our side.
-- The one circle inside a window, your camera on your screen preview, can't use that. GPUI clips video only to rectangles, so it's drawn as about 25 horizontal bands, each clipped to the circle's width, under an opaque 3 px ring that hides the steps (`round_video` in `bubble.rs`).
-- Glass is the system blur behind the window (GPUI's `Blurred` background, an `NSVisualEffectView`).
-- No widget library (we dropped the gpui-component plan): the look is custom, and every dependency costs footprint.
+- The capsule and each floating share are borderless, non-activating panels (GPUI `WindowKind::PopUp`): above other apps, on all Spaces, never stealing focus. The capsule's window resizes as it expands, and macOS clips it to a capsule shape (corner radius = half its thickness).
+- Glass is the system blur behind the window (GPUI's `Blurred` background, an `NSVisualEffectView`) under a faint dark tint.
+- GPUI clips video only to rectangles, so round faces and rounded tiles are drawn in horizontal bands, each clipped to the shape's width, under an opaque ring that hides the steps (`rounded_video` in `ui.rs`): about 15 draws for a 44 px face, one more per corner zone of a tile. Patching GPUI's surface shader for rounded corners would make it one draw, but that means vendoring GPUI itself.
+- The text field is GPUI's `input.rs` example, adapted (`text_input.rs`).
+- No widget library: the look is custom, and every dependency costs footprint. Shared pieces (avatars, buttons, tooltips, empty states) are in `ui.rs`.
 - Icons: [Lucide](https://lucide.dev) (ISC licence), embedded as SVG.
