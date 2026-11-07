@@ -8,6 +8,7 @@
 //! executor it likes.
 
 mod camera;
+pub mod denoise;
 pub mod permissions;
 #[cfg(target_os = "macos")]
 pub mod pixel_buffer;
@@ -488,6 +489,10 @@ async fn connect(
             .await?;
     }
 
+    // Load the noise model while the room connects; the microphone track
+    // must wait for it, since it fixes WebRTC's own suppression on creation.
+    let denoise = mic_allowed.then(|| tokio::task::spawn_blocking(denoise::prepare));
+
     // The platform ADM has to exist before the peer connections are created.
     let audio = if use_audio {
         let audio = PlatformAudio::new().context("audio device")?;
@@ -542,6 +547,11 @@ async fn connect(
     if let Some(audio) = audio.filter(|_| mic_allowed) {
         let (room, state, events) = (room.clone(), state.clone(), events.clone());
         tokio::spawn(async move {
+            if let Some(denoise) = denoise
+                && let Err(e) = denoise.await
+            {
+                tracing::error!("noise suppression: {e}");
+            }
             let mic = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
             let options = TrackPublishOptions {
                 source: TrackSource::Microphone,

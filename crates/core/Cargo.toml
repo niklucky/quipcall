@@ -9,6 +9,11 @@ anyhow = "1.0.104"
 async-channel = "2.5.0"
 futures-util = "0.3.34"
 livekit = { version = "0.10.0", features = ["native-tls"] }
+# DeepFilterNet 3 noise suppression, run with tract; the model (~8 MB) is embedded.
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "7b14b895fe7fc42cab72b4a4c1e49c982bd6404b", default-features = false, features = ["tract", "default-model"] }
+ndarray = "0.15"
+# Not used directly: deep_filter needs tract 0.21.4 (0.21.7+ moved to ndarray 0.16).
+tract-onnx = "=0.21.4"
 parking_lot = "0.13.0"
 quipcall-protocol.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
@@ -26,3 +31,7 @@ objc2-core-media = { version = "0.3", default-features = false, features = ["std
 objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
 objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "SCShareableContent", "SCStream", "SCScreenshotManager", "block2", "dispatch2", "libc", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSValue", "NSError", "NSObject", "NSArray"] }
+
+[dev-dependencies]
+# RNNoise, only to compare against in examples/denoise_eval.rs.
+nnnoiseless = { version = "0.5", default-features = false }

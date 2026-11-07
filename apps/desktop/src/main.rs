@@ -19,6 +19,8 @@ use std::io::IsTerminal as _;
 
 use gpui::{App, AppContext as _, Context, Entity, Global, Subscription, WindowHandle};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 use crate::call::{Call, Ended, RoomRef};
 use crate::home::Home;
@@ -247,6 +249,14 @@ impl Shell {
 fn init_logging() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "quipcall_desktop=debug,quipcall_core=debug,livekit=info,warn".into());
+    // DeepFilterNet warns of "clipping" on every frame above full scale, from
+    // the audio thread. Our input gain puts loud voices there on purpose, and
+    // the model works in floating point, so nothing clips. A separate filter,
+    // so no RUST_LOG directive brings it back.
+    let quiet_model = tracing_subscriber::filter::filter_fn(|meta| {
+        let model = meta.target() == "df" || meta.target().starts_with("df::");
+        !model || *meta.level() <= tracing::Level::ERROR
+    });
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
     let file = if std::io::stderr().is_terminal() {
         None
@@ -257,8 +267,10 @@ fn init_logging() {
         Some(file) => builder
             .with_ansi(false)
             .with_writer(std::sync::Mutex::new(file))
+            .finish()
+            .with(quiet_model)
             .init(),
-        None => builder.init(),
+        None => builder.finish().with(quiet_model).init(),
     }
     // Panics would otherwise vanish with stderr.
     let default_hook = std::panic::take_hook();
