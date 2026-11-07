@@ -1,21 +1,23 @@
 --- a/src/peer_connection_factory.cpp
 +++ b/src/peer_connection_factory.cpp
-@@ -16,10 +16,14 @@
+@@ -16,10 +16,16 @@
  
  #include "livekit/peer_connection_factory.h"
  
++#include <algorithm>
 +#include <atomic>
  #include <memory>
  #include <utility>
  #include <vector>
  
++#include "common_audio/resampler/include/push_resampler.h"
 +#include "modules/audio_processing/audio_buffer.h"
 +#include "modules/audio_processing/gain_controller2.h"
 +
  #include "api/audio_codecs/builtin_audio_decoder_factory.h"
  #include "api/audio_codecs/builtin_audio_encoder_factory.h"
  #include "api/audio/builtin_audio_processing_builder.h"
-@@ -46,7 +50,157 @@
+@@ -46,6 +52,196 @@
  #include "rtc_base/thread.h"
  #include "webrtc-sys/src/peer_connection.rs.h"
  #include "webrtc-sys/src/peer_connection_factory.rs.h"
@@ -27,7 +29,8 @@
 +// Rust via the C ABI.
 +extern "C" {
 +// `stream` identifies one APM; `channels` hold `num_frames` floats each, in
-+// the 16-bit range. Called on the capture thread, every 10 ms.
++// the 16-bit range. Called on the capture thread, every 10 ms, always at
++// 48 kHz: other capture rates are resampled around it.
 +typedef void (*quipcall_capture_process_fn)(const void* stream,
 +                                            float* const* channels,
 +                                            size_t num_channels,
@@ -63,7 +66,19 @@
 +    }
 +  }
 +  void Initialize(int sample_rate_hz, int num_channels) override {
-+    sample_rate_hz_ = sample_rate_hz;
++    // WebRTC processes the microphone at the lower of its rate and the
++    // codec's, so 8, 16 or 32 kHz are possible. The filter (DeepFilterNet)
++    // only runs at 48 kHz, and WebRTC's own suppressor is off while it runs.
++    if (sample_rate_hz == kFilterRate) {
++      to_filter_.reset();
++      from_filter_.reset();
++    } else {
++      size_t frames = sample_rate_hz / 100;
++      to_filter_ = std::make_unique<webrtc::PushResampler<float>>(
++          frames, kFilterFrames, 1);
++      from_filter_ = std::make_unique<webrtc::PushResampler<float>>(
++          kFilterFrames, frames, 1);
++    }
 +    webrtc::AudioProcessing::Config::GainController2 config;
 +    config.enabled = true;
 +    config.adaptive_digital.enabled = true;
@@ -75,9 +90,25 @@
 +  }
 +  void Process(webrtc::AudioBuffer* audio) override {
 +    auto process = test_ ? test_process_ : quipcall_capture_process.load();
-+    if (process) {
-+      process(test_ ? test_context_ : this, audio->channels(),
-+              audio->num_channels(), audio->num_frames(), sample_rate_hz_);
++    const void* stream = test_ ? test_context_ : this;
++    if (process && !to_filter_) {
++      process(stream, audio->channels(), audio->num_channels(),
++              audio->num_frames(), kFilterRate);
++    } else if (process) {
++      // The first channel, through the filter at 48 kHz and back. Channels
++      // are copies of the microphone's.
++      float* first = audio->channels()[0];
++      size_t frames = audio->num_frames();
++      to_filter_->Resample(webrtc::MonoView<const float>(first, frames),
++                           webrtc::MonoView<float>(filter_frame_, kFilterFrames));
++      float* channels[] = {filter_frame_};
++      process(stream, channels, 1, kFilterFrames, kFilterRate);
++      from_filter_->Resample(
++          webrtc::MonoView<const float>(filter_frame_, kFilterFrames),
++          webrtc::MonoView<float>(first, frames));
++      for (size_t ch = 1; ch < audio->num_channels(); ++ch) {
++        std::copy(first, first + frames, audio->channels()[ch]);
++      }
 +    }
 +    bool gain = test_ ? test_gain_control_
 +                      : quipcall_capture_gain_control.load();
@@ -89,20 +120,26 @@
 +  void SetRuntimeSetting(webrtc::AudioProcessing::RuntimeSetting) override {}
 +
 + private:
++  static constexpr int kFilterRate = 48000;
++  static constexpr size_t kFilterFrames = kFilterRate / 100;
 +  const bool test_ = false;
 +  const quipcall_capture_process_fn test_process_ = nullptr;
 +  const void* const test_context_ = nullptr;
 +  const bool test_gain_control_ = false;
 +  webrtc::Environment env_ = webrtc::CreateEnvironment();
 +  std::unique_ptr<webrtc::GainController2> gain_control_;
-+  int sample_rate_hz_ = 0;
++  // Set when the microphone is processed at another rate than the filter's.
++  std::unique_ptr<webrtc::PushResampler<float>> to_filter_;
++  std::unique_ptr<webrtc::PushResampler<float>> from_filter_;
++  float filter_frame_[kFilterFrames] = {};
 +};
 +
 +struct QuipcallTestApm {
 +  webrtc::scoped_refptr<webrtc::AudioProcessing> apm;
++  int sample_rate_hz;
 +};
 +}  // namespace
- 
++
 +// `release` runs when an APM goes away; `process` may be null (no filter).
 +extern "C" void quipcall_set_capture_processor(
 +    quipcall_capture_process_fn process,
@@ -127,13 +164,18 @@
 +
 +// Offline tests: an APM set up like a call's microphone on macOS (AEC3,
 +// high-pass filter, NS at kHigh and AGC1 in fixed-digital mode when on; see
-+// ApplyAudioProcessingOptions), with `process` as the extra filter. 48 kHz
-+// mono, 480-sample frames.
-+extern "C" void* quipcall_test_apm_create(bool noise_suppression,
++// ApplyAudioProcessingOptions), with `process` as the extra filter. Mono, at
++// `sample_rate_hz` (8, 16, 32 or 48 kHz), in 10 ms frames.
++extern "C" void* quipcall_test_apm_create(int sample_rate_hz,
++                                          bool noise_suppression,
 +                                          bool gain_control1,
 +                                          bool gain_control2,
 +                                          quipcall_capture_process_fn process,
 +                                          const void* context) {
++  if (sample_rate_hz != 8000 && sample_rate_hz != 16000 &&
++      sample_rate_hz != 32000 && sample_rate_hz != 48000) {
++    return nullptr;
++  }
 +  webrtc::BuiltinAudioProcessingBuilder builder;
 +  builder.SetCapturePostProcessing(std::make_unique<QuipcallCaptureProcessor>(
 +      process, context, gain_control2));
@@ -148,7 +190,7 @@
 +  config.gain_controller1.mode =
 +      webrtc::AudioProcessing::Config::GainController1::kFixedDigital;
 +  apm->ApplyConfig(config);
-+  return new QuipcallTestApm{apm};
++  return new QuipcallTestApm{apm, sample_rate_hz};
 +}
 +
 +// One frame: `render` is what the speaker plays, `capture` the microphone,
@@ -157,7 +199,7 @@
 +                                         const int16_t* render,
 +                                         int16_t* capture) {
 +  auto& test = *static_cast<QuipcallTestApm*>(apm);
-+  webrtc::StreamConfig config(48000, 1);
++  webrtc::StreamConfig config(test.sample_rate_hz, 1);
 +  int16_t played[480];
 +  if (int err = test.apm->ProcessReverseStream(render, config, config, played)) {
 +    return err;
@@ -169,11 +211,10 @@
 +extern "C" void quipcall_test_apm_destroy(void* apm) {
 +  delete static_cast<QuipcallTestApm*>(apm);
 +}
-+
+ 
  namespace livekit_ffi {
  namespace {
- 
-@@ -192,7 +346,11 @@
+@@ -192,7 +388,11 @@
        std::move(std::make_unique<livekit_ffi::VideoDecoderFactory>());
    dependencies.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
    dependencies.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
@@ -186,7 +227,7 @@
  
    webrtc::EnableMedia(dependencies);
    peer_factory_ =
-@@ -248,8 +406,8 @@
+@@ -248,8 +448,8 @@
    // Create an audio source that uses the ADM for capture
    webrtc::AudioOptions audio_options;
    audio_options.echo_cancellation = true;

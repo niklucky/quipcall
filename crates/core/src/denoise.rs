@@ -541,10 +541,20 @@ unsafe extern "C" fn release(stream: *const c_void) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Denoiser, FRAME, Strength, parse_limits};
+    use std::ffi::c_void;
+
+    use super::{Denoiser, FRAME, SAMPLE_RATE, Strength, parse_limits};
 
     fn rms(frame: &[f32]) -> f32 {
         (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt()
+    }
+
+    /// Uniform noise in -0.5..0.5.
+    fn noise(seed: &mut u32) -> f32 {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 17;
+        *seed ^= *seed << 5;
+        *seed as f32 / u32::MAX as f32 - 0.5
     }
 
     #[test]
@@ -556,14 +566,11 @@ mod tests {
         // A voice-like buzz in noise, so both of the model's stages run.
         for n in 0..300 {
             for (i, s) in frame.iter_mut().enumerate() {
-                seed ^= seed << 13;
-                seed ^= seed >> 17;
-                seed ^= seed << 5;
                 let t = (n * FRAME + i) as f32 / 48_000.0;
                 let voice: f32 = (1..20)
                     .map(|h| (std::f32::consts::TAU * 150.0 * h as f32 * t).sin() / h as f32)
                     .sum();
-                *s = voice * 3000.0 + (seed as f32 / u32::MAX as f32 - 0.5) * 3000.0;
+                *s = voice * 3000.0 + noise(&mut seed) * 3000.0;
             }
             denoiser.process(&mut frame).unwrap();
         }
@@ -574,6 +581,124 @@ mod tests {
             frame.fill(0.0);
             denoiser.process(&mut frame).unwrap();
             assert!(rms(&frame) < 20.0, "frame {n}: {}", rms(&frame));
+        }
+    }
+
+    type ProcessFn = unsafe extern "C" fn(*const c_void, *const *mut f32, usize, usize, i32);
+
+    // From our webrtc-sys patch: an APM set up like a call's microphone.
+    unsafe extern "C" {
+        fn quipcall_test_apm_create(
+            sample_rate_hz: i32,
+            noise_suppression: bool,
+            gain_control1: bool,
+            gain_control2: bool,
+            process: Option<ProcessFn>,
+            context: *const c_void,
+        ) -> *mut c_void;
+        fn quipcall_test_apm_process(
+            apm: *mut c_void,
+            render: *const i16,
+            capture: *mut i16,
+        ) -> i32;
+        fn quipcall_test_apm_destroy(apm: *mut c_void);
+    }
+
+    /// The filter in an offline APM: the model, or nothing.
+    struct Probe {
+        denoiser: Option<Denoiser>,
+        /// Frames that came at another rate or size than the model's, or
+        /// that it failed on.
+        bad_frames: usize,
+    }
+
+    unsafe extern "C" fn probe_hook(
+        context: *const c_void,
+        channels: *const *mut f32,
+        _num_channels: usize,
+        num_frames: usize,
+        sample_rate_hz: i32,
+    ) {
+        // SAFETY: `context` is the test's `Probe`, alive and touched only by
+        // the APM's processing, on the test's thread. WebRTC passes valid
+        // buffers.
+        let probe = unsafe { &mut *(context as *mut Probe) };
+        if sample_rate_hz != SAMPLE_RATE || num_frames != FRAME {
+            probe.bad_frames += 1;
+            return;
+        }
+        let frame = unsafe { std::slice::from_raw_parts_mut(*channels, num_frames) };
+        if let Some(denoiser) = &mut probe.denoiser
+            && denoiser.process(frame).is_err()
+        {
+            probe.bad_frames += 1;
+        }
+    }
+
+    /// Runs 3 s of `input(sample)` through a call's APM at `rate`, with the
+    /// model (or nothing) as its filter. Returns the power in and out over
+    /// the last second, and the probe's bad frames.
+    fn through_apm(
+        rate: i32,
+        model: bool,
+        mut input: impl FnMut(usize) -> f32,
+    ) -> (f64, f64, usize) {
+        let mut probe = Box::new(Probe {
+            denoiser: model.then(|| {
+                let mut d = Denoiser::new().unwrap();
+                d.set_strength(Strength::CALLS);
+                d
+            }),
+            bad_frames: 0,
+        });
+        let context = &mut *probe as *mut Probe as *const c_void;
+        // SAFETY: the APM is destroyed below, while `probe` is alive.
+        let apm = unsafe {
+            quipcall_test_apm_create(rate, false, false, false, Some(probe_hook), context)
+        };
+        assert!(!apm.is_null());
+        let len = rate as usize / 100;
+        let silence = vec![0i16; len];
+        let (mut power_in, mut power_out) = (0.0, 0.0);
+        for n in 0..300 {
+            let mut frame: Vec<i16> = (0..len).map(|i| input(n * len + i) as i16).collect();
+            let power = |f: &[i16]| f.iter().map(|&s| f64::from(s).powi(2)).sum::<f64>();
+            if n >= 200 {
+                power_in += power(&frame);
+            }
+            let err =
+                unsafe { quipcall_test_apm_process(apm, silence.as_ptr(), frame.as_mut_ptr()) };
+            assert_eq!(err, 0, "APM error");
+            if n >= 200 {
+                power_out += power(&frame);
+            }
+        }
+        unsafe { quipcall_test_apm_destroy(apm) };
+        (power_in, power_out, probe.bad_frames)
+    }
+
+    /// WebRTC processes the microphone at the lower of its rate and the
+    /// codec's, so the filter may sit in a 16 or 32 kHz APM, where WebRTC's
+    /// own suppressor is off too. It must still get 48 kHz frames.
+    #[test]
+    fn other_capture_rates_are_filtered() {
+        for rate in [16_000, 32_000] {
+            // Through and back unfiltered, a tone keeps its level.
+            let tone = |i: usize| (std::f32::consts::TAU * 1000.0 * i as f32 / rate as f32).sin();
+            let (power_in, power_out, bad) = through_apm(rate, false, |i| tone(i) * 3000.0);
+            assert_eq!(bad, 0, "{rate} Hz");
+            let change_db = 10.0 * (power_out / power_in).log10();
+            assert!(
+                change_db.abs() < 1.0,
+                "{rate} Hz: tone changed {change_db:.1} dB"
+            );
+
+            // With the model, noise without a voice drops by the pause limit.
+            let mut seed = 1u32;
+            let (power_in, power_out, bad) = through_apm(rate, true, |_| noise(&mut seed) * 2000.0);
+            assert_eq!(bad, 0, "{rate} Hz");
+            let cut_db = 10.0 * (power_in / power_out).log10();
+            assert!(cut_db > 20.0, "{rate} Hz: noise cut {cut_db:.1} dB");
         }
     }
 

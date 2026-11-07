@@ -135,6 +135,7 @@ type ProcessFn = unsafe extern "C" fn(*const c_void, *const *mut f32, usize, usi
 
 unsafe extern "C" {
     fn quipcall_test_apm_create(
+        sample_rate_hz: i32,
         noise_suppression: bool,
         gain_control1: bool,
         gain_control2: bool,
@@ -221,7 +222,14 @@ fn run(chain: &Chain, mic: &[i16], far: &[i16]) -> (Vec<i16>, Duration, Duration
     };
     // SAFETY: the APM is destroyed below, before `filter` goes away.
     let apm = unsafe {
-        quipcall_test_apm_create(chain.webrtc_ns, chain.agc1, chain.agc2, process, context)
+        quipcall_test_apm_create(
+            SAMPLE_RATE,
+            chain.webrtc_ns,
+            chain.agc1,
+            chain.agc2,
+            process,
+            context,
+        )
     };
     assert!(!apm.is_null());
     let mut out = Vec::with_capacity(mic.len());
