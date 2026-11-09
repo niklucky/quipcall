@@ -2,7 +2,8 @@
 //!
 //! A download goes to `<file>.part`, resumes from there after a failure or
 //! a restart, and is renamed into place only once its SHA-256 matches the
-//! catalog's. A model in use is memory-mapped, so files are never rewritten
+//! catalog's. A dropped connection is retried twice, from where it stopped,
+//! before the download counts as failed. A model in use is memory-mapped, so files are never rewritten
 //! in place.
 
 use std::io::{Read as _, Write as _};
@@ -72,19 +73,58 @@ pub fn download(info: &'static ModelInfo, dir: PathBuf) -> Download {
                 .enable_all()
                 .build()
                 .context("runtime")
-                .and_then(|rt| rt.block_on(fetch(info, &dir, &stop, &tx)));
+                .and_then(|rt| rt.block_on(fetch_retrying(info, &dir, &stop, &tx)));
             let last = match result {
                 Ok(path) => Progress::Done(path),
                 Err(_) if stop.load(Ordering::Relaxed) => Progress::Cancelled,
                 Err(e) => {
                     tracing::warn!("downloading {}: {e:#}", info.file);
-                    Progress::Failed(format!("{e:#}"))
+                    Progress::Failed(if transient(&e) {
+                        // The details are in the log.
+                        "the network dropped. What came is kept; try again to go on.".to_owned()
+                    } else {
+                        format!("{e:#}")
+                    })
                 }
             };
             let _ = tx.try_send(last);
         })
         .expect("download thread");
     Download { progress, cancel }
+}
+
+/// Attempts at a download that keeps dropping.
+const ATTEMPTS: u32 = 3;
+
+async fn fetch_retrying(
+    info: &ModelInfo,
+    dir: &Path,
+    stop: &AtomicBool,
+    tx: &async_channel::Sender<Progress>,
+) -> anyhow::Result<PathBuf> {
+    let mut attempt = 1;
+    loop {
+        match fetch(info, dir, stop, tx).await {
+            Err(e) if attempt < ATTEMPTS && !stop.load(Ordering::Relaxed) && transient(&e) => {
+                tracing::warn!("downloading {} (attempt {attempt}): {e:#}", info.file);
+                tokio::time::sleep(Duration::from_secs(2 * u64::from(attempt))).await;
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
+/// The network failed us, or the server did: worth another go. A damaged
+/// file or a missing one isn't.
+fn transient(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<reqwest::Error>().is_some_and(|e| {
+        e.is_connect()
+            || e.is_timeout()
+            || e.is_body()
+            || e.is_request()
+            || e.status().is_some_and(|s| s.is_server_error())
+    })
 }
 
 async fn fetch(
@@ -127,7 +167,12 @@ async fn fetch(
     if have > 0 {
         request = request.header(reqwest::header::RANGE, format!("bytes={have}-"));
     }
-    let mut response = request.send().await?.error_for_status()?;
+    // Errors without the URL: it's long, and Settings shows the error.
+    let mut response = request
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .map_err(reqwest::Error::without_url)?;
     let mut file = if have > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
         std::fs::OpenOptions::new().append(true).open(&part)?
     } else {
@@ -139,7 +184,11 @@ async fn fetch(
     let _ = tx.try_send(Progress::Bytes(have));
 
     let mut told = Instant::now();
-    while let Some(chunk) = response.chunk().await? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(reqwest::Error::without_url)?
+    {
         anyhow::ensure!(!stop.load(Ordering::Relaxed), "cancelled");
         file.write_all(&chunk)?;
         hash.update(&chunk);

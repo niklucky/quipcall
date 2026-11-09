@@ -195,8 +195,16 @@ impl Recording {
 pub struct Notice {
     pub text: String,
     pub error: bool,
-    /// A recording to show in Finder.
-    pub file: Option<PathBuf>,
+    /// A button that goes with it.
+    pub action: Option<NoticeAction>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum NoticeAction {
+    /// A recording, saved.
+    ShowInFinder(PathBuf),
+    /// Where a model that failed to download (or load) can be tried again.
+    Settings,
 }
 
 /// A notice that goes away by itself.
@@ -252,6 +260,8 @@ pub struct Call {
     pub mode: Mode,
     pub waiting_for: Option<MediaDevice>,
     pub error: Option<String>,
+    /// What the error's button does, if it has one.
+    error_action: Option<NoticeAction>,
     /// Turn the camera on once connected (`--camera`).
     camera_on_connect: bool,
     connected_at: Option<(SystemTime, Instant)>,
@@ -292,12 +302,24 @@ impl Call {
         // A download finishing starts the transcription waiting for it.
         let models = Models::global(cx);
         let models_task = cx.observe(&models, |call, models, cx| {
+            // Tried again from Settings: the error has had its say.
+            if call.error_action == Some(NoticeAction::Settings) {
+                let model = Shell::global(cx).read(cx).store.transcription.model();
+                if matches!(
+                    models.read(cx).state(model),
+                    models::State::Downloading { .. } | models::State::Ready
+                ) {
+                    call.dismiss_error(cx);
+                }
+            }
             if let Some(Preparing::Download(model)) = call.preparing {
                 match models.read(cx).state(model) {
                     models::State::Ready => call.start_engine(model, cx),
                     models::State::Failed(e) => {
                         call.preparing = None;
-                        call.fail(format!("downloading {}: {e}", model.name), cx);
+                        // Short: the widget is narrow, and Settings says why.
+                        tracing::warn!("downloading {}: {e}", model.name);
+                        call.fail_with("Download failed".into(), Some(NoticeAction::Settings), cx);
                     }
                     models::State::Missing => call.preparing = None,
                     models::State::Downloading { .. } => {}
@@ -359,6 +381,7 @@ impl Call {
             },
             waiting_for: None,
             error: None,
+            error_action: None,
             camera_on_connect: args.camera,
             connected_at: None,
             people: BTreeSet::new(),
@@ -379,7 +402,7 @@ impl Call {
         let plain = |text: String, error| Notice {
             text,
             error,
-            file: None,
+            action: None,
         };
         if let Some(device) = self.waiting_for {
             return Some(plain(
@@ -391,7 +414,11 @@ impl Call {
             return Some(plain("Joining…".into(), false));
         }
         if let Some(error) = &self.error {
-            return Some(plain(error.clone(), true));
+            return Some(Notice {
+                text: error.clone(),
+                error: true,
+                action: self.error_action.clone(),
+            });
         }
         self.flash
             .as_ref()
@@ -424,6 +451,7 @@ impl Call {
 
     pub fn dismiss_notice(&mut self, cx: &mut Context<Self>) {
         self.error = None;
+        self.error_action = None;
         self.flash = None;
         cx.notify();
     }
@@ -611,6 +639,7 @@ impl Call {
 
     pub fn dismiss_error(&mut self, cx: &mut Context<Self>) {
         self.error = None;
+        self.error_action = None;
         cx.notify();
     }
 
@@ -847,8 +876,14 @@ impl Call {
     }
 
     fn fail(&mut self, message: String, cx: &mut Context<Self>) {
+        self.fail_with(message, None, cx);
+    }
+
+    /// An error with a button: Settings, say.
+    fn fail_with(&mut self, message: String, action: Option<NoticeAction>, cx: &mut Context<Self>) {
         tracing::warn!("{message}");
         self.error = Some(message);
+        self.error_action = action;
         cx.notify();
     }
 
@@ -922,7 +957,7 @@ impl Call {
                         Notice {
                             text: format!("{first} left; their recording stopped"),
                             error: false,
-                            file: None,
+                            action: None,
                         },
                         cx,
                     );
@@ -937,7 +972,7 @@ impl Call {
                                     first_name(&t.name)
                                 ),
                                 error: false,
-                                file: None,
+                                action: None,
                             },
                             cx,
                         );
@@ -1092,7 +1127,7 @@ impl Call {
                     Notice {
                         text: "Recording saved".into(),
                         error: false,
-                        file: Some(saved.path),
+                        action: Some(NoticeAction::ShowInFinder(saved.path)),
                     },
                     cx,
                 );
@@ -1137,7 +1172,7 @@ impl Call {
                             Notice {
                                 text: format!("{} started recording {what}", first_name(&name)),
                                 error: false,
-                                file: None,
+                                action: None,
                             },
                             cx,
                         );
@@ -1204,7 +1239,7 @@ impl Call {
                                 Notice {
                                     text: format!("{} stopped the transcript", first_name(&name)),
                                     error: false,
-                                    file: None,
+                                    action: None,
                                 },
                                 cx,
                             );
@@ -1216,7 +1251,11 @@ impl Call {
             }
             Event::TranscriptionFailed(message) => {
                 self.preparing = None;
-                self.fail(format!("transcript: {message}"), cx);
+                self.fail_with(
+                    format!("transcript: {message}"),
+                    Some(NoticeAction::Settings),
+                    cx,
+                );
             }
             Event::ParticipantTranscribing { identity, model } => {
                 let name = self
@@ -1238,7 +1277,7 @@ impl Call {
                                 Notice {
                                     text: format!("{first}'s Mac is transcribing this call"),
                                     error: false,
-                                    file: None,
+                                    action: None,
                                 },
                                 cx,
                             );

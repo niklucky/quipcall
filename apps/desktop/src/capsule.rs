@@ -24,7 +24,7 @@ use gpui::{
 };
 
 use crate::assets::Icon;
-use crate::call::{Call, Camera, Member, Mode, Preparing};
+use crate::call::{Call, Camera, Member, Mode, NoticeAction, Preparing};
 use crate::mac;
 use crate::theme::{
     ACCENT, DANGER, RECORDING, SPEAKING, TEXT, TEXT_DIM, avatar_background, black, first_name,
@@ -141,7 +141,7 @@ struct Plan {
     captions: bool,
     /// Tiles in the hover row of controls.
     controls: usize,
-    /// The notice has a button (Show in Finder).
+    /// The notice has a button (Show in Finder, Settings).
     notice_button: bool,
 }
 
@@ -326,7 +326,7 @@ impl Capsule {
             controls: 3
                 + usize::from(call.recording.is_none())
                 + usize::from(call.can_transcribe()),
-            notice_button: call.notice().is_some_and(|n| n.file.is_some()),
+            notice_button: call.notice().is_some_and(|n| n.action.is_some()),
         }
     }
 
@@ -1201,9 +1201,9 @@ impl Capsule {
             return div().into_any_element();
         };
         let call = self.call.clone();
-        let file = notice.file.clone();
+        let action = notice.action.clone();
         div()
-            .h(px(if file.is_some() { 24.0 } else { 18.0 }))
+            .h(px(if action.is_some() { 24.0 } else { 18.0 }))
             .px(px(12.0))
             .flex()
             .items_center()
@@ -1216,18 +1216,29 @@ impl Capsule {
                 rgb(TEXT_DIM)
             })
             .child(div().min_w_0().truncate().child(notice.text))
+            .when_some(action, |el, action| {
+                let button = match action {
+                    NoticeAction::ShowInFinder(file) => {
+                        button("show-file", "Show in Finder", None, Kind::Secondary, true)
+                            .on_click(move |_, _, _| crate::home::show_in_finder(&file))
+                    }
+                    // A failed download: try it again there.
+                    NoticeAction::Settings => button(
+                        "notice-settings",
+                        "Settings",
+                        Some(Icon::Settings),
+                        Kind::Secondary,
+                        true,
+                    )
+                    .on_click(|_, _, cx| crate::settings::open(cx)),
+                };
+                el.child(button.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
+            })
             .when(notice.error, |el| {
                 el.child(
                     icon_button("dismiss", Icon::X, 20.0)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(move |_, _, cx| call.update(cx, |c, cx| c.dismiss_error(cx))),
-                )
-            })
-            .when_some(file, |el, file| {
-                el.child(
-                    button("show-file", "Show in Finder", None, Kind::Secondary, true)
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(move |_, _, _| crate::home::show_in_finder(&file)),
                 )
             })
             .into_any_element()

@@ -403,6 +403,9 @@ impl Regular {
         let names: Vec<String> = c.members().map(|m| m.read(cx).name.clone()).collect();
         let elapsed = c.elapsed().map(clock);
         let notice = c.notice();
+        let notice_settings = notice
+            .as_ref()
+            .is_some_and(|n| n.action == Some(crate::call::NoticeAction::Settings));
         let sharing = c.sharing.map(|p| p.label());
         let recording = c.recording.as_ref().map(|r| {
             if r.is_mine() {
@@ -469,6 +472,19 @@ impl Regular {
                     pill(notice.text, rgb(TEXT_DIM), rgb(RAISED))
                 }
             }))
+            // A failed download: try it again in Settings.
+            .when(notice_settings, |el| {
+                el.child(
+                    button(
+                        "notice-settings",
+                        "Settings",
+                        Some(Icon::Settings),
+                        Kind::Secondary,
+                        true,
+                    )
+                    .on_click(|_, _, cx| crate::settings::open(cx)),
+                )
+            })
             .children(sharing.map(|preset| {
                 pill(
                     format!("You're sharing · {preset}"),
