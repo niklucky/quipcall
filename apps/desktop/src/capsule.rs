@@ -57,10 +57,13 @@ const COUNT: f32 = 26.0;
 /// A person in the stack's row: avatar and first name.
 const PERSON: f32 = 54.0;
 const CONTROLS_H: f32 = 73.0;
-/// The hover row's Camera, Copy link and Call window: three of them fit in
-/// the narrowest widget, you alone (195 px).
+/// The hover row's Camera, Copy link and Call window.
 const CONTROL_W: f32 = 60.0;
 const CONTROL_GAP: f32 = 4.0;
+/// The hover row of controls, right-aligned under the buttons. The widget is
+/// never narrower, and its width changes on the left, so turning your camera
+/// on from that row (your face becomes a tile) moves nothing in it.
+const NARROWEST: f32 = 3.0 * CONTROL_W + 2.0 * CONTROL_GAP + PAD;
 const LINE_H: f32 = 37.0;
 /// Rows open and close after the cursor settles this long.
 const HOVER_DELAY: Duration = Duration::from_millis(250);
@@ -138,6 +141,8 @@ pub struct Capsule {
     shown_above: f32,
     /// The drawer opens above the main row: no room under it.
     drawer_above: bool,
+    /// Tiles and your preview go under the main row: no room above it.
+    tops_below: bool,
     hover_task: Option<Task<()>>,
     /// Closes the open row once the cursor has left the window.
     cursor_task: Option<Task<()>>,
@@ -183,6 +188,7 @@ impl Capsule {
             above: 0.0,
             shown_above: 0.0,
             drawer_above: false,
+            tops_below: false,
             hover_task: None,
             cursor_task: None,
             watched: HashMap::new(),
@@ -317,23 +323,20 @@ impl Capsule {
         let wide = plan.preview.is_some() || self.call.read(cx).notice().is_some();
         let width = row_width(&plan)
             .max(strip_width(&plan))
+            .max(NARROWEST)
             .max(if wide { WIDE } else { 0.0 });
-        let base = preview_height(&plan, width) + strip_height(&plan);
+        let tops = preview_height(&plan, width) + strip_height(&plan);
         let drawer_h = self
             .drawer(cx)
             .map_or(0.0, |d| drawer_height(&d, &plan, width));
-        // Open downwards unless the screen ends first.
-        let drawer_above = drawer_h > 0.0
-            && window.display(cx).is_some_and(|d| {
-                let area = d.visible_bounds();
-                let row_bottom = window.bounds().origin.y + px(self.shown_above + MAIN);
-                (area.origin.y + area.size.height - row_bottom) / px(1.0) < drawer_h + 12.0
-            });
-        let above = base + if drawer_above { drawer_h } else { 0.0 };
-        let wanted = size(
-            width,
-            above + MAIN + if drawer_above { 0.0 } else { drawer_h },
-        );
+        // The row never moves, so what it adds goes where the screen has room:
+        // tiles and your preview above it, the hover rows below it.
+        let (up, down) =
+            mac::room_around(window, self.shown_above, MAIN).unwrap_or((f32::MAX, f32::MAX));
+        let tops_below = tops > 0.0 && up < tops;
+        let drawer_above = drawer_h > 0.0 && !tops_below && down < drawer_h + 12.0;
+        let above = if tops_below { 0.0 } else { tops } + if drawer_above { drawer_h } else { 0.0 };
+        let wanted = size(width, tops + MAIN + drawer_h);
         if wanted != self.size || above != self.above {
             mac::resize_with(
                 window,
@@ -353,6 +356,7 @@ impl Capsule {
             self.above = above;
         }
         self.drawer_above = drawer_above;
+        self.tops_below = tops_below;
         plan
     }
 
@@ -561,11 +565,22 @@ impl Render for Capsule {
                     .w(px(width))
                     .flex()
                     .flex_col()
-                    .children(preview)
-                    .children(strip)
-                    .children(drawer_above)
-                    .child(main)
-                    .children(drawer_below),
+                    .map(|column| {
+                        if self.tops_below {
+                            column
+                                .child(main)
+                                .children(drawer_below)
+                                .children(strip)
+                                .children(preview)
+                        } else {
+                            column
+                                .children(preview)
+                                .children(strip)
+                                .children(drawer_above)
+                                .child(main)
+                                .children(drawer_below)
+                        }
+                    }),
             )
     }
 }
@@ -580,7 +595,13 @@ impl Capsule {
         Some(
             div()
                 .flex_none()
-                .pt(px(PAD))
+                .map(|el| {
+                    if self.tops_below {
+                        el.pb(px(PAD))
+                    } else {
+                        el.pt(px(PAD))
+                    }
+                })
                 .px(px(PAD))
                 .flex()
                 .justify_end()
@@ -657,7 +678,13 @@ impl Capsule {
             div()
                 .flex_none()
                 .h(px(PAD + TILE_H))
-                .pt(px(PAD))
+                .map(|el| {
+                    if self.tops_below {
+                        el.pb(px(PAD))
+                    } else {
+                        el.pt(px(PAD))
+                    }
+                })
                 .flex()
                 .justify_end()
                 .px(px(PAD))
@@ -1117,7 +1144,8 @@ impl Capsule {
         let (call, call2, call3) = (self.call.clone(), self.call.clone(), self.call.clone());
         div()
             .flex()
-            .justify_center()
+            .justify_end()
+            .pr(px(PAD))
             .gap(px(CONTROL_GAP))
             .child(item(
                 "camera",

@@ -145,10 +145,43 @@ pub fn on_screen(window: &Window) -> Option<bool> {
     )
 }
 
+/// Room between a band of `window` (`top` points down from its top edge,
+/// `height` tall) and the top and bottom of its screen's visible area, as
+/// (above, below). `None` if the window or its screen can't be found. From
+/// AppKit's frames: GPUI reports every display's origin as (0, 0).
+pub fn room_around(window: &Window, top: f32, height: f32) -> Option<(f32, f32)> {
+    let ns = ns_window(window)?;
+    let visible = ns.screen()?.visibleFrame();
+    let frame = ns.frame();
+    // AppKit's y axis points up.
+    let band_top = frame.origin.y + frame.size.height - top as f64;
+    let above = visible.origin.y + visible.size.height - band_top;
+    let below = band_top - height as f64 - visible.origin.y;
+    Some((above as f32, below as f32))
+}
+
+/// Move `window` to the top of its screen's visible area (snapshot tests).
+#[cfg(feature = "snapshot")]
+pub fn move_to_top(window: &Window, cx: &App) {
+    let Some(ns) = ns_window(window) else {
+        return;
+    };
+    cx.foreground_executor()
+        .spawn(async move {
+            if let Some(visible) = ns.screen().map(|s| s.visibleFrame()) {
+                let frame = ns.frame();
+                let top = visible.origin.y + visible.size.height - frame.size.height;
+                ns.setFrameOrigin(NSPoint::new(frame.origin.x, top));
+            }
+        })
+        .detach();
+}
+
 /// Resize to `size`, keeping `anchor` where it is, and re-apply `mask`. A
 /// window that was fully on its screen stays on it, except while a resize
-/// handle is dragged: moving the corner under the cursor would feed back into
-/// the drag.
+/// handle is dragged (moving the corner under the cursor would feed back into
+/// the drag), and except up and down for [`Anchor::Row`]: that row never
+/// moves, and its window adds what it shows on the side with room.
 ///
 /// Deferred to the next run-loop turn: AppKit calls straight back into GPUI
 /// when a window's frame changes, which must not happen mid-event.
@@ -207,10 +240,12 @@ fn set_frame(ns: &NSWindow, size: Size<f32>, mask: &Mask, anchor: Anchor) {
             visible.origin.x,
             (visible.origin.x + visible.size.width - w).max(visible.origin.x),
         );
-        target.origin.y = target.origin.y.clamp(
-            visible.origin.y,
-            (visible.origin.y + visible.size.height - h).max(visible.origin.y),
-        );
+        if !matches!(anchor, Anchor::Row { .. }) {
+            target.origin.y = target.origin.y.clamp(
+                visible.origin.y,
+                (visible.origin.y + visible.size.height - h).max(visible.origin.y),
+            );
+        }
     }
     ns.setFrame_display(target, true);
     apply_mask(ns, mask);

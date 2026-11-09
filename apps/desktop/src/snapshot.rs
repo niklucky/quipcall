@@ -6,7 +6,8 @@
 //!   the buttons at the given second: `regular`, `minimal`, `leave`, `quick`
 //!   (quick call from home), `mic`, `camera`, `share` (opens the picker),
 //!   `hover` / `stack` (the capsule opens its row of controls, or of the
-//!   people in its stack, as if hovered), `unhover` (closes it), `panel` / `people`
+//!   people in its stack, as if hovered), `unhover` (closes it), `top`
+//!   (moves it to the top of its screen), `panel` / `people`
 //!   (the call window's side panel, on the transcript or people tab),
 //!   `share-own` / `share-own-60` (shares one of Quipcall's own windows with
 //!   that preset, so tests never capture anything else on screen; with
@@ -92,6 +93,14 @@ fn act(action: &str, cx: &mut App) {
                     _ => "controls",
                 };
                 let _ = capsule.update(cx, |c, _, cx| c.show(which, cx));
+            }
+        }
+        return;
+    }
+    if action == "top" {
+        for handle in cx.windows() {
+            if let Some(capsule) = handle.downcast::<crate::capsule::Capsule>() {
+                let _ = capsule.update(cx, |_, window, cx| crate::mac::move_to_top(window, cx));
             }
         }
         return;
