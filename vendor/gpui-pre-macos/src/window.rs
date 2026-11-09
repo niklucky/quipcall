@@ -3382,6 +3382,12 @@ extern "C" fn display_layer(this: &AnyObject, _: Sel, _: *mut AnyObject) {
         callback(RequestFrameOptions {
             signal_at,
             signal_source: FrameRequestSource::NativeCallback,
+            // quipcall patch: AppKit asks for this frame while the window
+            // changes size, to show in the same transaction. Skipping it
+            // leaves the old frame on screen, stretched to the new size. GPUI
+            // caps windows that aren't key at 30 fps, and a floating panel
+            // never is, so this frame must not be throttled.
+            require_presentation: true,
             ..Default::default()
         });
 
@@ -3426,10 +3432,25 @@ fn metal_frame(
         return;
     };
     let metal_frames = metal_frames.clone();
+    // quipcall patch: skip a drawable the link acquired before a resize (see
+    // `MetalFrames::skip_stale`).
+    let drawable = update.drawable();
+    let (width, height): (usize, usize) = unsafe {
+        let texture: *mut AnyObject = msg_send![&*drawable, texture];
+        (msg_send![texture, width], msg_send![texture, height])
+    };
+    let stale = lock.renderer.layer().is_some_and(|layer| {
+        let wanted = layer.drawableSize();
+        wanted.width as usize != width || wanted.height as usize != height
+    });
+    if metal_frames.skip_stale(stale) {
+        // The link keeps running and the window keeps its pending frame.
+        return;
+    }
     let Some(mut callback) = lock.request_frame_callback.take() else {
         return;
     };
-    lock.renderer.set_frame_drawable(Some(update.drawable()));
+    lock.renderer.set_frame_drawable(Some(drawable));
     drop(lock);
     metal_frames.begin_frame();
     callback(RequestFrameOptions {

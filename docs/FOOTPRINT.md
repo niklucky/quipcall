@@ -47,6 +47,17 @@ Where the ~170 MB baseline goes (`footprint`): ~90 MB GPU memory owned by the wi
 
 **Bug found while measuring:** every video frame leaked an IOSurface (3.3 GB after a minute of sending). libwebrtc's Objective-C frame wrappers are autoreleased, and our threads (tokio workers, the synthetic camera) never drained an autorelease pool. Frame callbacks now run inside one. RSS barely showed it, which is how we found out RSS is the wrong metric.
 
+## 2026-11-07 — Stage 2, minimal mode as one capsule
+
+Release build, sending the synthetic 720p camera, 9 `lk load-test` H.264 publishers: 10 faces at 44 px in one capsule window, each on the lowest layer and drawn as ~15 bands cut to a circle. No microphone (`QUIPCALL_NO_MIC`): a fresh unsigned build would have raised the permission prompt. Samples every 5 s.
+
+| Scenario | CPU (one core) | Footprint |
+|---|---|---|
+| Capsule, repainting on every frame | 18–27%, ~24% avg | ~133 MB |
+| Capsule, repaints capped at 30 fps | 15–21%, ~19% avg | ~135 MB |
+
+Everyone's frames arrive out of step, so without the cap the one window redrew at the display's rate; the cap is in. Against the 10 circles below (~23%, ~207 MB, mic on), memory is clearly lower; CPU isn't directly comparable without the mic (the noise model costs ~4% of a core while unmuted), and the Nov 3 build can't join today's server for a side-by-side.
+
 ## 2026-11-03 — Stage 2, minimal mode with 10 circles
 
 Release build, mic on, sending the synthetic 720p camera. 9 `lk load-test` H.264 publishers, so 10 circles (you at 200 px, others at 160 px, each on the 360p layer) plus the glass toolbar: 11 windows.

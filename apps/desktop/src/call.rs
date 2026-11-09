@@ -1,5 +1,5 @@
-//! The call model, shared by every window of a call: the floating circles, the
-//! glass toolbar, screen-share windows and the regular window.
+//! The call model, shared by every window of a call: the floating capsule,
+//! screen-share windows and the regular window.
 //!
 //! Windows are views onto this model. Which windows exist follows from the
 //! mode and the participants; `sync_windows` opens and closes them.
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, Context, DisplayId, Entity, EventEmitter, Pixels,
-    Task, WindowBounds, WindowHandle, point, px, size,
+    Task, WindowHandle, point, px, size,
 };
 use quipcall_core::{
     Engine, Event, MediaDevice, ScreenSharePreset, SourceId, TrackKey, VideoKind, VideoQuality,
@@ -18,12 +18,12 @@ use quipcall_core::{
 };
 
 use crate::Args;
-use crate::bubble::{self, Bubble};
+use crate::capsule::{self, Capsule};
 use crate::fullscreen::{self, Fullscreen};
 use crate::regular::Regular;
 use crate::screen_window::{self, ScreenWindow};
 use crate::share_picker::{self, SharePicker};
-use crate::toolbar::{self, Toolbar};
+use crate::store::{CallEvent, Happened};
 use crate::video_mac::SurfaceSink;
 
 /// Your own screen preview repaints at most this often: enough to see what
@@ -47,7 +47,7 @@ pub enum Status {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// Floating circles and the glass toolbar; no call window.
+    /// Everyone in one floating glass capsule; no call window.
     Minimal,
     /// One window with tiles.
     Regular,
@@ -113,6 +113,16 @@ pub struct Member {
     pub screen: Option<Video>,
     pub speaking: bool,
     pub mic_muted: bool,
+    /// When they last joined, unmuted or spoke: the capsule shows whoever
+    /// was active last.
+    pub last_active: Option<Instant>,
+}
+
+impl Member {
+    /// Speaking now, or active within `quiet`, and not muted.
+    pub fn is_active(&self, quiet: Duration) -> bool {
+        !self.mic_muted && (self.speaking || self.last_active.is_some_and(|t| t.elapsed() <= quiet))
+    }
 }
 
 pub struct Screen {
@@ -127,14 +137,14 @@ pub struct Ended {
     pub started: Option<SystemTime>,
     pub duration: Duration,
     pub people: Vec<String>,
+    pub events: Vec<CallEvent>,
 }
 
 #[derive(Default)]
 struct Windows {
-    bubbles: HashMap<String, WindowHandle<Bubble>>,
+    capsule: Option<WindowHandle<Capsule>>,
     screens: HashMap<TrackKey, WindowHandle<ScreenWindow>>,
     fullscreen: HashMap<TrackKey, WindowHandle<Fullscreen>>,
-    toolbar: Option<WindowHandle<Toolbar>>,
     regular: Option<WindowHandle<Regular>>,
 }
 
@@ -165,6 +175,8 @@ pub struct Call {
     camera_on_connect: bool,
     connected_at: Option<(SystemTime, Instant)>,
     people: BTreeSet<String>,
+    /// Who joined, left and shared, for the call's timeline.
+    pub events: Vec<CallEvent>,
     windows: Windows,
     _tasks: Vec<Task<()>>,
 }
@@ -202,6 +214,7 @@ impl Call {
             screen: None,
             speaking: false,
             mic_muted: true,
+            last_active: None,
         });
 
         let join = engine.join(&args.server, &room.id, &identity, &args.name);
@@ -242,20 +255,18 @@ impl Call {
             camera_on_connect: args.camera,
             connected_at: None,
             people: BTreeSet::new(),
+            events: Vec::new(),
             windows: Windows::default(),
             _tasks: vec![events_task, join_task],
         }
     }
 
     pub fn link(&self) -> String {
-        format!(
-            "{}/?room={}",
-            self.web_url.trim_end_matches('/'),
-            self.room.id
-        )
+        link(&self.web_url, &self.room.id)
     }
 
-    /// Text for the toolbar's notice line, if there's something to say.
+    /// Text for a notice in the capsule or the call window's title, if there's
+    /// something to say.
     pub fn notice(&self) -> Option<(String, bool)> {
         if let Some(device) = self.waiting_for {
             return Some((
@@ -271,6 +282,21 @@ impl Call {
 
     pub fn members(&self) -> impl Iterator<Item = &Entity<Member>> {
         std::iter::once(&self.me).chain(self.others.iter())
+    }
+
+    /// How long you've been connected.
+    pub fn elapsed(&self) -> Option<Duration> {
+        self.connected_at.map(|(_, at)| at.elapsed())
+    }
+
+    /// When you connected, on the wall clock.
+    pub fn connected_since(&self) -> Option<SystemTime> {
+        self.connected_at.map(|(wall, _)| wall)
+    }
+
+    fn log(&mut self, who: String, what: Happened) {
+        let at = self.elapsed().map_or(0, |e| e.as_secs());
+        self.events.push(CallEvent { at, who, what });
     }
 
     // ---- actions (called from any window) ---------------------------------
@@ -348,6 +374,23 @@ impl Call {
         });
         self.share_preset = preset;
         cx.notify();
+    }
+
+    /// Who is sharing their screen (identities), besides you.
+    pub fn sharers(&self, cx: &App) -> Vec<String> {
+        self.screens
+            .iter()
+            .map(|s| s.read(cx).key.participant.clone())
+            .collect()
+    }
+
+    /// Someone's floating share window, to bring it to the front.
+    pub fn share_window_of(&self, identity: &str) -> Option<WindowHandle<ScreenWindow>> {
+        self.windows
+            .screens
+            .iter()
+            .find(|(key, _)| key.participant == identity)
+            .map(|(_, handle)| *handle)
     }
 
     pub fn is_fullscreen(&self, key: &TrackKey) -> bool {
@@ -439,6 +482,7 @@ impl Call {
             started,
             duration,
             people: self.people.iter().cloned().collect(),
+            events: self.events.clone(),
         });
         cx.notify();
         schedule_sync(&cx.entity(), cx);
@@ -512,6 +556,7 @@ impl Call {
                 };
                 self.people.insert(name.clone());
                 if self.member(&identity, cx).is_none() {
+                    self.log(name.clone(), Happened::Joined);
                     let member = cx.new(|_| Member {
                         identity,
                         name,
@@ -520,12 +565,17 @@ impl Call {
                         screen: None,
                         speaking: false,
                         mic_muted: false,
+                        last_active: Some(Instant::now()),
                     });
                     self.others.push(member);
                     windows_changed = true;
                 }
             }
             Event::ParticipantLeft { identity } => {
+                if let Some(member) = self.member(&identity, cx) {
+                    let name = member.read(cx).name.clone();
+                    self.log(name, Happened::Left);
+                }
                 let before = self.others.len() + self.screens.len();
                 self.others.retain(|m| m.read(cx).identity != identity);
                 self.screens
@@ -550,6 +600,7 @@ impl Call {
                         .member(&key.participant, cx)
                         .map(|m| m.read(cx).name.clone())
                         .unwrap_or_else(|| key.participant.clone());
+                    self.log(owner.clone(), Happened::StartedSharing);
                     let engine = &self.engine;
                     let screen = cx.new(|cx| {
                         let (mut video, sink) = Video::new(
@@ -566,6 +617,10 @@ impl Call {
                 }
             },
             Event::VideoTrackRemoved { key } => {
+                if let Some(screen) = self.screens.iter().find(|s| s.read(cx).key == key) {
+                    let owner = screen.read(cx).owner.clone();
+                    self.log(owner, Happened::StoppedSharing);
+                }
                 let before = self.screens.len();
                 self.screens.retain(|s| s.read(cx).key != key);
                 windows_changed = before != self.screens.len();
@@ -582,6 +637,9 @@ impl Call {
                 for member in self.members().cloned().collect::<Vec<_>>() {
                     member.update(cx, |m, cx| {
                         let speaking = speakers.contains(&m.identity);
+                        if speaking {
+                            m.last_active = Some(Instant::now());
+                        }
                         if m.speaking != speaking {
                             m.speaking = speaking;
                             cx.notify();
@@ -592,6 +650,9 @@ impl Call {
             Event::ParticipantMic { identity, muted } => {
                 if let Some(member) = self.member(&identity, cx) {
                     member.update(cx, |m, cx| {
+                        if m.mic_muted && !muted {
+                            m.last_active = Some(Instant::now());
+                        }
                         m.mic_muted = muted;
                         cx.notify();
                     });
@@ -617,6 +678,17 @@ impl Call {
                 }
             }
             Event::ScreenShareChanged { active, preset } => {
+                if active != self.sharing.is_some() {
+                    let me = self.me.read(cx).name.clone();
+                    self.log(
+                        me,
+                        if active {
+                            Happened::StartedSharing
+                        } else {
+                            Happened::StoppedSharing
+                        },
+                    );
+                }
                 self.sharing = if active { preset } else { None };
                 if !active {
                     self.drop_preview(cx);
@@ -647,6 +719,11 @@ impl Call {
     }
 }
 
+/// The call link for `room` on the web client at `web`.
+pub fn link(web: &str, room: &str) -> String {
+    format!("{}/?room={room}", web.trim_end_matches('/'))
+}
+
 /// Open and close windows to match the call's mode and participants. Runs
 /// deferred, outside any entity update, because new windows read the model
 /// while they're built.
@@ -662,16 +739,11 @@ fn sync_windows(call: &Entity<Call>, cx: &mut App) {
         c.fullscreen.retain(|key, _| live.contains(key));
         c.screen_bounds.retain(|key, _| live.contains(key));
     });
-    let (minimal, regular, members, screens, fullscreen, screen_bounds, mut windows) = {
+    let (minimal, regular, screens, fullscreen, shares, screen_bounds, mut windows) = {
         let c = call.read(cx);
         let live = c.status != Status::Ended;
         let minimal = live && c.mode == Mode::Minimal;
         let regular = live && c.mode == Mode::Regular;
-        let members: Vec<Entity<Member>> = if minimal {
-            c.members().cloned().collect()
-        } else {
-            Vec::new()
-        };
         // A share shown fullscreen has no floating window meanwhile.
         let screens: Vec<Entity<Screen>> = if minimal {
             c.screens
@@ -691,12 +763,18 @@ fn sync_windows(call: &Entity<Call>, cx: &mut App) {
         } else {
             Vec::new()
         };
+        // Shares still going, to tell a fullscreen you left from one that ended.
+        let shares: Vec<TrackKey> = if live {
+            c.screens.iter().map(|s| s.read(cx).key.clone()).collect()
+        } else {
+            Vec::new()
+        };
         (
             minimal,
             regular,
-            members,
             screens,
             fullscreen,
+            shares,
             c.screen_bounds.clone(),
             Windows::default(),
         )
@@ -705,28 +783,14 @@ fn sync_windows(call: &Entity<Call>, cx: &mut App) {
 
     let area = visible_area(cx);
 
-    // Circles.
-    let wanted: Vec<String> = members
-        .iter()
-        .map(|m| m.read(cx).identity.clone())
-        .collect();
-    windows.bubbles.retain(|identity, handle| {
-        let keep = wanted.contains(identity);
-        if !keep {
+    // The capsule.
+    match (&windows.capsule, minimal) {
+        (None, true) => windows.capsule = capsule::open(call.clone(), cx),
+        (Some(handle), false) => {
             close(handle, cx);
+            windows.capsule = None;
         }
-        keep
-    });
-    for member in &members {
-        let identity = member.read(cx).identity.clone();
-        if windows.bubbles.contains_key(&identity) {
-            continue;
-        }
-        let slot = windows.bubbles.len();
-        let bounds = bubble_slot(area, slot, bubble::SIZE);
-        if let Some(handle) = bubble::open(call.clone(), member.clone(), bounds, cx) {
-            windows.bubbles.insert(identity, handle);
-        }
+        _ => {}
     }
 
     // Screen shares.
@@ -768,8 +832,17 @@ fn sync_windows(call: &Entity<Call>, cx: &mut App) {
         .collect();
     windows.fullscreen.retain(|key, handle| {
         let keep = wanted.contains(key);
-        if !keep {
+        if !keep && shares.contains(key) {
+            // You left it, from its own Space.
             close(handle, cx);
+        } else if !keep {
+            // The share or the call ended, maybe while you were on another
+            // Space: it closes itself when it can.
+            let handle = *handle;
+            cx.spawn(async move |cx| {
+                let _ = handle.update(cx, |view, window, cx| view.end(window, cx));
+            })
+            .detach();
         }
         keep
     });
@@ -783,26 +856,6 @@ fn sync_windows(call: &Entity<Call>, cx: &mut App) {
         }
     }
 
-    // Toolbar.
-    match (&windows.toolbar, minimal) {
-        (None, true) => {
-            let s = toolbar::window_size(call.read(cx));
-            let bounds = Bounds::new(
-                point(
-                    area.origin.x + (area.size.width - px(s.width)) / 2.0,
-                    area.origin.y + area.size.height - px(s.height) - px(28.0),
-                ),
-                size(px(s.width), px(s.height)),
-            );
-            windows.toolbar = toolbar::open(call.clone(), bounds, cx);
-        }
-        (Some(handle), false) => {
-            close(handle, cx);
-            windows.toolbar = None;
-        }
-        _ => {}
-    }
-
     // Regular window.
     match (&windows.regular, regular) {
         (None, true) => windows.regular = crate::regular::open(call.clone(), cx),
@@ -814,18 +867,17 @@ fn sync_windows(call: &Entity<Call>, cx: &mut App) {
     }
 
     tracing::debug!(
-        "call windows: {} circles, {} screen shares ({} fullscreen), toolbar {}, tiles {}",
-        windows.bubbles.len(),
+        "call windows: capsule {}, {} screen shares ({} fullscreen), call window {}",
+        windows.capsule.is_some(),
         windows.screens.len(),
         windows.fullscreen.len(),
-        windows.toolbar.is_some(),
         windows.regular.is_some(),
     );
     call.update(cx, |c, _| c.windows = windows);
 }
 
 /// Closes on the next run-loop turn: the window may be the one handling the
-/// click that got us here (the toolbar's expand button, say).
+/// click that got us here (the capsule's expand button, say).
 fn close<V: 'static>(handle: &WindowHandle<V>, cx: &mut App) {
     let handle = *handle;
     cx.spawn(async move |cx| {
@@ -839,25 +891,6 @@ fn visible_area(cx: &App) -> Bounds<Pixels> {
     cx.primary_display()
         .map(|d| d.visible_bounds())
         .unwrap_or_else(|| Bounds::new(point(px(0.0), px(0.0)), size(px(1440.0), px(900.0))))
-}
-
-/// Where the `slot`-th circle goes: a column up the right edge, then the next
-/// column to the left. Slot 0 (you) sits in the bottom-right corner.
-fn bubble_slot(area: Bounds<Pixels>, slot: usize, diameter: f32) -> WindowBounds {
-    let margin = 28.0;
-    let cell = bubble::SIZE + 16.0;
-    let usable = (area.size.height / px(1.0) - 2.0 * margin).max(cell);
-    let per_column = ((usable / cell) as usize).max(1);
-    let (col, row) = (slot / per_column, slot % per_column);
-    let right = area.origin.x / px(1.0) + area.size.width / px(1.0) - margin;
-    let bottom = area.origin.y / px(1.0) + area.size.height / px(1.0) - margin;
-    // Centre each circle in its cell so mixed sizes line up.
-    let cx = right - cell * col as f32 - cell / 2.0;
-    let cy = bottom - cell * row as f32 - cell / 2.0;
-    WindowBounds::Windowed(Bounds::new(
-        point(px(cx - diameter / 2.0), px(cy - diameter / 2.0)),
-        size(px(diameter), px(diameter)),
-    ))
 }
 
 /// LiveKit identities must be unique per room; this lets you run several

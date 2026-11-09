@@ -22,8 +22,22 @@ macro_rules! icons {
 }
 
 icons! {
+    Captions => "captions",
     Check => "check",
+    ChevronLeft => "chevron-left",
+    ChevronRight => "chevron-right",
+    CircleDot => "circle-dot",
+    Copy => "copy",
     Link => "link",
+    LogIn => "log-in",
+    LogOut => "log-out",
+    PanelRight => "panel-right",
+    Pencil => "pencil",
+    Phone => "phone",
+    Trash => "trash-2",
+    Upload => "upload",
+    User => "user",
+    Users => "users",
     Maximize => "maximize-2",
     Mic => "mic",
     Monitor => "monitor",

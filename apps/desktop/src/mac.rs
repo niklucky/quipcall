@@ -7,22 +7,22 @@
 use std::ptr::NonNull;
 
 use block2::RcBlock;
-use gpui::{App, Size, Window};
+use gpui::{
+    App, Context, Size, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
+};
 use objc2::rc::Retained;
 use objc2_app_kit::{
     NSApplicationDidBecomeActiveNotification, NSApplicationDidChangeScreenParametersNotification,
     NSApplicationDidHideNotification, NSApplicationDidResignActiveNotification,
-    NSApplicationDidUnhideNotification, NSView, NSWindow,
+    NSApplicationDidUnhideNotification, NSEvent, NSView, NSWindow,
     NSWindowDidChangeOcclusionStateNotification, NSWindowDidChangeScreenNotification,
-    NSWindowOcclusionState, NSWindowSharingType, NSWindowStyleMask, NSWindowWillCloseNotification,
-    NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
+    NSWindowOcclusionState, NSWindowStyleMask, NSWindowWillCloseNotification, NSWorkspace,
+    NSWorkspaceActiveSpaceDidChangeNotification,
 };
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_core_graphics::CGMutablePath;
 use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSNotificationName, NSPoint, NSRect, NSSize,
 };
-use objc2_quartz_core::{CAShapeLayer, CATransaction};
+use objc2_quartz_core::CATransaction;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 /// The visible shape of a floating window.
@@ -30,31 +30,39 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 pub enum Mask {
     /// Rounded rectangle with this corner radius.
     Rounded(f64),
-    /// The union of these circles, each `(x, y, diameter)` with `(x, y)` the
-    /// top-left of its bounding box in window coordinates.
-    Circles(Vec<(f64, f64, f64)>),
-}
-
-impl Mask {
-    /// A circle filling a `diameter`-sized window, plus an optional knob.
-    pub fn circle(diameter: f32, knob: Option<(f32, f32, f32)>) -> Self {
-        let mut circles = vec![(0.0, 0.0, diameter as f64)];
-        circles.extend(knob.map(|(x, y, d)| (x as f64, y as f64, d as f64)));
-        Mask::Circles(circles)
-    }
 }
 
 /// Which point of the window stays put when it's resized.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Anchor {
     Center,
     /// Resize handles: the corner opposite the handle stays put.
     TopLeft,
-    /// The toolbar grows upwards from where it sits.
-    BottomCenter,
-    /// Your circle turning into a screen preview: it sits in the
-    /// bottom-right corner by default, so it grows away from it.
-    BottomRight,
+    /// A line across the window, `before` points from its top now and
+    /// `after` points from the top once resized, stays put; so does the
+    /// right edge. The call widget's main row, with things growing above and
+    /// below it and its buttons at the right end.
+    Row {
+        before: f32,
+        after: f32,
+    },
+}
+
+/// A borderless panel above all apps and Spaces that never takes focus.
+pub fn floating_options(bounds: WindowBounds) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(bounds),
+        titlebar: None,
+        focus: false,
+        show: true,
+        kind: WindowKind::PopUp,
+        is_movable: true,
+        app_owns_titlebar_drag: true,
+        is_resizable: false,
+        is_minimizable: false,
+        window_background: WindowBackgroundAppearance::Transparent,
+        ..Default::default()
+    }
 }
 
 fn ns_window(window: &Window) -> Option<Retained<NSWindow>> {
@@ -78,36 +86,17 @@ fn apply_mask(window: &NSWindow, mask: &Mask) {
     // No implicit animation: the shape must follow the window instantly.
     CATransaction::begin();
     CATransaction::setDisableActions(true);
-    match mask {
-        Mask::Rounded(radius) => {
-            // SAFETY: clearing the mask; we're on the main thread.
-            unsafe { layer.setMask(None) };
-            layer.setCornerRadius(*radius);
-            layer.setMasksToBounds(true);
-        }
-        Mask::Circles(circles) => {
-            let height = content.frame().size.height;
-            let path = CGMutablePath::new();
-            for &(x, y, d) in circles {
-                // Layer coordinates have their origin at the bottom-left.
-                let rect = CGRect::new(CGPoint::new(x, height - y - d), CGSize::new(d, d));
-                // SAFETY: valid path, no transform.
-                unsafe { CGMutablePath::add_ellipse_in_rect(Some(&path), std::ptr::null(), rect) };
-            }
-            let shape = CAShapeLayer::new();
-            shape.setFrame(layer.bounds());
-            shape.setPath(Some(&path));
-            layer.setCornerRadius(0.0);
-            layer.setMasksToBounds(false);
-            // SAFETY: a fresh shape layer not used anywhere else.
-            unsafe { layer.setMask(Some(&shape)) };
-        }
-    }
+    let Mask::Rounded(radius) = mask;
+    // SAFETY: clearing any mask; we're on the main thread.
+    unsafe { layer.setMask(None) };
+    layer.setCornerRadius(*radius);
+    layer.setMasksToBounds(true);
     CATransaction::commit();
 }
 
-/// Drop the shadow and clip the content to `mask`. Floating windows also stay
-/// out of our own screen shares.
+/// Drop the shadow and clip the content to `mask`. Screenshots and screen
+/// recordings show floating windows; our own screen shares leave them out
+/// through their ScreenCaptureKit filter (`crates/core/src/screen_mac.rs`).
 ///
 /// The window must already be borderless: GPUI creates title-less popups that
 /// way (patched, see vendor/README.md). Switching the style mask here instead
@@ -126,27 +115,73 @@ pub fn make_shape(window: &Window, mask: Mask, cx: &App) {
     cx.foreground_executor()
         .spawn(async move {
             ns.setHasShadow(false);
-            ns.setSharingType(NSWindowSharingType::None);
             apply_mask(&ns, &mask);
         })
         .detach();
 }
 
-/// Change the window's visible shape (e.g. show a knob on hover).
-pub fn set_mask(window: &Window, mask: Mask, cx: &App) {
+/// Whether the mouse cursor is over `window` right now (`None` if the
+/// window can't be found).
+pub fn cursor_inside(window: &Window) -> Option<bool> {
+    let ns = ns_window(window)?;
+    let p = NSEvent::mouseLocation();
+    let f = ns.frame();
+    Some(
+        p.x >= f.origin.x
+            && p.x <= f.origin.x + f.size.width
+            && p.y >= f.origin.y
+            && p.y <= f.origin.y + f.size.height,
+    )
+}
+
+/// Whether any of `window` is on screen now (`None` if the window can't be
+/// found). For a fullscreen window: whether its Space is the one showing on
+/// its display, the only time macOS will take it out of fullscreen.
+pub fn on_screen(window: &Window) -> Option<bool> {
+    Some(
+        ns_window(window)?
+            .occlusionState()
+            .contains(NSWindowOcclusionState::Visible),
+    )
+}
+
+/// Room between a band of `window` (`top` points down from its top edge,
+/// `height` tall) and the top and bottom of its screen's visible area, as
+/// (above, below). `None` if the window or its screen can't be found. From
+/// AppKit's frames: GPUI reports every display's origin as (0, 0).
+pub fn room_around(window: &Window, top: f32, height: f32) -> Option<(f32, f32)> {
+    let ns = ns_window(window)?;
+    let visible = ns.screen()?.visibleFrame();
+    let frame = ns.frame();
+    // AppKit's y axis points up.
+    let band_top = frame.origin.y + frame.size.height - top as f64;
+    let above = visible.origin.y + visible.size.height - band_top;
+    let below = band_top - height as f64 - visible.origin.y;
+    Some((above as f32, below as f32))
+}
+
+/// Move `window` to the top of its screen's visible area (snapshot tests).
+#[cfg(feature = "snapshot")]
+pub fn move_to_top(window: &Window, cx: &App) {
     let Some(ns) = ns_window(window) else {
         return;
     };
-    // Queued behind any pending resize, so the mask matches the new size.
     cx.foreground_executor()
-        .spawn(async move { apply_mask(&ns, &mask) })
+        .spawn(async move {
+            if let Some(visible) = ns.screen().map(|s| s.visibleFrame()) {
+                let frame = ns.frame();
+                let top = visible.origin.y + visible.size.height - frame.size.height;
+                ns.setFrameOrigin(NSPoint::new(frame.origin.x, top));
+            }
+        })
         .detach();
 }
 
 /// Resize to `size`, keeping `anchor` where it is, and re-apply `mask`. A
 /// window that was fully on its screen stays on it, except while a resize
-/// handle is dragged: moving the corner under the cursor would feed back into
-/// the drag.
+/// handle is dragged (moving the corner under the cursor would feed back into
+/// the drag), and except up and down for [`Anchor::Row`]: that row never
+/// moves, and its window adds what it shows on the side with room.
 ///
 /// Deferred to the next run-loop turn: AppKit calls straight back into GPUI
 /// when a window's frame changes, which must not happen mid-event.
@@ -155,40 +190,65 @@ pub fn resize(window: &Window, size: Size<f32>, mask: Mask, anchor: Anchor, cx: 
         return;
     };
     cx.foreground_executor()
-        .spawn(async move {
-            let frame = ns.frame();
-            let (w, h) = (size.width as f64, size.height as f64);
-            // AppKit's y axis points up: origin is the bottom-left corner.
-            let (x, y) = match anchor {
-                Anchor::Center => (
-                    frame.origin.x + (frame.size.width - w) / 2.0,
-                    frame.origin.y + (frame.size.height - h) / 2.0,
-                ),
-                Anchor::TopLeft => (frame.origin.x, frame.origin.y + frame.size.height - h),
-                Anchor::BottomCenter => (
-                    frame.origin.x + (frame.size.width - w) / 2.0,
-                    frame.origin.y,
-                ),
-                Anchor::BottomRight => (frame.origin.x + frame.size.width - w, frame.origin.y),
-            };
-            let mut target = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
-            if !matches!(anchor, Anchor::TopLeft)
-                && let Some(visible) = ns.screen().map(|s| s.visibleFrame())
-                && contains(visible, frame)
-            {
-                target.origin.x = target.origin.x.clamp(
-                    visible.origin.x,
-                    (visible.origin.x + visible.size.width - w).max(visible.origin.x),
-                );
-                target.origin.y = target.origin.y.clamp(
-                    visible.origin.y,
-                    (visible.origin.y + visible.size.height - h).max(visible.origin.y),
-                );
-            }
-            ns.setFrame_display(target, true);
-            apply_mask(&ns, &mask);
-        })
+        .spawn(async move { set_frame(&ns, size, &mask, anchor) })
         .detach();
+}
+
+/// Like [`resize`], but first runs `before` on the view, in the same turn as
+/// the frame change, so whatever the view draws next matches the new frame.
+/// Several resizes may be on their way at once; each brings its own state.
+pub fn resize_with<V: 'static>(
+    window: &Window,
+    size: Size<f32>,
+    mask: Mask,
+    anchor: Anchor,
+    cx: &mut Context<V>,
+    before: impl FnOnce(&mut V, &mut Context<V>) + 'static,
+) {
+    let Some(ns) = ns_window(window) else {
+        return;
+    };
+    cx.spawn(async move |view, cx| {
+        if view.update(cx, |v, cx| before(v, cx)).is_ok() {
+            set_frame(&ns, size, &mask, anchor);
+        }
+    })
+    .detach();
+}
+
+fn set_frame(ns: &NSWindow, size: Size<f32>, mask: &Mask, anchor: Anchor) {
+    let frame = ns.frame();
+    let (w, h) = (size.width as f64, size.height as f64);
+    // AppKit's y axis points up: origin is the bottom-left corner.
+    let (x, y) = match anchor {
+        Anchor::Center => (
+            frame.origin.x + (frame.size.width - w) / 2.0,
+            frame.origin.y + (frame.size.height - h) / 2.0,
+        ),
+        Anchor::TopLeft => (frame.origin.x, frame.origin.y + frame.size.height - h),
+        Anchor::Row { before, after } => (
+            frame.origin.x + frame.size.width - w,
+            frame.origin.y + frame.size.height - before as f64 + after as f64 - h,
+        ),
+    };
+    let mut target = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+    if !matches!(anchor, Anchor::TopLeft)
+        && let Some(visible) = ns.screen().map(|s| s.visibleFrame())
+        && contains(visible, frame)
+    {
+        target.origin.x = target.origin.x.clamp(
+            visible.origin.x,
+            (visible.origin.x + visible.size.width - w).max(visible.origin.x),
+        );
+        if !matches!(anchor, Anchor::Row { .. }) {
+            target.origin.y = target.origin.y.clamp(
+                visible.origin.y,
+                (visible.origin.y + visible.size.height - h).max(visible.origin.y),
+            );
+        }
+    }
+    ns.setFrame_display(target, true);
+    apply_mask(ns, mask);
 }
 
 fn contains(outer: NSRect, inner: NSRect) -> bool {

@@ -5,7 +5,10 @@
 //! - `QUIPCALL_SCRIPT="4:regular 8:minimal 12:leave"`: runs the same actions as
 //!   the buttons at the given second: `regular`, `minimal`, `leave`, `quick`
 //!   (quick call from home), `mic`, `camera`, `share` (opens the picker),
-//!   `knobs` (every circle acts as hovered, to see the resize knob),
+//!   `hover` / `stack` (the capsule opens its row of controls, or of the
+//!   people in its stack, as if hovered), `unhover` (closes it), `top`
+//!   (moves it to the top of its screen), `panel` / `people`
+//!   (the call window's side panel, on the transcript or people tab),
 //!   `share-own` / `share-own-60` (shares one of Quipcall's own windows with
 //!   that preset, so tests never capture anything else on screen; with
 //!   `QUIPCALL_FAKE_SCREEN` set, a synthetic test pattern instead),
@@ -81,10 +84,31 @@ fn act(action: &str, cx: &mut App) {
     use crate::Shell;
     use crate::call::{Call, Mode};
 
-    if action == "knobs" {
+    if action == "hover" || action == "stack" || action == "unhover" {
         for handle in cx.windows() {
-            if let Some(bubble) = handle.downcast::<crate::bubble::Bubble>() {
-                let _ = bubble.update(cx, |b, window, cx| b.set_hovered(true, window, cx));
+            if let Some(capsule) = handle.downcast::<crate::capsule::Capsule>() {
+                let which = match action {
+                    "stack" => "people",
+                    "unhover" => "none",
+                    _ => "controls",
+                };
+                let _ = capsule.update(cx, |c, _, cx| c.show(which, cx));
+            }
+        }
+        return;
+    }
+    if action == "top" {
+        for handle in cx.windows() {
+            if let Some(capsule) = handle.downcast::<crate::capsule::Capsule>() {
+                let _ = capsule.update(cx, |_, window, cx| crate::mac::move_to_top(window, cx));
+            }
+        }
+        return;
+    }
+    if action == "panel" || action == "people" {
+        for handle in cx.windows() {
+            if let Some(regular) = handle.downcast::<crate::regular::Regular>() {
+                let _ = regular.update(cx, |r, _, cx| r.show_panel(action == "people", cx));
             }
         }
         return;

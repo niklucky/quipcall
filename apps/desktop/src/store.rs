@@ -27,10 +27,34 @@ pub struct HistoryItem {
     pub started: u64,
     pub duration_secs: u64,
     pub people: Vec<String>,
+    /// Who joined, left and shared, in order. Empty for calls recorded
+    /// before this existed.
+    #[serde(default)]
+    pub events: Vec<CallEvent>,
+}
+
+/// Something that happened in a call, `at` seconds after it connected.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallEvent {
+    pub at: u64,
+    pub who: String,
+    pub what: Happened,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Happened {
+    Joined,
+    Left,
+    StartedSharing,
+    StoppedSharing,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 pub struct Store {
+    /// The name others see. Unset until the first launch asks for it.
+    #[serde(default)]
+    pub name: Option<String>,
     pub rooms: Vec<SavedRoom>,
     /// Newest first.
     pub history: Vec<HistoryItem>,
@@ -81,6 +105,51 @@ impl Store {
         self.rooms.retain(|r| r.id != id);
     }
 
+    pub fn rename_room(&mut self, id: &str, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        if let Some(room) = self.rooms.iter_mut().find(|r| r.id == id) {
+            room.name = name.to_owned();
+        }
+    }
+
+    /// Keep a one-time room: it joins the rooms list under `name`.
+    pub fn keep_room(&mut self, id: &str, name: &str) {
+        if !self.rooms.iter().any(|r| r.id == id) {
+            self.rooms.push(SavedRoom {
+                id: id.to_owned(),
+                name: name.to_owned(),
+            });
+        }
+        for item in self.history.iter_mut().filter(|h| h.room_id == id) {
+            item.one_time = false;
+            item.room_name = name.to_owned();
+        }
+    }
+
+    /// The calls in a room, newest first.
+    pub fn calls_in<'a>(&'a self, room_id: &'a str) -> impl Iterator<Item = &'a HistoryItem> {
+        self.history.iter().filter(move |h| h.room_id == room_id)
+    }
+
+    /// Everyone you've talked to in a room, most frequent first.
+    pub fn people_in(&self, room_id: &str) -> Vec<String> {
+        let mut counts: Vec<(String, usize)> = Vec::new();
+        for item in self.calls_in(room_id) {
+            for name in &item.people {
+                match counts.iter_mut().find(|(n, _)| n == name) {
+                    Some((_, count)) => *count += 1,
+                    None => counts.push((name.clone(), 1)),
+                }
+            }
+        }
+        // Stable: ties keep the order of the most recent call.
+        counts.sort_by_key(|c| std::cmp::Reverse(c.1));
+        counts.into_iter().map(|(name, _)| name).collect()
+    }
+
     /// A name for a new room that isn't taken yet: "Room 1", "Room 2", …
     pub fn next_room_name(&self) -> String {
         (1..)
@@ -103,6 +172,7 @@ impl Store {
                 started,
                 duration_secs: ended.duration.as_secs(),
                 people: ended.people.clone(),
+                events: ended.events.clone(),
             },
         );
         self.history.truncate(HISTORY_LIMIT);
@@ -139,28 +209,104 @@ fn random_suffix() -> String {
     format!("{:04x}", (mixed >> 32) & 0xffff)
 }
 
-/// "just now", "5 min ago", "3 h ago", "2 days ago".
-pub fn ago(unix_secs: u64) -> String {
-    if unix_secs == 0 {
-        return "didn't connect".into();
-    }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let secs = now.saturating_sub(unix_secs);
-    match secs {
-        0..60 => "just now".into(),
-        60..3600 => format!("{} min ago", secs / 60),
-        3600..86400 => format!("{} h ago", secs / 3600),
-        86400..172800 => "yesterday".into(),
-        _ => format!("{} days ago", secs / 86400),
-    }
-}
-
 pub fn duration(secs: u64) -> String {
     match secs {
         0..60 => format!("{secs} s"),
         60..3600 => format!("{} min", secs / 60),
         _ => format!("{} h {} min", secs / 3600, secs % 3600 / 60),
+    }
+}
+
+/// Local wall-clock time of day, "10:02", for unix seconds.
+pub fn clock(unix_secs: u64) -> String {
+    let (_, hour, minute) = local_parts(unix_secs);
+    format!("{hour:02}:{minute:02}")
+}
+
+/// The day heading for unix seconds: "Today", "Yesterday", "Wednesday"
+/// within a week, then "Nov 2".
+pub fn day(unix_secs: u64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let (days_then, ..) = local_parts(unix_secs);
+    let (days_now, ..) = local_parts(now);
+    match days_now - days_then {
+        0 => "Today".into(),
+        1 => "Yesterday".into(),
+        2..7 => WEEKDAYS[(days_then + 4).rem_euclid(7) as usize].into(),
+        _ => {
+            let (_, month, day) = civil_from_days(days_then);
+            format!("{} {day}", MONTHS[month as usize - 1])
+        }
+    }
+}
+
+/// "Wed" for a weekday name, shorter forms of [`day`] for tight rows.
+pub fn day_short(unix_secs: u64) -> String {
+    let long = day(unix_secs);
+    match long.as_str() {
+        "Today" | "Yesterday" => long,
+        _ if WEEKDAYS.contains(&long.as_str()) => long[..3].to_owned(),
+        _ => long,
+    }
+}
+
+const WEEKDAYS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// Days since 1970-01-01 in local time, hour, minute.
+fn local_parts(unix_secs: u64) -> (i64, u32, u32) {
+    let local = unix_secs as i64 + utc_offset_secs();
+    let days = local.div_euclid(86_400);
+    let secs = local.rem_euclid(86_400);
+    (days, (secs / 3600) as u32, (secs % 3600 / 60) as u32)
+}
+
+/// This Mac's current offset from UTC, in seconds.
+fn utc_offset_secs() -> i64 {
+    #[cfg(target_os = "macos")]
+    {
+        objc2_foundation::NSTimeZone::localTimeZone().secondsFromGMT() as i64
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        0
+    }
+}
+
+/// (year, month 1–12, day 1–31) for days since 1970-01-01 (Howard Hinnant).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(month <= 2), month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::civil_from_days;
+
+    #[test]
+    fn dates() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        // 2026-11-07
+        assert_eq!(civil_from_days(20_764), (2026, 11, 7));
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
     }
 }

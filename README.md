@@ -8,7 +8,7 @@ Alpha at https://quipcall.com. Get the Mac app at https://quipcall.com/download/
 
 | Path | What |
 |---|---|
-| `apps/desktop` | Mac app (GPUI). Floating circles, a toolbar, a tile window and a share picker |
+| `apps/desktop` | Mac app (GPUI). Home, a floating capsule of faces, a call window and a share picker |
 | `apps/server` | Axum API: `/api/join` returns LiveKit tokens |
 | `apps/web` | Svelte 5 web client |
 | `crates/core` | Media and call logic, no UI code (LiveKit SDK, capture, video) |
