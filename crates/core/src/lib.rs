@@ -23,6 +23,7 @@ mod screen;
 #[cfg(target_os = "macos")]
 mod screen_mac;
 mod transcribe;
+pub mod trial;
 pub mod video;
 
 use std::collections::HashMap;
@@ -577,14 +578,21 @@ impl Engine {
     /// Record the call into `path`: everyone's voice, mixed (.m4a), and with
     /// `screen`, that screen or window too (.mp4). Everyone is told first (a
     /// participant attribute), so nobody is recorded without seeing it. One
-    /// recording per call: refused while someone else records.
-    pub fn start_recording(&self, path: PathBuf, screen: Option<(SourceId, ScreenSharePreset)>) {
+    /// recording per call: refused while someone else records. With
+    /// `each_voice`, every voice also goes into a file of its own, in a
+    /// folder named after the recording.
+    pub fn start_recording(
+        &self,
+        path: PathBuf,
+        screen: Option<(SourceId, ScreenSharePreset)>,
+        each_voice: bool,
+    ) {
         let state = self.state.clone();
         let events = self.events.clone();
         let handle = self.rt().handle().clone();
         let with_screen = screen.is_some();
         self.rt().spawn(async move {
-            let event = match start_recording(&state, &handle, path, screen).await {
+            let event = match start_recording(&state, &handle, path, screen, each_voice).await {
                 Ok(path) => Event::RecordingStarted {
                     path,
                     screen: with_screen,
@@ -947,9 +955,36 @@ async fn start_recording(
     handle: &tokio::runtime::Handle,
     path: PathBuf,
     screen: Option<(SourceId, ScreenSharePreset)>,
+    each_voice: bool,
 ) -> anyhow::Result<PathBuf> {
     let room = state.lock().room.clone().context("not in a call")?;
     anyhow::ensure!(state.lock().recorder.is_none(), "you're already recording");
+    // "Design review 2026-11-10 10.02 voices/Anna Petrova.m4a".
+    let voices = each_voice.then(|| {
+        let stem = path.file_stem().map_or_else(
+            || "Recording".to_owned(),
+            |s| s.to_string_lossy().into_owned(),
+        );
+        let weak = Arc::downgrade(&room);
+        let name_of: record::NameOf = Arc::new(move |speaker: &Speaker| {
+            let Some(room) = weak.upgrade() else {
+                return "Someone".to_owned();
+            };
+            match speaker {
+                Speaker::Local => room.local_participant().name(),
+                Speaker::Remote(identity) => room
+                    .remote_participants()
+                    .get(&ParticipantIdentity(identity.clone()))
+                    .map(|p| p.name())
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| identity.clone()),
+            }
+        });
+        record::Voices {
+            dir: path.with_file_name(format!("{stem} voices")),
+            name_of,
+        }
+    });
     if let Some(p) = room
         .remote_participants()
         .values()
@@ -970,8 +1005,10 @@ async fn start_recording(
         }
     };
     let listener = listen(state, handle);
-    let started =
-        tokio::task::spawn_blocking(move || record::Recorder::start(listener, path, screen)).await;
+    let started = tokio::task::spawn_blocking(move || {
+        record::Recorder::start(listener, path, screen, voices)
+    })
+    .await;
     let recorder = match started {
         Ok(Ok(recorder)) => recorder,
         Ok(Err(e)) => {

@@ -209,8 +209,18 @@ impl Regular {
         if !self.record_menu || !self.call.read(cx).can_record() {
             return None;
         }
+        let screen_first = crate::Shell::global(cx)
+            .read(cx)
+            .store
+            .recording
+            .screen_first;
         let choose = |id: &'static str, label: &'static str, glyph: Icon, screen: bool| {
-            button(id, label, Some(glyph), Kind::Secondary, false).on_click(cx.listener(
+            let kind = if screen == screen_first {
+                Kind::Primary
+            } else {
+                Kind::Secondary
+            };
+            button(id, label, Some(glyph), kind, false).on_click(cx.listener(
                 move |this, _, _, cx| {
                     this.record_menu = false;
                     this.call.update(cx, |c, cx| {

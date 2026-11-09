@@ -9,6 +9,10 @@
 //! come, shifted by that slack so picture and sound line up. The writer
 //! (`record_mac`) encodes AAC (and H.264) in fragments, so a crash loses only
 //! the last few seconds.
+//!
+//! Optionally each voice goes into a file of its own as well ([`Voices`]),
+//! in a folder next to the mix. A voice's file starts with silence up to
+//! when it was first heard, so every file lines up with the mix.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -34,9 +38,20 @@ const CHUNK: usize = FRAME * 10;
 /// The loudest a mixed sample may be; louder frames are turned down.
 const CEILING: f32 = 0.98;
 
+/// Names a voice for its own file.
+pub(crate) type NameOf = Arc<dyn Fn(&Speaker) -> String + Send + Sync>;
+
+/// Each voice in a file of its own, in `dir`.
+pub(crate) struct Voices {
+    pub(crate) dir: PathBuf,
+    pub(crate) name_of: NameOf,
+}
+
 /// What was saved.
 #[derive(Clone, Debug)]
 pub struct Saved {
+    /// Each voice on its own, if asked for.
+    pub voices: Option<PathBuf>,
     pub path: PathBuf,
     pub duration: Duration,
     pub bytes: u64,
@@ -94,6 +109,7 @@ impl Recorder {
         listener: Listener,
         path: PathBuf,
         screen: Option<ScreenInput>,
+        voices: Option<Voices>,
     ) -> anyhow::Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -118,7 +134,7 @@ impl Recorder {
                             anyhow::bail!(message);
                         }
                     };
-                    run(listener, screen, writer, &stop, path)
+                    run(listener, screen, writer, voices, &stop, path)
                 }
             })?;
         match ready_rx.recv() {
@@ -206,6 +222,7 @@ fn run(
     listener: Listener,
     mut screen: Option<ScreenInput>,
     mut writer: Writer,
+    voices: Option<Voices>,
     stop: &AtomicBool,
     path: PathBuf,
 ) -> anyhow::Result<Saved> {
@@ -213,6 +230,9 @@ fn run(
     let mut chunk: Vec<f32> = Vec::with_capacity(CHUNK);
     let start = Instant::now();
     let mut mixed: u64 = 0;
+    let voices_dir = voices.as_ref().map(|v| v.dir.clone());
+    let mut files = voices.map(VoiceFiles::new);
+    let mut each: HashMap<Speaker, [f32; FRAME]> = HashMap::new();
     loop {
         let stopping = stop.load(Ordering::Relaxed);
         while let Ok(frame) = listener.frames.try_recv() {
@@ -222,7 +242,11 @@ fn run(
         // One frame for every 10 ms since the start.
         let due = start.elapsed().as_micros() as u64 / 10_000;
         while mixed < due {
-            chunk.extend_from_slice(&mixer.pop());
+            let out = files.as_ref().map(|_| &mut each);
+            chunk.extend_from_slice(&mixer.pop(out));
+            if let Some(files) = &mut files {
+                files.add(&mut each, mixed);
+            }
             mixed += 1;
             if chunk.len() >= CHUNK {
                 writer.write(&chunk)?;
@@ -243,15 +267,23 @@ fn run(
     drop(screen);
     // What's still buffered was heard before you pressed Stop.
     while mixer.buffered() > 0 {
-        chunk.extend_from_slice(&mixer.pop());
+        let out = files.as_ref().map(|_| &mut each);
+        chunk.extend_from_slice(&mixer.pop(out));
+        if let Some(files) = &mut files {
+            files.add(&mut each, mixed);
+        }
         mixed += 1;
     }
     if !chunk.is_empty() {
         writer.write(&chunk)?;
     }
     drop(listener);
+    if let Some(files) = files {
+        files.finish();
+    }
     let bytes = writer.finish()?;
     Ok(Saved {
+        voices: voices_dir.filter(|d| d.exists()),
         path,
         duration: Duration::from_micros(mixed * 10_000),
         bytes,
@@ -285,12 +317,21 @@ impl Mixer {
     }
 
     /// The next 10 ms of everyone together. Voices that have nothing left
-    /// count as silence.
-    fn pop(&mut self) -> [f32; FRAME] {
+    /// count as silence. With `each`, every voice's own 10 ms too.
+    fn pop(&mut self, mut each: Option<&mut HashMap<Speaker, [f32; FRAME]>>) -> [f32; FRAME] {
         let mut out = [0.0f32; FRAME];
-        for voice in self.voices.values_mut() {
-            for (o, s) in out.iter_mut().zip(voice.drain(..FRAME.min(voice.len()))) {
+        for (speaker, voice) in self.voices.iter_mut() {
+            let mut own = [0.0f32; FRAME];
+            for ((o, mine), s) in out
+                .iter_mut()
+                .zip(own.iter_mut())
+                .zip(voice.drain(..FRAME.min(voice.len())))
+            {
                 *o += s;
+                *mine = s;
+            }
+            if let Some(each) = each.as_deref_mut() {
+                each.insert(speaker.clone(), own);
             }
         }
         self.voices.retain(|_, v| !v.is_empty());
@@ -325,6 +366,117 @@ impl Mixer {
     }
 }
 
+/// A file per voice, made when the voice is first heard.
+struct VoiceFiles {
+    voices: Voices,
+    files: HashMap<Speaker, (Writer, Vec<f32>)>,
+    /// Voices whose file couldn't be made: not tried again.
+    failed: std::collections::HashSet<Speaker>,
+    names: Vec<String>,
+}
+
+impl VoiceFiles {
+    fn new(voices: Voices) -> Self {
+        Self {
+            voices,
+            files: HashMap::new(),
+            failed: Default::default(),
+            names: Vec::new(),
+        }
+    }
+
+    /// Frame `at` (of the mix) for every voice: theirs from `each`, which
+    /// is emptied, and silence for whoever was quiet.
+    fn add(&mut self, each: &mut HashMap<Speaker, [f32; FRAME]>, at: u64) {
+        let new: Vec<Speaker> = each
+            .keys()
+            .filter(|s| !self.files.contains_key(*s) && !self.failed.contains(*s))
+            .cloned()
+            .collect();
+        for speaker in new {
+            match self.create(&speaker, at) {
+                Some(file) => {
+                    self.files.insert(speaker, file);
+                }
+                None => {
+                    self.failed.insert(speaker);
+                }
+            }
+        }
+        for (speaker, (writer, chunk)) in &mut self.files {
+            match each.get(speaker) {
+                Some(frame) => chunk.extend_from_slice(frame),
+                None => chunk.extend(std::iter::repeat_n(0.0, FRAME)),
+            }
+            if chunk.len() >= CHUNK {
+                if let Err(e) = writer.write(chunk) {
+                    tracing::warn!("a voice's file: {e:#}");
+                }
+                chunk.clear();
+            }
+        }
+        each.clear();
+    }
+
+    /// A file named after the voice, starting with `at` frames of silence.
+    fn create(&mut self, speaker: &Speaker, at: u64) -> Option<(Writer, Vec<f32>)> {
+        let name: String = (self.voices.name_of)(speaker)
+            .chars()
+            .map(|c| {
+                if matches!(c, '/' | ':' | '\\') || c.is_control() {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let name = (1..)
+            .map(|n| {
+                if n == 1 {
+                    name.clone()
+                } else {
+                    format!("{name} {n}")
+                }
+            })
+            .find(|n| !self.names.contains(n))
+            .expect("unbounded");
+        self.names.push(name.clone());
+        let result = std::fs::create_dir_all(&self.voices.dir)
+            .map_err(anyhow::Error::from)
+            .and_then(|_| Writer::create(&self.voices.dir.join(format!("{name}.m4a")), None));
+        match result {
+            Ok(mut writer) => {
+                let silence = vec![0.0f32; CHUNK];
+                let mut left = at as usize * FRAME;
+                while left > 0 {
+                    let n = left.min(CHUNK);
+                    if let Err(e) = writer.write(&silence[..n]) {
+                        tracing::warn!("a voice's file: {e:#}");
+                        break;
+                    }
+                    left -= n;
+                }
+                Some((writer, Vec::with_capacity(CHUNK)))
+            }
+            Err(e) => {
+                tracing::warn!("a voice's file for {name}: {e:#}");
+                None
+            }
+        }
+    }
+
+    fn finish(self) {
+        for (_, (mut writer, chunk)) in self.files {
+            if !chunk.is_empty() {
+                let _ = writer.write(&chunk);
+            }
+            if let Err(e) = writer.finish() {
+                tracing::warn!("a voice's file: {e:#}");
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 use crate::record_mac::MediaWriter as Writer;
 
@@ -352,18 +504,36 @@ mod tests {
     }
 
     #[test]
+    fn each_voice_comes_out_on_its_own_too() {
+        let mut mixer = Mixer::default();
+        let anna = Speaker::Remote("anna".into());
+        for _ in 0..=PRIME / FRAME {
+            mixer.push(Speaker::Local, &tone(0.25));
+            mixer.push(anna.clone(), &tone(0.5));
+        }
+        let mut each = HashMap::new();
+        for _ in 0..PRIME / FRAME {
+            mixer.pop(Some(&mut each));
+        }
+        let mix = mixer.pop(Some(&mut each));
+        assert!((mix[0] - 0.75).abs() < 1e-6);
+        assert!((each[&Speaker::Local][0] - 0.25).abs() < 1e-6);
+        assert!((each[&anna][0] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
     fn voices_add_up_after_a_little_slack() {
         let mut mixer = Mixer::default();
         mixer.push(Speaker::Local, &tone(0.2));
         mixer.push(Speaker::Remote("anna".into()), &tone(0.3));
         // The slack comes out first, as silence.
         for _ in 0..PRIME / FRAME {
-            assert!(mixer.pop().iter().all(|&s| s == 0.0));
+            assert!(mixer.pop(None).iter().all(|&s| s == 0.0));
         }
-        let frame = mixer.pop();
+        let frame = mixer.pop(None);
         assert!(frame.iter().all(|&s| (s - 0.5).abs() < 1e-6));
         // Nobody has anything left: silence, and the voices are forgotten.
-        assert!(mixer.pop().iter().all(|&s| s == 0.0));
+        assert!(mixer.pop(None).iter().all(|&s| s == 0.0));
         assert!(mixer.voices.is_empty());
     }
 
@@ -385,9 +555,9 @@ mod tests {
             }
         }
         for _ in 0..PRIME / FRAME {
-            mixer.pop();
+            mixer.pop(None);
         }
-        let frame = mixer.pop();
+        let frame = mixer.pop(None);
         assert!(frame.iter().all(|s| s.abs() <= CEILING + 1e-6));
         assert!(frame[0] > 0.9, "turned down, not muted");
     }

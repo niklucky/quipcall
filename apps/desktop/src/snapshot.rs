@@ -23,7 +23,10 @@
 //!   `hover-transcript` (the capsule's rows), `settings`, `ask` (asks the
 //!   first other Mac that can transcribe, or hands yours over to it),
 //!   `accept` / `decline` (answers the question you're asked), `play`
-//!   (Home plays the selected call from its first line, muted).
+//!   (Home plays the selected call from its first line, muted),
+//!   `settings-recording` (its Recording tab), `try` (Try it with your
+//!   voice: test instances speak `QUIPCALL_FAKE_MIC`, a 48 kHz float WAV),
+//!   `each-voice` (records each voice in its own file too).
 
 use std::time::Duration;
 
@@ -184,6 +187,24 @@ fn act(action: &str, cx: &mut App) {
     }
     if action == "settings" {
         crate::settings::open(cx);
+        return;
+    }
+    if action == "each-voice" {
+        Shell::global(cx).update(cx, |s, _| s.store.recording.each_voice = true);
+        return;
+    }
+    if action == "settings-recording" || action == "try" {
+        for handle in cx.windows() {
+            if let Some(settings) = handle.downcast::<crate::settings::Settings>() {
+                let _ = settings.update(cx, |s, _, cx| {
+                    if action == "try" {
+                        s.start_trial(cx)
+                    } else {
+                        s.show_recording(cx)
+                    }
+                });
+            }
+        }
         return;
     }
     if action == "quit" {

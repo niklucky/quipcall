@@ -1629,8 +1629,19 @@ impl Capsule {
     /// "Record on this Mac", then Audio or Audio and screen (the share
     /// picker chooses which screen).
     fn record_choice(&self, cx: &mut Context<Self>) -> Div {
+        // What Settings says to offer first.
+        let screen_first = crate::Shell::global(cx)
+            .read(cx)
+            .store
+            .recording
+            .screen_first;
         let choose = |id: &'static str, label: &'static str, glyph: Icon, screen: bool| {
-            button(id, label, Some(glyph), Kind::Secondary, true)
+            let kind = if screen == screen_first {
+                Kind::Primary
+            } else {
+                Kind::Secondary
+            };
+            button(id, label, Some(glyph), kind, true)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.set_open(None, window, cx);

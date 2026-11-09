@@ -720,8 +720,13 @@ impl Call {
             return;
         }
         let ext = if screen.is_some() { "mp4" } else { "m4a" };
-        self.engine
-            .start_recording(recording_path(&self.room.name, ext), screen);
+        let settings = Shell::global(cx).read(cx).store.recording.clone();
+        let dir = store::recordings_dir(settings.folder.as_deref());
+        self.engine.start_recording(
+            recording_path(&dir, &self.room.name, ext),
+            screen,
+            settings.each_voice,
+        );
         self.record_starting = true;
         cx.notify();
     }
@@ -969,12 +974,18 @@ impl Call {
         cx: &mut Context<Self>,
     ) {
         if let Some(file) = &recording.file {
+            // The engine puts each voice's file there, if Settings asked.
+            let voices = file
+                .file_stem()
+                .map(|stem| file.with_file_name(format!("{} voices", stem.to_string_lossy())))
+                .filter(|dir| dir.is_dir());
             self.recordings.push(RecordingFile {
                 path: file.clone(),
                 at: recording.at.as_secs(),
                 duration_secs: duration.as_secs(),
                 screen: recording.screen,
                 at_ms: Some(recording.at.as_millis() as i64),
+                voices,
             });
             let me = self.me.read(cx).name.clone();
             self.log(me, Happened::StoppedRecording, cx);
@@ -1528,9 +1539,8 @@ impl Call {
 }
 
 /// A new file for a recording in `room`, e.g. "Design review 2026-11-09
-/// 11.14.m4a" (`ext` "m4a" or "mp4"), in [`store::recordings_dir`].
-fn recording_path(room: &str, ext: &str) -> PathBuf {
-    let dir = store::recordings_dir();
+/// 11.14.m4a" (`ext` "m4a" or "mp4"), in `dir`.
+fn recording_path(dir: &std::path::Path, room: &str, ext: &str) -> PathBuf {
     let room: String = room
         .chars()
         .map(|c| {

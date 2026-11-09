@@ -52,6 +52,20 @@ pub struct SaidLine {
     pub text: String,
 }
 
+/// Recording, as set in Settings.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingSettings {
+    /// Record offers "Audio and screen" first.
+    #[serde(default)]
+    pub screen_first: bool,
+    /// Each voice in a file of its own too, next to the mix.
+    #[serde(default)]
+    pub each_voice: bool,
+    /// Where recordings go; `None` for Movies › Quipcall.
+    #[serde(default)]
+    pub folder: Option<PathBuf>,
+}
+
 /// Transcription, as set in Settings.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptionSettings {
@@ -93,6 +107,9 @@ pub struct RecordingFile {
     /// lines its player plays from. Recordings from before this have `at`.
     #[serde(default)]
     pub at_ms: Option<i64>,
+    /// Each voice on its own, in this folder.
+    #[serde(default)]
+    pub voices: Option<PathBuf>,
 }
 
 impl RecordingFile {
@@ -138,6 +155,8 @@ pub struct Store {
     pub history: Vec<HistoryItem>,
     #[serde(default)]
     pub transcription: TranscriptionSettings,
+    #[serde(default)]
+    pub recording: RecordingSettings,
 }
 
 impl Store {
@@ -261,11 +280,15 @@ impl Store {
     }
 }
 
-/// Where recordings go: Movies › Quipcall (macOS doesn't ask for access to
-/// Movies), or `$QUIPCALL_DATA_DIR/Recordings` for tests.
-pub fn recordings_dir() -> PathBuf {
+/// Where recordings go: the folder chosen in Settings, else Movies ›
+/// Quipcall (macOS doesn't ask for access to Movies), or
+/// `$QUIPCALL_DATA_DIR/Recordings` for tests.
+pub fn recordings_dir(chosen: Option<&std::path::Path>) -> PathBuf {
     if let Some(dir) = std::env::var_os("QUIPCALL_DATA_DIR") {
         return PathBuf::from(dir).join("Recordings");
+    }
+    if let Some(dir) = chosen {
+        return dir.to_owned();
     }
     let home = std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into());
     PathBuf::from(home).join("Movies/Quipcall")

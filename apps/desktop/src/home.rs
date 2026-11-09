@@ -1121,6 +1121,10 @@ fn recording_row(ix: usize, r: &store::RecordingFile, call_started: u64) -> Stat
         }
         .into(),
     );
+    let voices = r.voices.clone().filter(|d| d.is_dir());
+    if voices.is_some() {
+        meta.push("each voice too".into());
+    }
     match size {
         Some(bytes) => meta.push(store::file_size(bytes)),
         None => meta.push("moved or deleted".into()),
@@ -1185,6 +1189,12 @@ fn recording_row(ix: usize, r: &store::RecordingFile, call_started: u64) -> Stat
                     true,
                 )
                 .on_click(move |_, _, _| show_in_finder(&reveal)),
+            )
+        })
+        .when_some(voices, |row, dir| {
+            row.child(
+                button(("voices", ix), "Voices", None, Kind::Secondary, true)
+                    .on_click(move |_, _, _| open_file(&dir)),
             )
         })
 }
