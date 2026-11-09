@@ -73,6 +73,13 @@ pub struct Home {
 }
 
 impl Home {
+    /// Snapshot tests: show the selected call's recordings.
+    #[cfg(feature = "snapshot")]
+    pub fn show_recordings(&mut self, cx: &mut Context<Self>) {
+        self.tab = Tab::Recordings;
+        cx.notify();
+    }
+
     fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let shell = Shell::global(cx);
         let store = &shell.read(cx).store;
@@ -325,6 +332,9 @@ impl Home {
                             .when(!item.events.is_empty(), |el| {
                                 el.child(icon(Icon::Captions, 12.0, rgb(TEXT_FAINT)))
                             })
+                            .when(!item.recordings.is_empty(), |el| {
+                                el.child(icon(Icon::CircleDot, 12.0, rgb(TEXT_FAINT)))
+                            })
                             .on_click(
                                 cx.listener(move |this, _, _, cx| {
                                     this.select(room.clone(), nth, cx)
@@ -454,6 +464,11 @@ impl Home {
                         icon_button("edit-me", Icon::Pencil, 28.0)
                             .tooltip(tooltip("Change your name"))
                             .on_click(|_, _, cx| crate::onboarding::open_profile(cx)),
+                    )
+                    .child(
+                        icon_button("settings", Icon::Settings, 28.0)
+                            .tooltip(tooltip("Settings (⌘,)"))
+                            .on_click(|_, _, cx| crate::settings::open(cx)),
                     ),
             )
     }
@@ -728,7 +743,7 @@ impl Home {
                 "tab-recordings",
                 Tab::Recordings,
                 "Recordings",
-                Some(0),
+                Some(item.as_ref().map_or(0, |i| i.recordings.len())),
             ))
             .child(tab("tab-files", Tab::Files, "Files", Some(0)));
 
@@ -748,23 +763,31 @@ impl Home {
             (Some(item), Tab::Transcript) => div()
                 .flex()
                 .flex_col()
-                .child(ui::note(
-                    Icon::Captions,
-                    "Transcripts are on their way. Until then, a call's timeline shows who joined, left and shared.",
-                ))
-                .children(timeline::render(
-                    &item.events,
-                    item.started,
-                    &me,
-                    Some(item.duration_secs),
-                ))
+                .when(item.transcript.is_empty(), |el| {
+                    el.child(ui::note(
+                        Icon::Captions,
+                        "Not transcribed. Press Transcribe in a call, and what everyone says shows up here.",
+                    ))
+                })
+                .children(transcript_items(item, &me))
                 .into_any_element(),
-            (Some(_), Tab::Recordings) => empty_state(
+            (Some(item), Tab::Recordings) if item.recordings.is_empty() => empty_state(
                 Icon::CircleDot,
                 "No recordings",
-                "Recording calls is coming. Everyone will see when a call is recorded.",
+                "Press Record during a call to keep its audio on this Mac. Everyone in the call sees that it's recorded.",
             )
             .into_any_element(),
+            (Some(item), Tab::Recordings) => div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .children(
+                    item.recordings
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, r)| recording_row(ix, r, item.started)),
+                )
+                .into_any_element(),
             (Some(_), Tab::Files) => empty_state(
                 Icon::Upload,
                 "No files",
@@ -784,6 +807,159 @@ impl Home {
                 .pb(px(24.0))
                 .child(body),
         )
+    }
+}
+
+/// One of a call's recordings: opens in QuickTime Player, or shows in Finder.
+/// A past call: its timeline with what was said between, in time order.
+fn transcript_items(item: &HistoryItem, me: &str) -> Vec<AnyElement> {
+    enum Entry<'a> {
+        Event(&'a store::CallEvent),
+        Said(&'a store::SaidLine),
+    }
+    let mut entries: Vec<(i64, Entry)> = item
+        .events
+        .iter()
+        .map(|e| (e.at as i64 * 1000, Entry::Event(e)))
+        .chain(item.transcript.iter().map(|s| (s.at_ms, Entry::Said(s))))
+        .collect();
+    entries.sort_by_key(|(at, _)| *at);
+    let mut out: Vec<AnyElement> = Vec::new();
+    if item.started > 0 {
+        out.push(timeline::started(item.started).into_any_element());
+    }
+    let mut last: Option<(&str, bool)> = None;
+    for (_, entry) in &entries {
+        match entry {
+            Entry::Event(e) => {
+                last = None;
+                out.push(timeline::event_line(e, item.started, me).into_any_element());
+            }
+            Entry::Said(s) => {
+                let first = last != Some((s.who.as_str(), s.mine));
+                last = Some((s.who.as_str(), s.mine));
+                let header = first.then(|| {
+                    let when = crate::transcript::clock_at(item.started, s.at_ms);
+                    if s.mine {
+                        when
+                    } else {
+                        format!("{} · {when}", first_name(&s.who))
+                    }
+                });
+                out.push(
+                    crate::transcript::bubble(&s.text, s.mine, false, header).into_any_element(),
+                );
+            }
+        }
+    }
+    if item.started > 0 {
+        out.push(timeline::ended(item.started, item.duration_secs).into_any_element());
+    }
+    out
+}
+
+fn recording_row(ix: usize, r: &store::RecordingFile, call_started: u64) -> Stateful<Div> {
+    let size = std::fs::metadata(&r.path).ok().map(|m| m.len());
+    let name = r
+        .path
+        .file_stem()
+        .map_or_else(|| "Recording".into(), |n| n.to_string_lossy().into_owned());
+    let mut meta = Vec::new();
+    if call_started > 0 {
+        meta.push(store::clock(call_started + r.at));
+    }
+    meta.push(store::duration(r.duration_secs));
+    meta.push(
+        if r.screen {
+            "audio and screen"
+        } else {
+            "audio"
+        }
+        .into(),
+    );
+    match size {
+        Some(bytes) => meta.push(store::file_size(bytes)),
+        None => meta.push("moved or deleted".into()),
+    }
+    let (open, reveal) = (r.path.clone(), r.path.clone());
+    div()
+        .id(("recording", ix))
+        .flex()
+        .items_center()
+        .gap(px(12.0))
+        .p(px(8.0))
+        .mx(px(-8.0))
+        .rounded(px(9.0))
+        .hover(|s| s.bg(white(0.04)))
+        .child(
+            div()
+                .size(px(36.0))
+                .flex_none()
+                .rounded(px(9.0))
+                .bg(rgb(RAISED))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(
+                    if r.screen {
+                        Icon::Monitor
+                    } else {
+                        Icon::CircleDot
+                    },
+                    16.0,
+                    rgb(crate::theme::RECORDING),
+                )),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .truncate()
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(TEXT_DIM))
+                        .child(meta.join(" · ")),
+                ),
+        )
+        .when(size.is_some(), |row| {
+            row.child(
+                button(("open", ix), "Open", None, Kind::Secondary, true)
+                    .on_click(move |_, _, _| open_file(&open)),
+            )
+            .child(
+                button(
+                    ("reveal", ix),
+                    "Show in Finder",
+                    None,
+                    Kind::Secondary,
+                    true,
+                )
+                .on_click(move |_, _, _| show_in_finder(&reveal)),
+            )
+        })
+}
+
+/// Open `path` in its app (QuickTime Player for recordings).
+pub fn open_file(path: &std::path::Path) {
+    if let Err(e) = std::process::Command::new("open").arg(path).spawn() {
+        tracing::warn!("open {}: {e}", path.display());
+    }
+}
+
+/// A Finder window with `path` selected.
+pub fn show_in_finder(path: &std::path::Path) {
+    if let Err(e) = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn()
+    {
+        tracing::warn!("show {}: {e}", path.display());
     }
 }
 

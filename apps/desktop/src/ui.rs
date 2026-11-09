@@ -11,8 +11,8 @@ use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
 
 use crate::assets::Icon;
 use crate::theme::{
-    ACCENT, BG, DANGER, RAISED, RAISED_2, TEXT, TEXT_DIM, TEXT_FAINT, avatar_background, initials,
-    white,
+    ACCENT, BG, DANGER, RAISED, RAISED_2, RECORDING, TEXT, TEXT_DIM, TEXT_FAINT, avatar_background,
+    initials, white,
 };
 use crate::video_mac::Frame;
 
@@ -199,6 +199,8 @@ pub enum Tone {
     /// A panel this button opens is open.
     Selected,
     Danger,
+    /// The call is being recorded.
+    Recording,
 }
 
 /// The round buttons of the call controls. Clicks never start a window drag.
@@ -214,6 +216,7 @@ pub fn round_button(
         Tone::Active => (rgb(ACCENT).into(), rgb(0xffffff).into()),
         Tone::Selected => (rgb(TEXT).into(), rgb(BG).into()),
         Tone::Danger => (rgb(DANGER).into(), rgb(0xffffff).into()),
+        Tone::Recording => (gpui::rgba(0xff453a3d).into(), rgb(RECORDING).into()),
     };
     div()
         .id(id)

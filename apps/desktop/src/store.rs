@@ -27,10 +27,65 @@ pub struct HistoryItem {
     pub started: u64,
     pub duration_secs: u64,
     pub people: Vec<String>,
-    /// Who joined, left and shared, in order. Empty for calls recorded
-    /// before this existed.
+    /// Who joined, left, shared and recorded, in order. Empty for calls
+    /// recorded before this existed.
     #[serde(default)]
     pub events: Vec<CallEvent>,
+    /// What you recorded in the call, on this Mac.
+    #[serde(default)]
+    pub recordings: Vec<RecordingFile>,
+    /// What was said, if the call was transcribed.
+    #[serde(default)]
+    pub transcript: Vec<SaidLine>,
+}
+
+/// A line of a call's transcript.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaidLine {
+    /// When they began, in milliseconds since the call connected (before
+    /// it, if you joined while it was being transcribed).
+    pub at_ms: i64,
+    pub who: String,
+    /// You said it.
+    #[serde(default)]
+    pub mine: bool,
+    pub text: String,
+}
+
+/// Transcription, as set in Settings.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptionSettings {
+    /// ISO 639-1 of the language spoken; `None` to let the model tell.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// A catalog id; `None` for the one that fits the language.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Don't open the transcript window when a transcript starts.
+    #[serde(default)]
+    pub keep_window_closed: bool,
+}
+
+impl TranscriptionSettings {
+    /// The speech model to use.
+    pub fn model(&self) -> &'static quipcall_core::ModelInfo {
+        self.model
+            .as_deref()
+            .and_then(quipcall_core::catalog::model)
+            .unwrap_or_else(|| quipcall_core::catalog::for_language(self.language.as_deref()))
+    }
+}
+
+/// A recording on this Mac.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingFile {
+    pub path: PathBuf,
+    /// When it started, in seconds since the call connected.
+    pub at: u64,
+    pub duration_secs: u64,
+    /// Your screen is in it too (an .mp4), not only the sound.
+    #[serde(default)]
+    pub screen: bool,
 }
 
 /// Something that happened in a call, `at` seconds after it connected.
@@ -48,6 +103,10 @@ pub enum Happened {
     Left,
     StartedSharing,
     StoppedSharing,
+    StartedRecording,
+    StoppedRecording,
+    StartedTranscribing,
+    StoppedTranscribing,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -58,6 +117,8 @@ pub struct Store {
     pub rooms: Vec<SavedRoom>,
     /// Newest first.
     pub history: Vec<HistoryItem>,
+    #[serde(default)]
+    pub transcription: TranscriptionSettings,
 }
 
 impl Store {
@@ -173,9 +234,51 @@ impl Store {
                 duration_secs: ended.duration.as_secs(),
                 people: ended.people.clone(),
                 events: ended.events.clone(),
+                recordings: ended.recordings.clone(),
+                transcript: ended.transcript.clone(),
             },
         );
         self.history.truncate(HISTORY_LIMIT);
+    }
+}
+
+/// Where recordings go: Movies › Quipcall (macOS doesn't ask for access to
+/// Movies), or `$QUIPCALL_DATA_DIR/Recordings` for tests.
+pub fn recordings_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("QUIPCALL_DATA_DIR") {
+        return PathBuf::from(dir).join("Recordings");
+    }
+    let home = std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into());
+    PathBuf::from(home).join("Movies/Quipcall")
+}
+
+/// Where speech models are downloaded to: Application Support › Quipcall ›
+/// Models, `$QUIPCALL_DATA_DIR/Models`, or `$QUIPCALL_MODELS_DIR` (tests
+/// that share one download).
+pub fn models_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("QUIPCALL_MODELS_DIR") {
+        return PathBuf::from(dir);
+    }
+    if let Some(dir) = std::env::var_os("QUIPCALL_DATA_DIR") {
+        return PathBuf::from(dir).join("Models");
+    }
+    let home = std::env::var_os("HOME").unwrap_or_else(|| "/tmp".into());
+    PathBuf::from(home).join("Library/Application Support/Quipcall/Models")
+}
+
+/// "2026-11-09 11.14" for unix seconds, local time: part of a file name.
+pub fn file_stamp(unix_secs: u64) -> String {
+    let (days, hour, minute) = local_parts(unix_secs);
+    let (year, month, day) = civil_from_days(days);
+    format!("{year}-{month:02}-{day:02} {hour:02}.{minute:02}")
+}
+
+/// "840 KB", "11 MB", "1.2 GB".
+pub fn file_size(bytes: u64) -> String {
+    match bytes {
+        0..1_000_000 => format!("{} KB", bytes.div_ceil(1000)),
+        1_000_000..1_000_000_000 => format!("{} MB", bytes / 1_000_000),
+        _ => format!("{:.1} GB", bytes as f64 / 1e9),
     }
 }
 
@@ -300,7 +403,14 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::civil_from_days;
+    use super::{civil_from_days, file_size};
+
+    #[test]
+    fn sizes() {
+        assert_eq!(file_size(840_000), "840 KB");
+        assert_eq!(file_size(11_400_000), "11 MB");
+        assert_eq!(file_size(1_240_000_000), "1.2 GB");
+    }
 
     #[test]
     fn dates() {

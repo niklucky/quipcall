@@ -11,6 +11,8 @@
     PRESETS,
     collectTiles,
     presetLabel,
+    recorder,
+    transcriber,
     requestJoin,
     screenShareOptions,
     uniqueIdentity,
@@ -37,6 +39,8 @@
   let micOn = $state(false);
   let camOn = $state(false);
   let sharing = $state<ScreenSharePreset | null>(null);
+  let recordedBy = $state<{ name: string; screen: boolean } | null>(null);
+  let transcribedBy = $state<string | null>(null);
 
   const refresh = () => {
     if (!room) return;
@@ -44,6 +48,8 @@
     micOn = room.localParticipant.isMicrophoneEnabled;
     camOn = room.localParticipant.isCameraEnabled;
     if (!room.localParticipant.isScreenShareEnabled) sharing = null;
+    recordedBy = recorder(room);
+    transcribedBy = transcriber(room);
   };
 
   async function join() {
@@ -81,6 +87,7 @@
         RoomEvent.TrackMuted,
         RoomEvent.TrackUnmuted,
         RoomEvent.ActiveSpeakersChanged,
+        RoomEvent.ParticipantAttributesChanged,
       ]) {
         r.on(ev, refresh);
       }
@@ -177,6 +184,14 @@
   {:else}
     <header>
       <span>In “{roomName}” as {name}</span>
+      {#if recordedBy}
+        <span class="rec">
+          ● {recordedBy.name} is recording this call{recordedBy.screen ? ' and their screen' : ''}
+        </span>
+      {/if}
+      {#if transcribedBy}
+        <span class="rec">● {transcribedBy}'s Mac is transcribing this call</span>
+      {/if}
       {#if error}<span class="error">{error}</span>{/if}
     </header>
     <section class="grid" style:grid-template-columns="repeat({cols}, 1fr)">
@@ -243,6 +258,7 @@
   footer { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center; padding: 12px; }
   .muted { color: #9aa3b2; margin-left: 12px; }
   .error { color: #ff7b72; }
+  .rec { color: #ff6b61; font-weight: 600; }
   @media (max-width: 640px) {
     .grid { grid-template-columns: 1fr !important; }
   }

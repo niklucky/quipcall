@@ -29,7 +29,7 @@ One window (960 × 640), two panes:
 - **Rooms**: one avatar (whoever you've talked to most there) with "+N", the name, and the last call's day, time and length. Clicking a row shows its latest call; the phone that appears on hover joins.
 - **History**: every call by day (Today, Yesterday, weekday, then the date), quick calls included.
 - **The selected call**: title (rename with the pencil), copy link, remove (press twice), **Call**. Below it, who was there and ‹ › through the room's earlier calls. A quick call offers **Keep as room** and **Call again** instead.
-- **Tabs**: *Transcript* shows the call's timeline (who joined, left and shared, with times) until speech-to-text exists, then transcript lines join it as a chat. *Recordings* and *Files* show empty states until those features exist.
+- **Tabs**: *Transcript* shows the call's timeline (who joined, left, shared, recorded and transcribed, with times) with what was said between, as a chat, if the call was transcribed. *Recordings* lists what you recorded in the call (time, length, size), with Open (QuickTime Player) and Show in Finder. *Files* shows an empty state until files exist.
 - **Quick call** is top left; **+** makes a room and puts its name in edit mode.
 - When a call ends, home opens on it.
 
@@ -48,7 +48,10 @@ One small glass widget floats above all apps and Spaces and never takes focus. P
 - **The row** shows up to three people who were active last (spoke, unmuted or joined). When someone new speaks and the row is full, they take the place of whoever has been quiet longest; the others stay where they are. **You** are always last in the row (a red badge while muted) and don't count toward the three, so muting moves nothing.
 - **The stack**, a grey pill with one dimmed face, the next two peeking out behind it and "+N", holds everyone else muted or quiet for two minutes.
 - **Cameras**: people in the row with their camera on (you included) show as video tiles above the row, named on the tile. Faces in the row are avatars.
-- **Three buttons, always**: Share, Mic, Leave. Hovering them opens a row underneath with Camera, Copy link and Call window.
+- **Three buttons, always**: Share, Mic, Leave. Hovering them opens a row underneath with Camera, Copy link, Call window, Record and Transcribe.
+- **Transcription**: *Transcribe* opens a row that says which model will run ("Parakeet v3 on this Mac. Everyone sees it.") with *Start*, or *Download 740 MB and start* when the model isn't here yet, and *Settings*. While anyone transcribes, a captions button with a red dot sits left of Share in everyone's widget (right of the record button), and Transcribe leaves the hover row: one transcript per call. Click it to open or close the transcript window; hover it for "On your Mac · Parakeet v3" or "On Anna's Mac · Parakeet v3", with Stop, which anyone may press. The download's progress shows there too, with Cancel.
+- **The transcript window** is a floating panel like a share window (above other apps, on all Spaces, never takes focus), opened by itself for everyone when a transcript starts (Settings can turn that off). A chat: others on the left with their name over each turn, you on the right, joins, leaves, shares and recordings as dividers. A line being spoken is grey and grows about once a second, then turns solid. It follows the end while you're there; scroll up to read. ⋯ has Copy transcript and Stop for everyone. Drag it by any empty spot, resize it from its corner, close it with ×: the transcript goes on.
+- **Recording**: *Record* opens a row with *Audio* and *Audio and screen*. Audio records everyone's voice on your Mac (Movies › Quipcall). Audio and screen opens the share picker, titled "Record your screen", and records that screen or window with everyone's voice (an .mp4). While anyone records, a red record button sits left of Share in everyone's widget, and Record leaves the hover row: one recording per call. Hovering the red button shows "Recording audio · 4:12" with Stop, or "Anna is recording. Only Anna can stop it." Others get a notice when a recording starts; you get "Recording saved" with Show in Finder when it stops. Design: [prototype/transcription.html](prototype/transcription.html).
 - **Hovering the stack** opens a row with everyone in it (name, mic state). **Hovering a face** for a moment shows the name and what they're doing ("speaking", "active 40 s ago").
 - **While you share**, the widget grows upward with your screen's live preview on top (once its first frame arrives, in its shape), and a Stop button.
 - **Someone sharing** has a screen badge on their face or tile; click it to bring their share window to the front. Anyone sharing stays in the row.
@@ -63,8 +66,9 @@ One small glass widget floats above all apps and Spaces and never takes focus. P
 One window (1040 × 680): the room's name and the call's time in the title bar, with "Invite" (copies the link). Tiles sit on a dark stage, a control bar floats under them, and a side panel opens on the right.
 
 - **The layout picks itself**: alone, a card with your face and the call link; 2–4 people, a grid; more, whoever is speaking big with a strip of the others (as many as fit, then "+N"); anyone sharing, the share big and faces in a column. Your own share gets the big tile when nobody else shares.
-- **Controls**: mic, camera, share | side panel, minimal | Leave.
-- **Side panel**: *Transcript* (the live timeline, and transcripts later) and *People* (the call link and everyone, with their mic state).
+- **Controls**: mic, camera, share, record, transcribe | side panel, minimal | Leave. Record opens a small menu over the toolbar (Audio, Audio and screen); pressed again while you record, it stops. While the call is recorded, the title bar shows "REC · 4:12" (yours) or "Anna is recording".
+- **Side panel**: *Transcript* (the call's timeline with the transcript as a chat, as in the transcript window) and *People* (the call link and everyone, with their mic state).
+- **Transcribe** sits after Record in the toolbar: it asks to start (or download first), stops the transcript, or cancels the download. The title bar shows "Transcribing" or "Anna's Mac transcribes".
 - Double-click someone's share for fullscreen. Closing the window doesn't end the call; it goes back to the widget. Leaving is the red button.
 
 ## Decisions so far (easy to change)
@@ -88,3 +92,7 @@ One window (1040 × 680): the room's name and the call's time in the title bar, 
 - Resizing draws the new frame in the same AppKit transaction, so the widget never shows its old frame stretched to the new size. That needed two GPUI patches (see `vendor/README.md`).
 - No widget library: the look is custom, and every dependency costs footprint. Shared pieces (avatars, buttons, tooltips, empty states) are in `ui.rs`.
 - Icons: [Lucide](https://lucide.dev) (ISC licence), embedded as SVG.
+
+## Settings
+
+⌘, or the gear next to your name on Home. One pane for now, *Transcription*: the language spoken (Auto-detect, or one of thirteen, which suggests the model that knows it best and greys out the others), the model (Parakeet v3 or Qwen3-ASR, each with what it's good at, whether it's on this Mac, and Download, Cancel or Remove), whether the transcript window opens by itself, and the models' credits. *Recording* and "try it with your voice" come later.

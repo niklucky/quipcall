@@ -1,30 +1,30 @@
 //! Regular mode: one window with the call. Tiles on a dark stage, a
-//! floating control bar, and a side panel with the call's timeline and the
-//! people in it.
+//! floating control bar, and a side panel with the transcript (the call's
+//! timeline with what was said) and the people in it.
 //!
 //! The layout picks itself: alone, a card with the call link; 2–4 people, a
 //! grid; more, the active speaker big with a strip; anyone sharing, the share
 //! big and faces in a column. Double-click someone's share for fullscreen.
 
 use std::collections::HashMap;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, FontWeight, ObjectFit,
-    Stateful, Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowHandle,
+    AnyElement, App, Bounds, ClickEvent, Context, Div, Entity, EntityId, FontWeight, ListState,
+    ObjectFit, Stateful, Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowHandle,
     WindowOptions, div, px, relative, rgb, size,
 };
 use quipcall_core::TrackKey;
 
 use crate::assets::Icon;
-use crate::call::{Call, Camera, Member, Mode};
+use crate::call::{Call, Camera, Member, Mode, Preparing};
 use crate::capsule::clock;
 use crate::theme::{
     ACCENT, BG, LINE, RAISED, SPEAKING, STAGE, TEXT, TEXT_DIM, avatar_background, black,
     first_name, white,
 };
-use crate::timeline;
+use crate::transcript;
 use crate::ui::{
     self, Kind, Tone, avatar, avatar_stack, button, icon, pill, ring, round_button, rounded_video,
     tooltip,
@@ -73,9 +73,14 @@ enum Tab {
 pub struct Regular {
     call: Entity<Call>,
     panel: Option<Tab>,
+    /// The record button's choice is open: audio, or audio and screen.
+    record_menu: bool,
+    /// The transcribe button's question is open: start on this Mac?
+    transcribe_menu: bool,
+    transcript: ListState,
     /// Repaint subscriptions for every person and screen on show.
     watched: HashMap<EntityId, Subscription>,
-    _subscription: Subscription,
+    _subscriptions: Vec<Subscription>,
     _tick: Task<()>,
 }
 
@@ -87,6 +92,136 @@ enum Layout {
 }
 
 impl Regular {
+    /// Over the toolbar while open: transcribe on this Mac?
+    fn transcribe_menu(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if !self.transcribe_menu || !self.call.read(cx).can_transcribe() {
+            return None;
+        }
+        let model = crate::Shell::global(cx)
+            .read(cx)
+            .store
+            .transcription
+            .model();
+        let ready = crate::models::Models::global(cx).read(cx).is_ready(model);
+        let start = if ready {
+            "Start".to_owned()
+        } else {
+            format!(
+                "Download {} and start",
+                crate::store::file_size(model.bytes)
+            )
+        };
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(CONTROLS - 4.0))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .p(px(8.0))
+                        .pl(px(14.0))
+                        .rounded(px(14.0))
+                        .bg(gpui::hsla(0.63, 0.12, 0.13, 0.96))
+                        .border_1()
+                        .border_color(white(0.1))
+                        .shadow_lg()
+                        .text_size(px(12.0))
+                        .text_color(rgb(TEXT_DIM))
+                        .child(format!(
+                            "Transcribe on this Mac with {}. Everyone sees it.",
+                            model.name
+                        ))
+                        .child(
+                            button(
+                                "transcribe-start",
+                                start,
+                                Some(if ready {
+                                    Icon::Captions
+                                } else {
+                                    Icon::Download
+                                }),
+                                Kind::Primary,
+                                false,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.transcribe_menu = false;
+                                this.panel = Some(Tab::Transcript);
+                                this.call.update(cx, |c, cx| c.start_transcribing(cx));
+                            })),
+                        )
+                        .child(
+                            button(
+                                "transcribe-settings",
+                                "Settings",
+                                Some(Icon::Settings),
+                                Kind::Secondary,
+                                false,
+                            )
+                            .on_click(|_, _, cx| crate::settings::open(cx)),
+                        ),
+                ),
+        )
+    }
+
+    /// Over the toolbar while open: what to record.
+    fn record_menu(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if !self.record_menu || !self.call.read(cx).can_record() {
+            return None;
+        }
+        let choose = |id: &'static str, label: &'static str, glyph: Icon, screen: bool| {
+            button(id, label, Some(glyph), Kind::Secondary, false).on_click(cx.listener(
+                move |this, _, _, cx| {
+                    this.record_menu = false;
+                    this.call.update(cx, |c, cx| {
+                        if screen {
+                            c.choose_screen_to_record(cx)
+                        } else {
+                            c.record_audio(cx)
+                        }
+                    });
+                },
+            ))
+        };
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(CONTROLS - 4.0))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .p(px(8.0))
+                        .pl(px(14.0))
+                        .rounded(px(14.0))
+                        .bg(gpui::hsla(0.63, 0.12, 0.13, 0.96))
+                        .border_1()
+                        .border_color(white(0.1))
+                        .shadow_lg()
+                        .text_size(px(12.0))
+                        .text_color(rgb(TEXT_DIM))
+                        .child("Record on this Mac:")
+                        .child(choose("record-audio", "Audio", Icon::Mic, false))
+                        .child(choose(
+                            "record-screen",
+                            "Audio and screen",
+                            Icon::Monitor,
+                            true,
+                        )),
+                ),
+        )
+    }
+
     fn new(call: Entity<Call>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Closing the window keeps the call going, as the capsule.
         let on_close = call.clone();
@@ -94,7 +229,13 @@ impl Regular {
             on_close.update(cx, |c, cx| c.set_mode(Mode::Minimal, cx));
             false
         });
-        let subscription = cx.observe(&call, |_, _, cx| cx.notify());
+        let entity = call.read(cx).transcript.clone();
+        let (transcript, splices) = transcript::list_state(&entity, cx);
+        let subscriptions = vec![
+            cx.observe(&call, |_, _, cx| cx.notify()),
+            splices,
+            cx.observe(&entity, |_, _, cx| cx.notify()),
+        ];
         // The timer in the title.
         let tick = cx.spawn(async move |this, cx| {
             loop {
@@ -117,8 +258,11 @@ impl Regular {
         Self {
             call,
             panel,
+            record_menu: false,
+            transcribe_menu: false,
+            transcript,
             watched: HashMap::new(),
-            _subscription: subscription,
+            _subscriptions: subscriptions,
             _tick: tick,
         }
     }
@@ -244,7 +388,9 @@ impl Render for Regular {
                                     .pt(px(2.0))
                                     .child(stage),
                             )
-                            .child(self.controls(cx)),
+                            .child(self.controls(cx))
+                            .children(self.record_menu(cx))
+                            .children(self.transcribe_menu(cx)),
                     )
                     .children(self.panel.map(|tab| self.panel_view(tab, cx))),
             )
@@ -258,6 +404,20 @@ impl Regular {
         let elapsed = c.elapsed().map(clock);
         let notice = c.notice();
         let sharing = c.sharing.map(|p| p.label());
+        let recording = c.recording.as_ref().map(|r| {
+            if r.is_mine() {
+                format!("REC · {}", clock(r.since.elapsed()))
+            } else {
+                format!("{} is recording", crate::theme::first_name(&r.name))
+            }
+        });
+        let transcribing = match (&c.transcription, c.preparing) {
+            (Some(t), _) if t.mine => Some("Transcribing".to_owned()),
+            (Some(t), _) => Some(format!("{}'s Mac transcribes", first_name(&t.name))),
+            (None, Some(Preparing::Download(m))) => Some(format!("Downloading {}", m.name)),
+            (None, Some(Preparing::Loading)) => Some("Starting the transcript".to_owned()),
+            (None, None) => None,
+        };
         let copied = c.copied_at.is_some();
         let call = self.call.clone();
         div()
@@ -283,14 +443,30 @@ impl Regular {
                     )
                     .children(elapsed.map(|t| div().text_color(rgb(TEXT_DIM)).child(t))),
             )
-            .children(notice.map(|(text, is_error)| {
-                if is_error {
-                    pill(text, rgb(0xff8a80), crate::theme::black(0.0))
+            .children(recording.map(|text| {
+                pill(text, rgb(crate::theme::RECORDING), crate::theme::black(0.0))
+                    .bg(gpui::rgba(0xff453a24))
+                    .child(
+                        div()
+                            .size(px(7.0))
+                            .rounded_full()
+                            .bg(rgb(crate::theme::RECORDING)),
+                    )
+                    .flex_row_reverse()
+            }))
+            .children(transcribing.map(|text| {
+                pill(text, rgb(TEXT_DIM), rgb(RAISED))
+                    .child(icon(Icon::Captions, 12.0, rgb(TEXT_DIM)))
+                    .flex_row_reverse()
+            }))
+            .children(notice.map(|notice| {
+                if notice.error {
+                    pill(notice.text, rgb(0xff8a80), crate::theme::black(0.0))
                         .bg(gpui::hsla(0.0, 0.8, 0.6, 0.14))
                         .max_w(px(360.0))
                         .truncate()
                 } else {
-                    pill(text, rgb(TEXT_DIM), rgb(RAISED))
+                    pill(notice.text, rgb(TEXT_DIM), rgb(RAISED))
                 }
             }))
             .children(sharing.map(|preset| {
@@ -660,6 +836,72 @@ impl Regular {
                         }))
                         .on_click(on(Call::toggle_share)),
                     )
+                    .child({
+                        let (tone, tip) = match &c.recording {
+                            Some(r) if r.is_mine() => {
+                                (Tone::Recording, "Stop recording".to_owned())
+                            }
+                            Some(r) => (
+                                Tone::Recording,
+                                format!(
+                                    "{} is recording the call",
+                                    crate::theme::first_name(&r.name)
+                                ),
+                            ),
+                            None => (Tone::Plain, "Record the call on this Mac".to_owned()),
+                        };
+                        round_button("record", Icon::CircleDot, BUTTON, tone)
+                            .tooltip(tooltip(tip))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let c = this.call.read(cx);
+                                if c.recording.as_ref().is_some_and(|r| r.is_mine()) {
+                                    this.record_menu = false;
+                                    this.call.update(cx, |c, cx| c.stop_recording(cx));
+                                } else if c.can_record() {
+                                    this.record_menu = !this.record_menu;
+                                    this.transcribe_menu = false;
+                                }
+                                cx.notify();
+                            }))
+                    })
+                    .child({
+                        let (tone, tip) = match (&c.transcription, c.preparing) {
+                            (Some(t), _) if t.mine => {
+                                (Tone::Active, "Stop the transcript".to_owned())
+                            }
+                            (Some(t), _) => (
+                                Tone::Active,
+                                format!("{}'s Mac transcribes the call", first_name(&t.name)),
+                            ),
+                            (None, Some(Preparing::Download(_))) => {
+                                (Tone::Active, "Cancel the download".to_owned())
+                            }
+                            (None, Some(Preparing::Loading)) => {
+                                (Tone::Active, "Starting the transcript".to_owned())
+                            }
+                            (None, None) => {
+                                (Tone::Plain, "Transcribe the call on this Mac".to_owned())
+                            }
+                        };
+                        round_button("transcribe", Icon::Captions, BUTTON, tone)
+                            .tooltip(tooltip(tip))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let c = this.call.read(cx);
+                                let busy = c.transcription.as_ref().is_some_and(|t| t.mine)
+                                    || c.preparing.is_some();
+                                if busy {
+                                    this.transcribe_menu = false;
+                                    this.call.update(cx, |c, cx| c.toggle_transcribe(cx));
+                                } else if c.can_transcribe() {
+                                    this.transcribe_menu = !this.transcribe_menu;
+                                    this.record_menu = false;
+                                } else {
+                                    // Someone else's: show it.
+                                    this.panel = Some(Tab::Transcript);
+                                }
+                                cx.notify();
+                            }))
+                    })
                     .child(div().w(px(1.0)).h(px(22.0)).mx(px(3.0)).bg(white(0.12)))
                     .child(
                         round_button(
@@ -743,27 +985,8 @@ impl Regular {
                 }))
         };
         let body: Vec<AnyElement> = match tab {
-            Tab::Transcript => {
-                let start = c
-                    .connected_since()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map_or(0, |d| d.as_secs());
-                let me = c.me.read(cx).name.clone();
-                let mut lines: Vec<AnyElement> = vec![
-                    ui::note(
-                        Icon::Captions,
-                        "Speech-to-text is on its way. Until then, the call's joins and shares show here.",
-                    )
-                    .mt(px(12.0))
-                    .into_any_element(),
-                ];
-                lines.extend(
-                    timeline::render(&c.events, start, &me, None)
-                        .into_iter()
-                        .map(IntoElement::into_any_element),
-                );
-                lines
-            }
+            // A list of its own, below.
+            Tab::Transcript => Vec::new(),
             Tab::People => {
                 let link = c.link();
                 let copied = c.copied_at.is_some();
@@ -871,16 +1094,40 @@ impl Regular {
                         )),
                     ),
             )
-            .child(
-                div()
-                    .id("panel-body")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(px(14.0))
-                    .pb(px(16.0))
-                    .children(body),
-            )
+            .map(|panel| match tab {
+                Tab::Transcript => {
+                    let entity = c.transcript.clone();
+                    let note = (c.transcription.is_none()
+                        && c.preparing.is_none()
+                        && entity.read(cx).lines().next().is_none())
+                    .then(|| {
+                        ui::note(
+                            Icon::Captions,
+                            "Press Transcribe and what everyone says shows up here, between who joined, shared and recorded.",
+                        )
+                        .mx(px(14.0))
+                        .mt(px(12.0))
+                    });
+                    panel.children(note).child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .px(px(14.0))
+                            .pb(px(12.0))
+                            .child(transcript::view(&self.transcript, &entity).size_full()),
+                    )
+                }
+                Tab::People => panel.child(
+                    div()
+                        .id("panel-body")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .px(px(14.0))
+                        .pb(px(16.0))
+                        .children(body),
+                ),
+            })
     }
 }
 

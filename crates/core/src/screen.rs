@@ -74,6 +74,17 @@ impl ScreenSharePreset {
         }
     }
 
+    /// Average bits per second when your screen is recorded: a little under
+    /// what a share sends at most, since a file can take its time.
+    pub(crate) fn recording_bitrate(&self) -> u32 {
+        match (self.mode, self.fps) {
+            (ContentMode::Text, f) if f <= 5 => 1_000_000,
+            (ContentMode::Text, _) => 2_000_000,
+            (ContentMode::Motion, f) if f <= 30 => 4_000_000,
+            (ContentMode::Motion, _) => 6_000_000,
+        }
+    }
+
     fn encoding(&self) -> VideoEncoding {
         let max_bitrate = match (self.mode, self.fps) {
             (ContentMode::Text, f) if f <= 5 => 1_500_000,

@@ -17,7 +17,7 @@ These are targets. We measure them at the end of Stage 1 and at every milestone,
 
 | Metric | Target |
 |---|---|
-| macOS app bundle (without speech-to-text models) | ≤ 40 MB |
+| macOS app bundle (without speech-to-text models) | ≤ 60 MB per architecture *(40 MB until 2026-11-10: quality over a few megabytes; the Apple Silicon app is 53.6 MB with transcription)* |
 | Idle in the menu bar, logged in | ≤ 60 MB RAM, ~0% CPU |
 | 1:1 call, 720p camera both ways | ≤ 200 MB RAM, ≤ 15% CPU on an M-series Mac |
 | 10-person grid call | ≤ 350 MB RAM |
@@ -159,17 +159,27 @@ Started early (2026-11-03), ahead of Stages 3–6: there are no accounts yet, so
 
 **Done when:** a 10-participant call with a mix of desktop, web, and bots stays smooth, and CPU is measured.
 
-## Stage 9 — Transcription (single transcriber)
+## Stage 9 — Transcription (single transcriber) and recording
 
-- [ ] `crates/stt`: VAD (Silero), a `Transcriber` trait, model manager (download on demand, checksum)
-- [ ] Model bake-off for our languages (accuracy and speed on Apple Silicon); record the decision
-- [ ] Transcriber role in the backend: claim, lease, and heartbeat; capability shown via participant attributes; handoff prompt
-- [ ] Pipeline: local mic (before encoding) + each remote track → 16 kHz → VAD → shared ASR queue; partial and final results
-- [ ] Transcript flow: transcriber → backend (store and order) → WebSocket to all participants; late joiners get the history
-- [ ] Transcript panel (chat style) on desktop and web; "Transcribed by X" indicator
+- [x] ~~Design round 1: clickable prototype ([prototype/transcription.html](prototype/transcription.html)): Transcribe in the widget's hover row, choosing whose Mac transcribes (ask, accept, hand over, take over when the transcriber leaves), the transcript as a chat in its own floating window, the call window's side panel, and Settings › Transcription (language and model, downloads, try it with your voice)~~ *Approved as drawn: anyone in the call can stop the transcript, the window opens for everyone (a switch turns that off), one model per call, and the window's footprint gets measured.*
+- [x] ~~Design round 2, same prototype: a separate Record button that saves the call's audio, or audio and video, on the recorder's Mac. Its panel, the indicator and notices for everyone, toolbar buttons in the call window, Settings › Recording, and Home after the call (the recording plays under the transcript)~~ *Decided: video means your own screen, picked as when sharing; one recording per call; only whoever started it can stop it; sharing the file with the room later.*
+- [x] ~~Design round 3, same prototype: "Audio and screen" through the share picker in record mode, one recording per call (Record leaves everyone else's hover row), and the recorder leaving.~~ *Approved.*
+- [x] ~~`crates/stt`: VAD (Silero), model manager (download on demand, checksum)~~ *transcribe.cpp runs Silero VAD, Parakeet v3 and Qwen3-ASR (no trait needed: one engine for every model). Downloads resume and check SHA-256 (`crates/core/src/models.rs`).*
+- [ ] Model bake-off for our languages (accuracy and speed on Apple Silicon); record the decision. *Starting point: Parakeet TDT v3 (English, Russian), then Qwen3-ASR 0.6B (Chinese); Whisper Large v3 Turbo, GigaAM v3 and Nemotron 3.5 ASR to compare. The runtime is decided: transcribe.cpp (ARCHITECTURE.md). Parakeet v3 got English and Russian synthetic speech right in tests; Qwen3-ASR is in Settings but untested.*
+- [ ] Transcriber role in the backend: claim, lease, and heartbeat; capability shown via participant attributes; handoff prompt. *For now the transcriber is whoever presses Transcribe, marked by the attribute `quipcall.transcribing`; one per call. No asking someone else's Mac, handover, or take-over when they leave yet.*
+- [x] ~~Pipeline: local mic (before encoding) + each remote track → 16 kHz → VAD → shared ASR queue; partial and final results~~ *Verified in a call: a web participant speaking English and Russian (macOS `say` as its microphone) came out right, with drafts about once a second.*
+- [ ] Transcript flow: transcriber → backend (store and order) → WebSocket to all participants; late joiners get the history. *For the alpha, LiveKit data messages from the transcriber instead (`quipcall.transcript`): lines to everyone, the history to late joiners, and anyone can ask it to stop. Verified with two app instances and a web participant. Nothing is stored on the server yet.*
+- [ ] Transcript panel (chat style) on desktop and web; "Transcribed by X" indicator. *Desktop built: the transcript window, the call window's side panel, the widget's captions button, and Home's Transcript tab. The web client only says whose Mac transcribes.*
 - [ ] Raise Opus bitrate while a transcription is running
+- [ ] Settings window (⌘,) with Recording and Transcription tabs: language, model downloads (on demand, checksum, remove), try it with your voice. *Transcription built (language, model, downloads, remove, whether the window opens by itself, credits). Recording tab and "try it" not yet.*
+- [ ] Everyone's voice, 10 ms at a time, for recording and transcription (`audio_tap.rs`): your mic through a new hook in the webrtc-sys patch (after processing, only while unmuted), remote mics through LiveKit's audio sinks; nothing is copied unless something listens. *Built. Remote audio verified end to end. Your own voice is covered by a unit test only; it needs a real call.*
+- [ ] Recording, audio: everyone mixed into one AAC .m4a with AVAssetWriter, a fragment every 5 s; optionally one track per voice. *Built, without per-voice tracks. Verified with a headless web participant: its 2-per-second beeps land in the file exactly 0.5 s apart, a 14 s recording is 14.1 s, quitting mid-recording finishes the file, and a test that aborts the writer keeps 10 of 12 s.*
+- [ ] Recording, screen: the share picker in record mode (same presets), ScreenCaptureKit and VideoToolbox H.264 plus the audio mix in one .mp4. Measure CPU. *Built. Checked with the synthetic screen and a web participant: 1280×800 H.264 at 15 fps, 150 frames in 10 s (none dropped), its beeps in the sound, and "… is recording this call and their screen" on the web. The choice of Audio or Audio and screen (widget row, call-window menu) still needs a look on a real screen: the display was asleep during the run. Sharing and recording the same screen runs two captures; sharing one capture is for later.*
+- [ ] One recording per call: a participant attribute marks the recorder, Record is hidden for everyone else, and only the recorder can stop it. An indicator for everyone, a notice when it starts, a "saved" notice, and a stop when the recorder leaves. *Built in the widget, the call window and the web client; checked with two app instances and a web participant. The server's tokens allow the attribute (deployed 2026-11-09). Desktop apps from before this don't show it: release a new Mac app before recording calls with friends.*
+- [ ] Home: the Recordings tab (opens the file in QuickTime Player) and a player under the transcript that plays the recording's sound. *Recordings tab and the saved transcript built; the player isn't.*
+- [ ] Footprint of a long transcribed call. *Transcribing one voice: about +180–260 MB and +2% CPU (release, M5 Pro). The transcriber alone holds steady; the app crept up about 4 MB a minute over two minutes, to look at over an hour.*
 
-**Done when:** a 1-hour mixed-language test call produces a transcript with correct speakers, and handing off the transcriber role works.
+**Done when:** a 1-hour mixed-language test call produces a transcript with correct speakers, handing off the transcriber role works, and a recording of the same call plays under its transcript in Home.
 
 ## Stage 10 — LLM summaries
 
@@ -184,6 +194,7 @@ Started early (2026-11-03), ahead of Stages 3–6: there are no accounts yet, so
 - [ ] Windows desktop (Windows.Graphics.Capture, GPUI on DirectX 11)
 - [ ] Linux desktop (screen capture through PipeWire and the desktop portal)
 - [ ] Server-side transcriber (headless bot on the VPS or a GPU box)
+- [ ] Upload recordings to the server so everyone in the room gets them (needs Stage 3)
 - [ ] End-to-end encryption
 - [ ] Speaker separation for shared microphones
 - [ ] Peer-to-peer for 1:1 calls

@@ -10,7 +10,7 @@ Setup: Apple M5 Pro, macOS 27.0, release build. 1100×720 window. Receiving one 
 
 | Metric | Measured | Budget |
 |---|---|---|
-| Binary size (not yet an `.app` bundle) | 23.9 MB (10.9 MB gzipped) | ≤ 40 MB bundle |
+| Binary size (not yet an `.app` bundle) | 23.9 MB (10.9 MB gzipped) | ≤ 40 MB bundle (60 MB since 2026-11-10) |
 | RSS in a call, receiving 1 × 720p | ~110 MB | ≤ 200 MB (1:1, both directions) |
 | CPU in a call, receiving 1 × 720p | 8–9% of one core | ≤ 15% (1:1, both directions) |
 

@@ -13,7 +13,14 @@
 //!   that preset, so tests never capture anything else on screen; with
 //!   `QUIPCALL_FAKE_SCREEN` set, a synthetic test pattern instead),
 //!   `stop-share` (never opens the picker), `fullscreen` (the first screen
-//!   share from someone else goes fullscreen, or back).
+//!   share from someone else goes fullscreen, or back), `record` (starts or
+//!   stops your recording), `record-screen` (records the synthetic screen;
+//!   needs `QUIPCALL_FAKE_SCREEN`), `hover-rec` / `record-choice` (the
+//!   capsule's recording row, or its choice of what to record), `recordings`
+//!   (home's Recordings tab), `transcribe` (starts or stops your transcript;
+//!   with `QUIPCALL_MODELS_DIR` pointing at models already downloaded),
+//!   `transcript-window` (opens or closes it), `transcribe-choice` /
+//!   `hover-transcript` (the capsule's rows), `settings`.
 
 use std::time::Duration;
 
@@ -84,11 +91,24 @@ fn act(action: &str, cx: &mut App) {
     use crate::Shell;
     use crate::call::{Call, Mode};
 
-    if action == "hover" || action == "stack" || action == "unhover" {
+    if matches!(
+        action,
+        "hover"
+            | "stack"
+            | "unhover"
+            | "hover-rec"
+            | "record-choice"
+            | "transcribe-choice"
+            | "hover-transcript"
+    ) {
         for handle in cx.windows() {
             if let Some(capsule) = handle.downcast::<crate::capsule::Capsule>() {
                 let which = match action {
                     "stack" => "people",
+                    "hover-rec" => "recording",
+                    "record-choice" => "record-choice",
+                    "transcribe-choice" => "transcribe-choice",
+                    "hover-transcript" => "transcript",
                     "unhover" => "none",
                     _ => "controls",
                 };
@@ -143,6 +163,18 @@ fn act(action: &str, cx: &mut App) {
         .detach();
         return;
     }
+    if action == "recordings" {
+        for handle in cx.windows() {
+            if let Some(home) = handle.downcast::<crate::home::Home>() {
+                let _ = home.update(cx, |h, _, cx| h.show_recordings(cx));
+            }
+        }
+        return;
+    }
+    if action == "settings" {
+        crate::settings::open(cx);
+        return;
+    }
     if action == "quit" {
         cx.quit();
         return;
@@ -163,6 +195,21 @@ fn act(action: &str, cx: &mut App) {
         "mic" => c.toggle_mic(cx),
         "camera" => c.toggle_camera(cx),
         "share" => c.toggle_share(cx),
+        "record" => c.toggle_record(cx),
+        "transcribe" => c.toggle_transcribe(cx),
+        "transcript-window" => {
+            let open = !c.transcript_open;
+            c.set_transcript_open(open, cx)
+        }
+        // Records Quipcall's own screen pattern: only with QUIPCALL_FAKE_SCREEN.
+        "record-screen" => {
+            if std::env::var_os("QUIPCALL_FAKE_SCREEN").is_some() {
+                let preset = quipcall_core::ScreenSharePreset::PRESETS[1];
+                c.record_screen(quipcall_core::SourceId::Display(0), preset, cx)
+            } else {
+                tracing::warn!("script: record-screen needs QUIPCALL_FAKE_SCREEN");
+            }
+        }
         "stop-share" => {
             if c.sharing.is_some() {
                 c.toggle_share(cx)

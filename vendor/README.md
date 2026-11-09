@@ -85,6 +85,10 @@ The patch changes `src/peer_connection_factory.cpp` only:
   processes the microphone at the lower of its rate and the codec's, so the
   APM may run at 8, 16 or 32 kHz; the callback still gets 48 kHz frames,
   resampled there and back with WebRTC's `PushResampler`.
+- A capture tap (`quipcall_set_capture_tap`) gets a copy of every finished
+  microphone frame, after the filter and AGC2, at the processor's rate: what
+  the call sends, before encoding. `crates/core/src/audio_tap.rs` reads it
+  for recordings (and, later, transcription). Offline test APMs skip it.
 - Device microphone tracks take WebRTC's own noise suppression and older gain
   control (AGC1) from `quipcall_set_device_noise_suppression` and
   `quipcall_set_device_gain_control` instead of always turning them on. They

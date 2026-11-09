@@ -1,0 +1,1397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transcription and recording</title>
+<style>
+:root{color-scheme:light dark}
+html,body{margin:0}
+body{font-family:var(--font-sans,-apple-system,BlinkMacSystemFont,"Inter",system-ui,sans-serif);color:var(--foreground,#1d1d1f);-webkit-font-smoothing:antialiased}
+body.standalone{background:#0e0f12;color:#e8e9ec;--foreground:#e8e9ec;--muted-foreground:#8f95a0;--border:rgba(255,255,255,.12);--secondary:rgba(255,255,255,.08);--background:#0e0f12}
+body.standalone #board{padding:32px 24px 64px}
+body:not(.standalone) .head h1{display:none}
+#board{max-width:1100px;margin:0 auto;padding:4px 0 32px;
+ --q-accent:#4f8cff;--q-on-accent:#fff;--q-text:#f2f3f5;--q-dim:#9ba1ac;--q-faint:#676d78;
+ --q-bg:#141519;--q-side:#18191e;--q-raised:#22242b;--q-raised2:#2c2f38;--q-field:#0f1013;--q-stage:#0e0f12;
+ --q-hover:rgba(255,255,255,.05);--q-sel:rgba(255,255,255,.09);--q-line:rgba(255,255,255,.08);
+ --q-glass:rgba(24,26,33,.74);--q-glass-line:rgba(255,255,255,.14);--q-gbtn:rgba(255,255,255,.10);--q-gbtn-h:rgba(255,255,255,.18);
+ --q-live:#3fd07a;--q-danger:#e5484d;--q-rec:#ff453a;--q-edge:#1d1f26;
+ --q-me:color-mix(in srgb,var(--q-accent) 28%,#1c1e25);
+ --q-shadow:0 0 0 .5px rgba(0,0,0,.6),inset 0 0 0 .5px rgba(255,255,255,.09),0 28px 70px rgba(0,0,0,.45),0 4px 14px rgba(0,0,0,.25)}
+
+/* ───────── page ───────── */
+.head h1{font-size:20px;line-height:1.25;margin:0 0 6px;font-weight:650;letter-spacing:-.01em}
+.head p,.lede{margin:0;font-size:13.5px;line-height:1.55;color:var(--muted-foreground,#8a8f98);max-width:80ch}
+.toc{display:flex;flex-wrap:wrap;gap:6px;margin-top:14px}
+.toc a{font-size:12px;color:var(--foreground,#1d1d1f);text-decoration:none;border:1px solid var(--border,rgba(128,128,128,.3));border-radius:999px;padding:3px 10px}
+.toc a:hover{background:var(--secondary,rgba(128,128,128,.12))}
+section{margin-top:44px;scroll-margin-top:12px}
+section h2{font-size:16px;margin:0 0 4px;font-weight:650;letter-spacing:-.005em}
+.pctl{display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;margin-top:12px;font-size:12px;color:var(--muted-foreground,#8a8f98)}
+.pctl>span{display:flex;align-items:center;gap:8px}
+.seg{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--border,rgba(128,128,128,.3));border-radius:8px}
+.seg button,.pbtn{all:unset;cursor:pointer;padding:3px 10px;border-radius:6px;font-size:12px;line-height:18px;color:var(--muted-foreground,#8a8f98)}
+.seg button:hover,.pbtn:hover{color:var(--foreground,#1d1d1f)}
+.seg button[aria-pressed="true"]{background:var(--secondary,rgba(128,128,128,.16));color:var(--foreground,#1d1d1f)}
+.pbtn{border:1px solid var(--border,rgba(128,128,128,.3));border-radius:8px}
+.stage{position:relative;margin-top:10px;border-radius:var(--radius,12px);overflow:hidden}
+.canvas{position:absolute;left:0;top:0;transform-origin:0 0}
+.notes{margin:14px 0 0;padding-left:20px;font-size:13.5px;line-height:1.55;max-width:86ch}
+.notes li{margin:6px 0}
+.notes b{font-weight:600}
+.notes code{font-family:var(--font-mono,ui-monospace,Menlo,monospace);font-size:12px;background:var(--secondary,rgba(128,128,128,.14));padding:1px 4px;border-radius:4px}
+.notes a{color:inherit}
+.wall{background:radial-gradient(70% 60% at 8% 4%,#5d6fe0 0%,transparent 62%),radial-gradient(60% 70% at 96% 100%,#c2578f 0%,transparent 60%),radial-gradient(50% 50% at 72% 18%,#2e9f97 0%,transparent 60%),#1b1f3d}
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;margin-top:12px}
+.gbox{border-radius:var(--radius,12px);padding:24px 14px;display:flex;justify-content:center;align-items:center;min-height:116px;overflow:hidden}
+.gitem p{font-size:12.5px;line-height:1.5;margin:7px 2px 0;color:var(--muted-foreground,#8a8f98)}
+.gitem p b{color:var(--foreground,#1d1d1f);font-weight:600}
+.vcol{display:flex;flex-direction:column;align-items:flex-end;gap:10px;flex:none}
+
+/* ───────── app basics ───────── */
+.app{font:13px/1.38 -apple-system,BlinkMacSystemFont,"SF Pro Text","Inter",system-ui,sans-serif;color:var(--q-text);text-align:left;letter-spacing:-.003em}
+.app *{box-sizing:border-box}
+:where(.app) button{font:inherit;color:inherit;border:0;background:none;padding:0;cursor:pointer;text-align:inherit}
+.i{display:block;flex:none}
+.sp{flex:1}
+.dim{color:var(--q-dim)}
+.av{width:var(--s);height:var(--s);border-radius:50%;display:inline-grid;place-items:center;flex:none;color:#fff;font-weight:600;font-size:calc(var(--s)*.4);line-height:1;letter-spacing:0;user-select:none;background:linear-gradient(135deg,hsl(var(--h) 55% 52%),hsl(calc(var(--h) + 29) 60% 38%))}
+.vid{position:absolute;inset:0;overflow:hidden;background:radial-gradient(55% 45% at 78% 12%,hsl(var(--h) 45% 62% / .55),transparent 70%),linear-gradient(170deg,hsl(var(--h) 24% 30%),hsl(calc(var(--h) + 30) 26% 13%))}
+.vid::before{content:"";position:absolute;left:50%;top:22%;height:44%;aspect-ratio:.8;transform:translateX(-50%);border-radius:48% 48% 44% 44%;background:linear-gradient(hsl(var(--hr)) 0 30%,transparent 30%),radial-gradient(circle at 42% 45%,hsl(var(--k)),color-mix(in srgb,hsl(var(--k)) 78%,#000))}
+.vid::after{content:"";position:absolute;left:50%;bottom:-22%;height:52%;aspect-ratio:1.9;transform:translateX(-50%);border-radius:50% 50% 0 0;background:hsl(calc(var(--h) + 200) 22% 30%)}
+@keyframes recpulse{0%,100%{opacity:1}50%{opacity:.4}}
+@keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}
+@keyframes rot{to{transform:rotate(360deg)}}
+@keyframes wv{0%,100%{height:4px}50%{height:15px}}
+.pb{height:30px;padding:0 14px;border-radius:15px;background:var(--q-accent);color:#fff !important;font-weight:650;font-size:12.5px;white-space:nowrap;flex:none}
+.pb:hover{filter:brightness(1.1)}
+.pb.sec{background:var(--q-gbtn);color:var(--q-text) !important}
+.pb.sm{height:26px;padding:0 11px;font-size:12px}
+.pb:disabled{opacity:.5;cursor:default;filter:none}
+.lnk{color:var(--q-dim);font-size:12px;font-weight:500;display:inline-flex;align-items:center;gap:5px;padding:4px 7px;border-radius:7px;flex:none}
+.lnk:hover{color:var(--q-text);background:var(--q-gbtn)}
+.lnk.danger:hover{color:#ff8a8d}
+.rdot{width:8px;height:8px;border-radius:50%;background:var(--q-rec);animation:recpulse 1.8s infinite;flex:none}
+.rdot.paused,.rdot.stopped{background:var(--q-faint);animation:none}
+.toast{position:absolute;left:50%;top:38px;transform:translateX(-50%);padding:7px 12px;border-radius:9px;background:rgba(18,18,22,.94);color:#fff;font:500 12px -apple-system,system-ui;opacity:0;transition:opacity .2s;pointer-events:none;z-index:20;white-space:nowrap}
+.toast.on{opacity:1}
+
+/* ───────── desktop ───────── */
+.menubar{position:absolute;left:0;right:0;top:0;height:26px;display:flex;align-items:center;gap:18px;padding:0 14px;font:500 13px -apple-system,system-ui,sans-serif;color:#fff;background:rgba(18,20,38,.28);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+.menubar b{font-weight:700}.menubar .r{margin-left:auto}
+.ed{position:absolute;border-radius:12px;overflow:hidden;background:#1a1c22;box-shadow:0 0 0 .5px rgba(0,0,0,.6),0 24px 60px rgba(0,0,0,.4)}
+.ed-top{height:34px;background:#202229;display:flex;align-items:center;justify-content:center;font:12px -apple-system,system-ui;color:#8d93a0;border-bottom:1px solid rgba(255,255,255,.06);position:relative}
+.lights{position:absolute;left:14px;top:11px;display:flex;gap:7px;z-index:6}
+.lights i{width:11px;height:11px;border-radius:50%;background:#ff5f57}.lights i+i{background:#febc2e}.lights i+i+i{background:#28c840}
+.win>.lights{left:18px;top:18px}.win>.lights i{width:12px;height:12px}
+.cl{display:flex;gap:8px;height:18px;align-items:center}.cl i{height:7px;border-radius:3px;opacity:.7}
+
+/* ───────── the widget (round 4) ───────── */
+.w{--st:0px;width:max-content;border-radius:26px;background:var(--q-glass);backdrop-filter:blur(26px) saturate(1.8);-webkit-backdrop-filter:blur(26px) saturate(1.8);box-shadow:inset 0 0 0 .5px var(--q-glass-line),0 0 0 .5px rgba(0,0,0,.35),0 14px 40px rgba(0,0,0,.32);overflow:hidden;flex:none}
+/* Anchored by its right end, so Share, Mic and Leave stay put when the row grows. */
+.w.live{position:absolute;top:calc(var(--rowy) - var(--st));cursor:grab;z-index:3}
+.w.static{pointer-events:none}
+.w.static .drawer{transition:none}
+.w .strip{height:var(--st);overflow:hidden}
+.w .strip-in{display:flex;gap:6px;justify-content:center;padding:6px 6px 0}
+.vt{width:120px;height:90px;border-radius:18px;position:relative;overflow:hidden;flex:none}
+.vt::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 2.5px transparent;transition:box-shadow .2s;pointer-events:none}
+.vt.speaking::after{box-shadow:inset 0 0 0 2.5px var(--q-live)}
+.vt-name{position:absolute;left:6px;bottom:6px;height:20px;padding:0 7px;border-radius:7px;background:rgba(10,11,14,.55);color:#fff;font-size:11px;font-weight:600;display:flex;align-items:center;gap:4px;z-index:2}
+.w .main{display:flex;align-items:center;gap:6px;padding:6px;min-height:52px}
+.w .faces{display:flex;align-items:center;gap:6px}
+.w .vsep{width:1px;height:24px;background:rgba(255,255,255,.14);flex:none;margin:0 2px}
+.face{width:var(--s);height:var(--s);border-radius:50%;position:relative;flex:none;transition:box-shadow .2s}
+.face .clip{position:absolute;inset:0;border-radius:50%;overflow:hidden;display:grid;place-items:center}
+.face.speaking{box-shadow:0 0 0 2.5px var(--q-live)}
+.b-mute{position:absolute;bottom:-3px;right:-3px;width:16px;height:16px;border-radius:50%;background:var(--q-danger);color:#fff;display:grid;place-items:center;box-shadow:0 0 0 2px var(--q-edge);z-index:4}
+.w .stack{display:flex;align-items:center;gap:8px;height:44px;padding:2px 11px 2px 2px;margin-left:6px;border-radius:22px;background:rgba(255,255,255,.06);transition:background .15s}
+.w.live .stack:hover,.w[data-open="people"] .stack{background:rgba(255,255,255,.12)}
+.pile{position:relative;height:40px;flex:none}
+.pile .front{position:absolute;left:0;top:0;z-index:3}
+.pile .front .clip{filter:saturate(.45) brightness(.8)}
+.ghost{position:absolute;top:0;width:40px;height:40px;border-radius:50%;overflow:hidden;box-shadow:0 0 0 2px var(--q-edge)}
+.ghost .av{filter:saturate(.3) brightness(.5)}
+.g1{left:9px;z-index:2}.g2{left:18px;z-index:1}
+.cnt{font-size:13px;font-weight:650;color:var(--q-dim)}
+.w .ctrls{display:flex;gap:6px}
+.w .ctrl3{display:flex;gap:6px}
+.w .tb{width:38px;height:38px;border-radius:50%;display:grid;place-items:center;background:var(--q-gbtn);flex:none;position:relative;transition:background .15s}
+.w .tb:hover{background:var(--q-gbtn-h)}
+.w .tb.off{background:var(--q-text);color:var(--q-danger)}
+.w .tb.leave{background:var(--q-danger);color:#fff}
+.w .tb.cc.open{background:rgba(255,255,255,.24)}
+.recdot{position:absolute;top:4px;right:4px;width:9px;height:9px;border-radius:50%;background:var(--q-rec);box-shadow:0 0 0 2px var(--q-edge);animation:recpulse 1.8s infinite}
+.recdot.paused{background:var(--q-faint);animation:none}
+.drawer{display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s cubic-bezier(.2,.8,.2,1)}
+.drawer>.din{overflow:hidden;min-height:0}
+.w[data-open="controls"] .d-controls,.w[data-open="people"] .d-people,.w[data-open="name"] .d-name,.w.has-note .d-note{grid-template-rows:1fr}
+.dpad{width:0;min-width:100%;padding:0 12px 10px}
+.dline{height:1px;background:rgba(255,255,255,.08);margin-bottom:8px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end}
+.w .chip{height:32px;padding:0 12px 0 10px;border-radius:16px;background:var(--q-gbtn);display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600}
+.w .chip:hover{background:var(--q-gbtn-h)}
+.w .chip.off{color:var(--q-danger)}
+.dh{font-size:11px;font-weight:600;color:var(--q-dim);padding:0 2px 7px}
+.pgrid{display:flex;flex-wrap:wrap;gap:8px 4px}
+.pp{width:54px;display:flex;flex-direction:column;align-items:center;gap:4px}
+.pp span{font-size:10.5px;color:var(--q-dim);max-width:54px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nmrow{text-align:center;font-size:12px;color:var(--q-dim)}
+.nmrow b{color:var(--q-text);font-weight:600}
+.note{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;font-size:12px;color:var(--q-dim);line-height:1.4}
+.note .nt{flex:1 1 170px;min-width:0;display:flex;gap:8px;align-items:flex-start}
+.note .nt b{color:var(--q-text);font-weight:600}
+.note .nbs{display:flex;gap:6px;margin-left:auto}
+.nb{height:26px;padding:0 11px;border-radius:13px;background:var(--q-gbtn);font-size:12px;font-weight:600;white-space:nowrap}
+.nb:hover{background:var(--q-gbtn-h)}
+.nb.pri{background:var(--q-accent);color:#fff}
+.nb.pri:hover{filter:brightness(1.1)}
+
+/* ───────── "Transcribe this call" panel ───────── */
+.pop{position:absolute;width:300px;border-radius:18px;background:rgba(28,30,37,.9);backdrop-filter:blur(30px) saturate(1.8);-webkit-backdrop-filter:blur(30px) saturate(1.8);box-shadow:inset 0 0 0 .5px var(--q-glass-line),0 0 0 .5px rgba(0,0,0,.4),0 18px 48px rgba(0,0,0,.42);padding:10px 8px 8px;z-index:6}
+.pop.static{position:relative;pointer-events:none}
+.pop-h{display:flex;align-items:center;gap:8px;padding:2px 2px 8px 8px}
+.pop-h b{font-size:13.5px;font-weight:650;flex:1}
+.xb{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;color:var(--q-dim)}
+.xb:hover{background:var(--q-gbtn);color:var(--q-text)}
+.pop-l{font-size:11px;font-weight:600;color:var(--q-dim);padding:2px 8px 4px}
+.wr{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:11px;width:100%}
+.wr:hover{background:rgba(255,255,255,.06)}
+.wr.sel{background:rgba(255,255,255,.09)}
+.rad{width:16px;height:16px;border-radius:50%;box-shadow:inset 0 0 0 1.5px var(--q-faint);flex:none}
+.rad.on{box-shadow:inset 0 0 0 5px var(--q-accent)}
+.wm{flex:1;min-width:0;display:flex;flex-direction:column}
+.wn{font-weight:600;font-size:12.5px}
+.ws{font-size:11.5px;color:var(--q-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.prog{display:block;height:4px;border-radius:2px;background:rgba(255,255,255,.1);overflow:hidden;margin-top:5px}
+.prog i{display:block;height:100%;background:var(--q-accent);width:var(--p);transition:width .15s linear}
+.pop-x{font-size:11.5px;color:var(--q-faint);padding:6px 8px 0;line-height:1.4}
+.pop-f{display:flex;align-items:center;gap:8px;margin-top:10px;padding:8px 2px 0 2px;border-top:1px solid rgba(255,255,255,.07)}
+.pop-f .pb{margin-left:auto}
+.pop-msg{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--q-dim);background:rgba(255,255,255,.05);border-radius:9px;padding:7px 9px;margin:0 2px 8px}
+.wait{display:flex;flex-direction:column;align-items:center;text-align:center;gap:3px;padding:12px 12px 4px}
+.spin{position:relative;width:52px;height:52px;display:grid;place-items:center;margin-bottom:10px}
+.spin::after{content:"";position:absolute;inset:-5px;border-radius:50%;border:2.5px solid rgba(255,255,255,.12);border-top-color:var(--q-accent);animation:rot 1s linear infinite}
+.wait b{font-weight:650}
+.wait small{color:var(--q-dim);font-size:12px}
+
+/* ───────── the transcript window ───────── */
+.tw{position:absolute;display:flex;flex-direction:column;border-radius:16px;overflow:hidden;background:rgba(19,20,25,.9);backdrop-filter:blur(30px) saturate(1.6);-webkit-backdrop-filter:blur(30px) saturate(1.6);box-shadow:inset 0 0 0 .5px var(--q-glass-line),0 0 0 .5px rgba(0,0,0,.45),0 22px 60px rgba(0,0,0,.42);z-index:4}
+.tw.static{position:relative;pointer-events:none;flex:none}
+.tw-h{flex:none;padding:9px 8px 9px 14px;cursor:grab;border-bottom:1px solid rgba(255,255,255,.06);user-select:none}
+.tw-r1{display:flex;align-items:center;gap:7px;height:26px}
+.tw-r1 b{font-weight:650;font-size:13px}
+.tw-t{color:var(--q-dim);font-size:12px;font-variant-numeric:tabular-nums}
+.tw-s{font-size:11.5px;color:var(--q-dim);margin-top:0;padding-left:15px}
+.twb{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;color:var(--q-dim)}
+.twb:hover,.twb.on{background:var(--q-gbtn);color:var(--q-text)}
+.tw-bw{flex:1;position:relative;min-height:0;display:flex}
+.tw-b{flex:1;overflow:auto;padding:0 12px 14px;scrollbar-width:thin}
+.tw-f{flex:none;display:flex;align-items:center;gap:10px;padding:10px 12px;border-top:1px solid rgba(255,255,255,.06);font-size:12px;color:var(--q-dim);line-height:1.4}
+.tw-f .nt{flex:1}
+.tw-f b{color:var(--q-text);font-weight:600}
+.newpill{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);height:26px;padding:0 11px 0 8px;border-radius:13px;background:var(--q-accent);color:#fff !important;font-size:12px;font-weight:600;display:flex;align-items:center;gap:5px;box-shadow:0 6px 16px rgba(0,0,0,.35);z-index:3;white-space:nowrap}
+.menu{position:absolute;top:40px;right:8px;width:214px;padding:5px;border-radius:11px;background:rgba(38,40,48,.97);box-shadow:inset 0 0 0 .5px var(--q-glass-line),0 14px 36px rgba(0,0,0,.45);z-index:8;font-size:12.5px}
+.mi{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:7px;width:100%}
+.mi:hover{background:var(--q-accent);color:#fff}
+.mi.danger{color:#ff8a8d}
+.mi.danger:hover{background:var(--q-danger);color:#fff}
+.msep{height:1px;background:rgba(255,255,255,.08);margin:4px 3px}
+.mnote{font-size:11px;color:var(--q-faint);padding:3px 8px 4px;line-height:1.35}
+.tw-empty{display:flex;flex-direction:column;align-items:center;text-align:center;gap:4px;color:var(--q-dim);font-size:12.5px;padding:40px 24px 0}
+.tw-empty b{color:var(--q-text);font-weight:600}
+.wave{display:flex;gap:3px;align-items:center;height:18px;margin-bottom:8px}
+.wave i{width:3px;height:4px;border-radius:2px;background:var(--q-accent);animation:wv 1.1s ease-in-out infinite}
+.wave i:nth-child(2){animation-delay:.15s}.wave i:nth-child(3){animation-delay:.3s}.wave i:nth-child(4){animation-delay:.45s}.wave i:nth-child(5){animation-delay:.6s}
+
+/* chat lines */
+.mg{display:flex;gap:8px;align-items:flex-start;margin-top:12px}
+.mg .col{display:flex;flex-direction:column;align-items:flex-start;gap:3px;min-width:0;max-width:84%}
+.mg .who{font-size:11px;color:var(--q-faint);display:flex;gap:6px;margin:0 0 1px 3px}
+.mg .who b{color:var(--q-dim);font-weight:600}
+.bub{background:var(--q-raised);padding:6px 10px;border-radius:14px;line-height:1.42;font-size:12.5px;overflow-wrap:anywhere}
+.mg.me{flex-direction:row-reverse}
+.mg.me .col{align-items:flex-end}
+.mg.me .who{margin:0 3px 1px 0}
+.mg.me .bub{background:var(--q-me)}
+.bub.partial{color:var(--q-dim);background:color-mix(in srgb,var(--q-raised) 55%,transparent)}
+.mg.me .bub.partial{background:color-mix(in srgb,var(--q-me) 55%,transparent)}
+.dots{display:inline-flex;gap:3px;margin-left:5px;vertical-align:middle}
+.dots i{width:4px;height:4px;border-radius:50%;background:currentColor;animation:blink 1.2s infinite}
+.dots i:nth-child(2){animation-delay:.2s}.dots i:nth-child(3){animation-delay:.4s}
+.ev{display:flex;align-items:center;justify-content:center;gap:8px;margin:14px 0 2px;font-size:11px;color:var(--q-faint);text-align:center;white-space:nowrap}
+.ev::before,.ev::after{content:"";flex:1;height:1px;background:rgba(255,255,255,.07)}
+
+/* ───────── call window (regular mode) ───────── */
+.win{position:absolute;background:var(--q-bg);border-radius:12px;overflow:hidden;box-shadow:var(--q-shadow)}
+.call{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--q-stage)}
+.c-top{height:48px;flex:none;display:flex;align-items:center;gap:10px;padding:2px 12px 0 88px}
+.c-title{display:flex;align-items:baseline;gap:8px}
+.c-title b{font-weight:650;font-size:13.5px}
+.c-title span{color:var(--q-dim);font-variant-numeric:tabular-nums}
+.pill{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 9px;border-radius:999px;font-size:11.5px;font-weight:600;background:var(--q-raised);color:var(--q-dim)}
+.pill.rec{color:#ff8a80;background:color-mix(in srgb,var(--q-rec) 14%,transparent)}
+.pill.rec .rdot{width:7px;height:7px}
+.cbtn{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:8px;background:var(--q-raised);font-weight:600;font-size:12.5px}
+.cbtn:hover{background:var(--q-raised2)}
+.c-body{flex:1;display:flex;min-height:0}
+.stagearea{flex:1;position:relative;min-width:0}
+.tiles{position:absolute;inset:2px 12px 74px 12px;display:grid;gap:8px;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
+.tile{position:relative;border-radius:14px;overflow:hidden;background:var(--q-raised)}
+.tile::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 2.5px transparent;transition:box-shadow .25s;pointer-events:none}
+.tile.speaking::after{box-shadow:inset 0 0 0 2.5px var(--q-live)}
+.tav{position:absolute;inset:0;display:grid;place-items:center;background:radial-gradient(circle at 50% 45%,hsl(var(--h) 28% 30% / .55),transparent 70%)}
+.tname{position:absolute;left:8px;bottom:8px;display:flex;align-items:center;gap:5px;height:22px;padding:0 8px;border-radius:7px;background:rgba(10,11,14,.55);color:#fff;font-size:11.5px;font-weight:600}
+.toolbar{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);display:flex;align-items:center;gap:6px;padding:6px;border-radius:999px;background:var(--q-glass);backdrop-filter:blur(26px) saturate(1.8);-webkit-backdrop-filter:blur(26px) saturate(1.8);box-shadow:inset 0 0 0 .5px var(--q-glass-line),0 0 0 .5px rgba(0,0,0,.35),0 10px 30px rgba(0,0,0,.28);z-index:5}
+.toolbar .tb{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;background:var(--q-gbtn);position:relative}
+.toolbar .tb:hover{background:var(--q-gbtn-h)}
+.toolbar .tb.sel{background:var(--q-text);color:var(--q-bg)}
+.toolbar .tb.off{background:var(--q-text);color:var(--q-danger)}
+.toolbar .sep{width:1px;height:22px;background:var(--q-line);margin:0 3px}
+.toolbar .leave{height:40px;padding:0 16px 0 14px;border-radius:999px;background:var(--q-danger);color:#fff;font-weight:600;display:flex;align-items:center;gap:7px}
+.panel{width:310px;flex:none;border-left:1px solid var(--q-line);display:flex;flex-direction:column;background:var(--q-bg)}
+.p-tabs{display:flex;align-items:center;gap:16px;padding:0 8px 0 16px;height:42px;border-bottom:1px solid var(--q-line);flex:none}
+.tab{padding:11px 0 12px;color:var(--q-dim) !important;font-weight:500;position:relative}
+.tab:hover,.tab.on{color:var(--q-text) !important}
+.tab.on::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;background:var(--q-text);border-radius:2px}
+.tab .n{font-size:11px;color:var(--q-faint);margin-left:4px}
+.p-info{display:flex;align-items:center;gap:8px;padding:6px 8px 6px 16px;min-height:40px;font-size:12px;color:var(--q-dim);border-bottom:1px solid var(--q-line);flex:none}
+.p-body{flex:1;overflow:auto;padding:0 14px 16px;scrollbar-width:thin}
+.prow{display:flex;align-items:center;gap:10px;padding:7px 0;position:relative}
+.prow .name{flex:1;font-weight:500;min-width:0}
+.prow .name small{display:block;font-size:11px;color:var(--q-faint);font-weight:400}
+.prow .i{color:var(--q-dim)}
+.prow .mo{color:var(--q-danger)}
+.prow .ask{display:none}
+.prow:hover .ask{display:inline-flex}
+.prow:hover .state{display:none}
+.tag{font-size:10.5px;font-weight:650;padding:1px 7px;border-radius:6px;background:color-mix(in srgb,var(--q-rec) 16%,transparent);color:#ff8a80}
+
+/* ───────── settings ───────── */
+.set-top{position:absolute;left:0;right:0;top:0;height:78px;display:flex;align-items:flex-end;justify-content:center;gap:4px;padding-bottom:8px;border-bottom:1px solid var(--q-line);background:var(--q-side)}
+.stab{width:104px;height:52px;border-radius:9px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;color:var(--q-dim) !important;font-size:11.5px;font-weight:500}
+.stab:hover{color:var(--q-text) !important}
+.stab.on{background:var(--q-sel);color:var(--q-text) !important}
+.stab.on .i{color:var(--q-accent)}
+.set-body{position:absolute;top:78px;left:0;right:0;bottom:0;overflow:auto;padding:6px 26px 26px;scrollbar-width:thin}
+.shd{display:flex;align-items:baseline;gap:8px;font-weight:650;margin:18px 2px 8px;font-size:13px}
+.shd small{font-weight:400;color:var(--q-faint);font-size:11.5px}
+.sgrp{border-radius:12px;background:var(--q-side);box-shadow:inset 0 0 0 1px var(--q-line);position:relative}
+.srow{display:flex;align-items:center;gap:16px;padding:11px 14px;min-height:50px;position:relative}
+.srow+.srow{border-top:1px solid var(--q-line)}
+.sl{flex:1;min-width:0}
+.sl b{display:block;font-weight:600}
+.sl small{display:block;color:var(--q-dim);font-size:11.5px;margin-top:2px;line-height:1.4}
+.sl small.warn{color:#f0b35a}
+.select{height:28px;padding:0 8px 0 11px;border-radius:8px;background:var(--q-raised);box-shadow:inset 0 0 0 1px var(--q-line);display:flex;align-items:center;gap:7px;font-weight:500;min-width:160px;justify-content:space-between}
+.select:hover{background:var(--q-raised2)}
+.dd{position:absolute;right:14px;top:44px;width:190px;padding:5px;border-radius:10px;background:rgba(40,42,50,.98);box-shadow:inset 0 0 0 .5px var(--q-glass-line),0 14px 36px rgba(0,0,0,.45);z-index:9}
+.dd .mi .ck{width:14px;display:grid;place-items:center}
+.mrow{display:flex;align-items:center;gap:12px;padding:10px 14px;cursor:pointer;position:relative;width:100%}
+.mrow+.mrow{border-top:1px solid var(--q-line)}
+.mrow:hover{background:var(--q-hover)}
+.mrow.dis{cursor:default}
+.mrow.dis:hover{background:none}
+.mrow.dis .mm,.mrow.dis .mz,.mrow.dis .rad{opacity:.42}
+.mm{flex:1;min-width:0}
+.mt{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.mt b{font-weight:600}
+.by{font-size:11.5px;color:var(--q-faint)}
+.badge{font-size:10.5px;font-weight:650;padding:1px 7px;border-radius:6px;background:color-mix(in srgb,var(--q-accent) 20%,transparent);color:#9bbcff}
+.badge.warn{background:rgba(255,255,255,.07);color:var(--q-dim)}
+.badge.q{background:rgba(240,179,90,.14);color:#f0b35a}
+.ms{font-size:11.5px;color:var(--q-dim);margin-top:2px}
+.mz{font-size:12px;color:var(--q-dim);width:92px;text-align:right;font-variant-numeric:tabular-nums;flex:none}
+.ma{width:112px;display:flex;justify-content:flex-end;align-items:center;flex:none}
+.dlb{height:26px;padding:0 10px;border-radius:7px;background:var(--q-raised2);font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px}
+.dlb:hover{filter:brightness(1.15)}
+.have{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--q-dim)}
+.have .i{color:var(--q-live)}
+.rm{display:none;height:26px;padding:0 9px;border-radius:7px;align-items:center;gap:5px;color:var(--q-dim);font-size:12px;font-weight:500}
+.mrow:hover .rm{display:inline-flex}
+.mrow:hover .have.rmv{display:none}
+.rm:hover{background:var(--q-raised2);color:#ff8a8d}
+.dlp{width:104px}
+.dlp small{font-size:11px;color:var(--q-dim);display:block;text-align:right;margin-bottom:5px;font-variant-numeric:tabular-nums}
+.dlp .prog{margin-top:0}
+.switch{width:32px;height:19px;border-radius:10px;background:var(--q-raised2);position:relative;flex:none;transition:background .2s;cursor:pointer}
+.switch::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.3);transition:left .2s}
+.switch.on{background:var(--q-accent)}.switch.on::after{left:15px}
+.seg2{display:inline-flex;gap:2px;padding:2px;border-radius:8px;background:var(--q-field);box-shadow:inset 0 0 0 1px var(--q-line);flex:none}
+.seg2 button{height:24px;padding:0 10px;border-radius:6px;font-size:12px;color:var(--q-dim)}
+.seg2 button.on{background:var(--q-raised2);color:var(--q-text)}
+.seg2.dis{opacity:.4;pointer-events:none}
+.tryout{min-height:20px;font-size:12.5px;color:var(--q-text);display:flex;align-items:center;gap:10px}
+.tryout .wave{margin:0}
+.sfoot{font-size:11.5px;color:var(--q-faint);margin:14px 2px 0;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.sfoot a{color:var(--q-accent);cursor:pointer;font-weight:500}
+.sfoot code{font:11px ui-monospace,Menlo,monospace;color:var(--q-dim)}
+.sempty{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:6px;color:var(--q-dim);height:100%;padding:0 80px}
+.sempty b{color:var(--q-text);font-weight:600;font-size:14px}
+/* ───────── round 2: recording ───────── */
+.pb{display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.pb.rec{background:var(--q-rec)}
+.w .tb.rec,.toolbar .tb.rec{background:color-mix(in srgb,var(--q-rec) 24%,transparent);color:#ff6b61}
+.w .tb.rec:hover,.toolbar .tb.rec:hover{background:color-mix(in srgb,var(--q-rec) 34%,transparent)}
+.w[data-open="rec"] .d-rec{grid-template-rows:1fr}
+.recrow{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--q-dim);min-height:26px}
+.recrow .nt{flex:1;min-width:0}
+.recrow b{color:var(--q-text);font-weight:600}
+.wi{width:30px;height:30px;border-radius:9px;background:rgba(255,255,255,.08);display:grid;place-items:center;flex:none}
+.wz{font-size:11.5px;color:var(--q-faint);flex:none;white-space:nowrap;align-self:flex-start;margin-top:2px}
+.ws.wrap{white-space:normal}
+.pathbox{display:inline-flex;align-items:center;gap:7px;height:28px;padding:0 10px;border-radius:8px;background:var(--q-field);box-shadow:inset 0 0 0 1px var(--q-line);color:var(--q-dim);font-size:12px;flex:none}
+.stagearea .pop{left:50%;bottom:70px;transform:translateX(-50%)}
+
+/* the share picker, in record mode (share_picker.rs: 760 × 580, cards 208 px) */
+.pk{position:absolute;width:760px;height:580px;background:var(--q-bg);border-radius:12px;overflow:hidden;box-shadow:var(--q-shadow);display:flex;flex-direction:column;z-index:9}
+.pk.static{position:relative;flex:none;pointer-events:none}
+.pk>.lights{left:14px;top:14px}
+.pk-h{height:52px;flex:none;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}
+.pk-h b{font-weight:600}
+.pk-h small{font-size:11px;color:var(--q-faint)}
+.pk-b{flex:1;overflow:auto;padding:0 20px 16px;scrollbar-width:thin}
+.pk-sec{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--q-dim);text-transform:uppercase;margin:8px 0 8px}
+.pk-g{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:8px}
+.pk-card{width:208px;padding:6px;border-radius:12px;box-shadow:inset 0 0 0 2px transparent;display:flex;flex-direction:column;gap:6px;background:var(--q-raised)}
+.pk-card:hover{background:var(--q-raised2)}
+.pk-card.sel{box-shadow:inset 0 0 0 2px var(--q-accent)}
+.pk-th{height:110px;border-radius:8px;overflow:hidden;position:relative;display:block;background:#0b0c0f}
+.pk-t{display:flex;align-items:center;gap:6px;font-size:12px;padding:0 2px;min-width:0}
+.pk-t .i{color:var(--q-dim)}
+.pk-t b{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pk-s{font-size:11px;color:var(--q-dim);padding:0 2px 2px}
+.pk-f{flex:none;display:flex;align-items:center;gap:8px;padding:12px 20px;border-top:1px solid var(--q-line)}
+.pk-p{height:26px;padding:0 12px;border-radius:13px;background:var(--q-raised);font-size:11.5px}
+.pk-p.on{background:var(--q-accent);color:#fff}
+.th{position:absolute;inset:0;display:block;padding:10% 9%}
+.th i{display:block;height:5px;border-radius:2px;margin-bottom:6px;opacity:.8}
+.th-code{background:#1a1c22}
+.th-notes{background:#fbfaf7}
+.th-page{background:#f6f5f1;padding:9% 10%}
+.th-page b{display:block;height:9%;width:45%;margin:0 auto 6%;border-radius:2px;background:#2b2c33}
+.th-page em{display:block;height:5%;width:60%;margin:0 auto 9%;border-radius:2px;background:#d8d6cf}
+.th-page>span{display:flex;gap:6%;height:45%}
+.th-page u{flex:1;border-radius:4px;background:#fff;box-shadow:0 0 0 1px #e8e6df}
+.th-page u.hl{box-shadow:0 0 0 1.5px #ff7a45}
+.th-mini{position:absolute;left:12%;top:14%;width:64%;height:68%;border-radius:4px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,.45)}
+.th-mini .th{padding:8% 7%}
+.th-mini .th i{height:3px;margin-bottom:4px}
+.gitem.wide{grid-column:1/-1}
+
+/* home, after prototype/ui.html */
+.home{position:absolute;inset:0;display:flex}
+.side{width:260px;flex:none;background:var(--q-side);border-right:1px solid var(--q-line);display:flex;flex-direction:column}
+.side-top{height:52px;flex:none}
+.qseg{margin:0 12px 6px;display:flex;background:var(--q-field);border-radius:8px;padding:2px;box-shadow:inset 0 0 0 1px var(--q-line)}
+.qseg span{flex:1;height:24px;border-radius:6px;font-size:12px;color:var(--q-dim);display:grid;place-items:center}
+.qseg span.on{background:var(--q-raised2);color:var(--q-text)}
+.hlist{flex:1;padding:4px 8px}
+.hrow{display:flex;align-items:center;gap:11px;padding:8px;border-radius:9px}
+.hrow.sel{background:var(--q-sel)}
+.hrow .hm{flex:1;min-width:0}
+.hrow b{display:block;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hrow small{font-size:12px;color:var(--q-dim);display:flex;gap:5px;align-items:center;margin-top:1px}
+.hrow small .i{color:var(--q-faint)}
+.me-row{border-top:1px solid var(--q-line);padding:10px 10px 10px 14px;display:flex;align-items:center;gap:10px}
+.me-row b{flex:1;font-weight:600}
+.ibtn{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;color:var(--q-dim);flex:none}
+.ibtn:hover{background:var(--q-hover);color:var(--q-text)}
+.detail{flex:1;display:flex;flex-direction:column;min-width:0;position:relative}
+.d-top{height:56px;flex:none;display:flex;align-items:center;gap:8px;padding:6px 16px 0 28px}
+.d-top h3{font-size:19px;font-weight:700;margin:0;letter-spacing:-.015em}
+.d-sub{display:flex;align-items:center;gap:8px;color:var(--q-dim);font-size:12.5px;padding:0 20px 0 28px;height:28px}
+.avs{display:flex}.avs .av{box-shadow:0 0 0 2px var(--q-bg)}.avs .av+.av{margin-left:-6px}
+.htabs{display:flex;gap:20px;border-bottom:1px solid var(--q-line);margin-top:10px;padding:0 28px;flex:none}
+.htabs .tab{padding:7px 0 9px}
+.htabs .tab.on::after{bottom:-1px}
+.d-body{flex:1;overflow:auto;padding:4px 28px 20px;scrollbar-width:thin}
+.d-body .mg .col{max-width:70%}
+.bub[data-act="hseek"]{cursor:pointer;transition:box-shadow .2s}
+.bub[data-act="hseek"]:hover{box-shadow:0 0 0 1px var(--q-line),0 0 0 4px var(--q-hover)}
+.bub.now{box-shadow:0 0 0 2px var(--q-accent) !important}
+.player{flex:none;margin:0 16px 14px;height:46px;border-radius:13px;background:var(--q-raised);display:flex;align-items:center;gap:10px;padding:0 12px 0 7px;box-shadow:0 0 0 .5px var(--q-line),0 6px 20px rgba(0,0,0,.18)}
+.pbtn2{width:32px;height:32px;border-radius:50%;background:var(--q-accent);color:#fff !important;display:grid;place-items:center;flex:none}
+.tm{font-size:11.5px;color:var(--q-dim);font-variant-numeric:tabular-nums;width:34px;flex:none}
+.pwave{flex:1;height:26px;position:relative;cursor:pointer}
+.pwave .bars{position:absolute;inset:0;display:flex;align-items:center;gap:2px;pointer-events:none}
+.pwave .bars i{flex:1;border-radius:2px;background:var(--q-faint);opacity:.5}
+.pwave .bars.on{clip-path:inset(0 calc(100% - var(--p,0%)) 0 0)}
+.pwave .bars.on i{background:var(--q-accent);opacity:1}
+.psel{font-size:12px;color:var(--q-dim);flex:none}
+.nofile{flex:none;margin:0 16px 14px;padding:11px 14px;border-radius:13px;background:var(--q-raised);font-size:12.5px;color:var(--q-dim);display:flex;gap:10px;align-items:center}
+.nofile .i{color:var(--q-faint)}
+.nofile b{color:var(--q-text);font-weight:600}
+.rcards{display:grid;grid-template-columns:1fr 1fr;gap:18px;padding-top:14px}
+.thumb{position:relative;aspect-ratio:16/9;border-radius:10px;overflow:hidden;background:#0b0c0f;cursor:pointer}
+.g4{position:absolute;inset:0;display:grid;grid-template-columns:1fr 1fr;gap:2px}
+.g4>div{position:relative;overflow:hidden;background:var(--q-raised);display:grid;place-items:center}
+.thumb .dur{position:absolute;right:8px;bottom:8px;background:rgba(0,0,0,.62);color:#fff;font-size:11px;padding:2px 6px;border-radius:5px;font-variant-numeric:tabular-nums}
+.thumb .pl{position:absolute;inset:0;display:grid;place-items:center;opacity:0;transition:opacity .15s;background:rgba(0,0,0,.25)}
+.thumb:hover .pl{opacity:1}
+.pl span{width:44px;height:44px;border-radius:50%;background:rgba(255,255,255,.92);color:#111;display:grid;place-items:center}
+.rec-t{font-weight:600;margin-top:9px}
+.rec-m{font-size:12px;color:var(--q-dim);margin-top:2px}
+.rec-a{display:flex;gap:2px;margin-top:4px;margin-left:-6px}
+.hempty{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--q-dim);gap:4px;padding:40px 60px}
+.hempty .ei{width:46px;height:46px;border-radius:13px;background:var(--q-raised);display:grid;place-items:center;color:var(--q-faint);margin-bottom:8px}
+.hempty b{color:var(--q-text);font-weight:600;font-size:14px}
+.hempty p{margin:0;max-width:36ch;line-height:1.5}
+@media (prefers-reduced-motion:reduce){#board *{animation:none !important;transition:none !important}}
+</style>
+</head>
+<body>
+<div id="board">
+  <header class="head">
+    <h1>Transcription and recording · round 3</h1>
+    <p>Your round 2 decisions are built in. <b>Record</b> saves the call's audio, or the audio plus your screen, which you pick as when sharing. There is one recording per call, and only whoever started it can stop it. You'll find it in the widget (sections 1 and 4), the call window (5), Settings (6) and Home after the call (7). Transcription works as before: one person's Mac transcribes everyone, and the transcript opens as a chat in a window of its own. Everything is clickable, and the conversation is made up.</p>
+    <nav class="toc"><a href="#live">1 · Live call</a><a href="#who">2 · Who transcribes</a><a href="#window">3 · Transcript window</a><a href="#recording">4 · Recording</a><a href="#regular">5 · Call window</a><a href="#settings">6 · Settings</a><a href="#after">7 · After the call</a><a href="#questions">Questions</a></nav>
+  </header>
+
+  <section id="live">
+    <h2>1 · Live call</h2>
+    <p class="lede">Hover Share, Mic or Leave: the row that opens has <b>Transcribe</b> and <b>Record</b>. Start either one, then hover or click the buttons that appear in the row, open ⋯ in the transcript window, or drag the window by its top.</p>
+    <div class="pctl">
+      <span>Transcript <span class="seg" id="ctl-start"><button data-v="off" aria-pressed="true">Off</button><button data-v="me" aria-pressed="false">You</button><button data-v="anna" aria-pressed="false">Anna</button></span></span>
+      <span>Recording <span class="seg" id="ctl-rec"><button data-v="off" aria-pressed="true">Off</button><button data-v="me" aria-pressed="false">You</button><button data-v="anna" aria-pressed="false">Anna</button></span></span>
+      <span>Model on your Mac <span class="seg" id="ctl-model"><button data-v="1" aria-pressed="true">Downloaded</button><button data-v="0" aria-pressed="false">Not yet</button></span></span>
+      <span>Conversation <span class="seg" id="ctl-talk"><button data-v="1" aria-pressed="true">Running</button><button data-v="0" aria-pressed="false">Paused</button></span></span>
+      <button class="pbtn" id="ctl-leave">Anna leaves the call</button>
+    </div>
+    <div class="stage" data-w="1080" data-h="700"><div class="canvas wall app" id="desk"></div></div>
+    <ol class="notes">
+      <li><b>Start:</b> <i>Transcribe</i> joins Camera, Copy link and Call window in the hover row under the buttons. It opens a small panel that asks whose Mac does it (section 2). You're picked first when your Mac has a model.</li>
+      <li><b>Record</b> sits next to it and opens its own small panel: audio, or audio and your screen (section 4). The recording is made on your Mac, so there's no "whose Mac" choice. Pick "Audio and screen" to see the picker.</li>
+      <li><b>While it runs,</b> everyone's widget gets a captions button with a red dot, left of Share. Nobody is transcribed without seeing it. Click it to open or close the window. Hover it to see who transcribes, with which model. Share, Mic and Leave don't move, because the widget grows from its left end.</li>
+      <li><b>While someone records,</b> a red record button joins everyone's row too, left of the captions button. Hover it for what's recorded and the time, and Stop if it's yours. Other people also get a notice when a recording starts, and Record leaves their hover row: one recording per call.</li>
+      <li><b>The window is a chat:</b> others on the left, you on the right, and joins, leaves and handovers as dividers. The line being spoken shows in grey and fills in word by word (with a streaming model), then turns solid. Lines in Russian are there on purpose: the model detects each line's language.</li>
+      <li><b>Closing the window stops nothing.</b> The captions button brings it back. <i>Stop for everyone</i>, <i>Copy transcript</i> and <i>Hand over</i> live in ⋯.</li>
+      <li><b>It's a floating panel</b> like a share window: above other apps, on all Spaces, never takes focus. It opens beside the widget, and you can drag and resize it.</li>
+      <li><b>Try the handover:</b> set Transcript to Anna, then press "Anna leaves the call". The transcript pauses and everyone whose Mac can transcribe is asked to carry on. Try it with Recording set to Anna too: the recording stops, stays on Anna's Mac, and Record comes back for everyone.</li>
+    </ol>
+  </section>
+
+  <section id="who">
+    <h2>2 · Who transcribes</h2>
+    <p class="lede">Choosing whose Mac does the work, asking someone, and what happens when they leave. Frozen states.</p>
+    <div class="gallery" id="g-who"></div>
+    <ol class="notes">
+      <li><b>The list only shows people who can transcribe:</b> desktops with a model. Web participants and Macs without a model are summed up in one line, so the list stays short in a 10-person call.</li>
+      <li><b>Asking someone</b> puts a prompt in their widget's notice row (the slim row under the main one that already shows "Joining…" and permission prompts). They accept, or say not now. In Settings, a Mac can be set to accept on its own.</li>
+      <li><b>No model on your Mac yet:</b> <i>Download and start</i> fetches the selected model right there and starts when it lands. Or ask someone who has one.</li>
+      <li><b>When the transcriber leaves,</b> the backend's lease runs out, the transcript pauses, and everyone who can is asked to take over. The first to accept wins (ARCHITECTURE.md, single transcriber).</li>
+      <li><b>Handing over</b> works the same way from ⋯ in the window. Your Mac keeps transcribing until the other person accepts, so no lines are lost in between.</li>
+    </ol>
+  </section>
+
+  <section id="window">
+    <h2>3 · Transcript window</h2>
+    <p class="lede">Its states, frozen. Everyone in the call sees the same transcript; only the line under the title changes.</p>
+    <div class="gallery" id="g-win"></div>
+    <ol class="notes">
+      <li><b>People who join late get the history</b> (the backend stores it), then a divider marks where they came in.</li>
+      <li><b>It scrolls itself</b> while you're at the bottom. Scroll up to read, and new lines collect in a blue pill instead of pulling you down.</li>
+      <li><b>Stopping saves it with the call.</b> Home shows it in the call's Transcript tab, as the round-1 prototype drew it (<code>prototype/ui.html</code>, section 3).</li>
+    </ol>
+  </section>
+
+  <section id="recording">
+    <h2>4 · Recording</h2>
+    <p class="lede">Record saves the call on your Mac: everyone's audio, or the audio plus your screen. Frozen states.</p>
+    <div class="gallery" id="g-rec"></div>
+    <ol class="notes">
+      <li><b>Two buttons, two jobs.</b> Transcribe makes text that everyone gets. Record makes a file on your Mac. Each starts and stops on its own. When both ran, Home plays the recording under the transcript (section 7).</li>
+      <li><b>Audio is the default:</b> everyone's voices mixed into one .m4a, about 30 MB an hour. It reads the same per-person audio the transcriber already reads, so it costs next to nothing.</li>
+      <li><b>Audio and screen records your screen, not the call.</b> You pick a display or a window in the share picker, with the same presets (5 or 15 fps for text, 30 or 60 for motion). Quipcall's own windows are left out, as when sharing. It's one .mp4, up to about 1.4 GB an hour.</li>
+      <li><b>It costs about what sharing does:</b> the same ScreenCaptureKit capture into IOSurfaces, the same VideoToolbox H.264, plus writing to disk. If you're already sharing that screen, the recording reuses the share's capture instead of starting a second one.</li>
+      <li><b>One recording per call, and only whoever started it can stop it.</b> While Anna records, Record is gone from everyone else's hover row, and the red button says whose Mac has it. If Anna leaves, the recording stops and stays on Anna's Mac, and anyone can start a new one.</li>
+      <li><b>A crash loses almost nothing.</b> The file is written in fragments, so a crash or a full disk keeps everything up to the last few seconds.</li>
+    </ol>
+  </section>
+
+  <section id="regular">
+    <h2>5 · Call window</h2>
+    <p class="lede">In regular mode the toolbar gets the same two buttons, Record and Transcribe. The transcript gets no extra window here: it lives in the side panel's Transcript tab, with the call's timeline. Try the record button, the pills in the title bar, the tabs, or Stop.</p>
+    <div class="stage" data-w="1080" data-h="700"><div class="canvas wall app" id="cv-call"></div></div>
+    <ol class="notes">
+      <li><b>Two toolbar buttons</b>, Record and Transcribe, between Share and the side panel. Record opens the same panel as in the widget. Transcribe starts the transcript (with the same chooser as the widget) and opens the Transcript tab. The pills in the title bar show what's running.</li>
+      <li><b>People tab:</b> hover someone whose Mac can transcribe and an <i>Ask to transcribe</i> button appears. That's the second way to assign the transcript to a person.</li>
+      <li>Switching between the widget and this window keeps the transcript running; only the place it's shown changes.</li>
+    </ol>
+  </section>
+
+  <section id="settings">
+    <h2>6 · Settings</h2>
+    <p class="lede">A new Settings window (⌘,), also opened by the gear next to your name on Home and by the links in the Transcribe and Record panels. On Transcription, change the language, download a model, select it, or try it with your voice. The Recording tab is new in round 2.</p>
+    <div class="stage" data-w="1000" data-h="1000"><div class="canvas wall app" id="cv-set"></div></div>
+    <ol class="notes">
+      <li><b>Two settings, as you asked: Language and Model.</b> The language changes which model is suggested and greys out the models that don't know it. <i>Auto-detect</i> is for mixed calls.</li>
+      <li><b>Models download only when chosen</b> and live in Application Support. Remove one with the button that appears when you hover it. The app bundle stays the same size.</li>
+      <li><b>Try it</b> runs the selected model on your mic, so you can hear the difference before a real call.</li>
+      <li><b>The models:</b>
+        <i>Parakeet TDT v3</i> (NVIDIA): 25 European languages, Russian included but not Chinese, very fast.
+        <i>Nemotron 3.5 ASR</i> (NVIDIA, June 2026): streams word by word, 32 languages ready to use (40 locales in all), Chinese included. I couldn't confirm Russian.
+        <i>Qwen3-ASR 0.6B</i> (Alibaba): 30 languages and 22 Chinese dialects, Russian included. The best fit for Chinese.
+        <i>Whisper Large v3 Turbo</i> (OpenAI): 99 languages, but slower, and it waits for pauses.
+        <i>GigaAM v3</i> (Sber): Russian only, small, about 5–8% WER on FLEURS-ru.
+        <i>Apple Speech</i>: built into macOS 26+, nothing to download, but the language list is up to macOS and Russian wasn't on it at launch.</li>
+      <li><b>Recording</b> sets what the Record panel picks first, whether each voice gets its own track, and the folder (Movies › Quipcall). The screen's frame rate is picked in the share picker, as when sharing.</li>
+      <li><b>Sizes are rough</b> (8-bit or 5-bit quantised), and the "behind your voice" times in Try are made up. The Stage 9 bake-off measures both.</li>
+    </ol>
+  </section>
+
+  <section id="after">
+    <h2>7 · After the call</h2>
+    <p class="lede">Home opens on the call you just left. Press ▶ or click any line to play from there, and switch to Recordings. Then look at the same call as Anna, who didn't record it.</p>
+    <div class="pctl"><span>You are <span class="seg" id="ctl-as"><button data-v="me" aria-pressed="true">Nikita, who recorded it</button><button data-v="anna" aria-pressed="false">Anna, who didn't</button></span></span></div>
+    <div class="stage" data-w="1000" data-h="660"><div class="canvas wall app" id="cv-home"></div></div>
+    <ol class="notes">
+      <li><b>The transcript follows the recording</b>, as round 1 of the Home prototype drew it. A player docks under the transcript, any line plays from where it was said, and the line being played gets an outline. (It plays 3× here.)</li>
+      <li><b>Recordings</b> lists the file with its length, what it holds and its size, and Show in Finder. Clicking it opens the file in QuickTime Player, so we don't build a video player. The player under the transcript plays its sound.</li>
+      <li><b>Only the person who recorded has the file</b> for now. Everyone else gets the transcript (the backend sends it to them), and their Recordings tab says who has the recording.</li>
+      <li>The gear next to your name opens Settings.</li>
+    </ol>
+  </section>
+
+  <section id="questions">
+    <h2>Decided, and questions for you</h2>
+    <ol class="notes">
+      <li><b>Decided in round 1:</b> you pick whose Mac transcribes, or ask someone. Anyone in the call can stop the transcript. The window opens for everyone (a switch in Settings turns that off). One model per call: Parakeet v3 first, Qwen3-ASR as the second choice. The transcript gets its own window, and I'll measure what that window costs.</li>
+      <li><b>Decided in round 2:</b> Record is separate from Transcribe. "Audio and screen" records your own screen, picked in the share picker. One recording per call, and only whoever started it can stop it. Sharing the file with the room comes later, with the backend.</li>
+      <li><b>Quipcall's own windows in a screen recording:</b> left out, as when sharing (my pick), or kept, so the recording shows the widget with faces?</li>
+      <li><b>When the recorder leaves:</b> the recording just stops (my pick), or is someone asked to start a new one, the way the transcript asks for a new transcriber?</li>
+    </ol>
+  </section>
+</div>
+
+<script>
+(() => {
+"use strict";
+/* ───────── icons (Lucide, ISC) ───────── */
+const IC = {
+ mic:'<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/>',
+ micoff:'<path d="m2 2 20 20"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><path d="M12 19v3"/>',
+ video:'<path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/>',
+ videooff:'<path d="M10.66 6H14a2 2 0 0 1 2 2v2.5l5.248-3.062A.5.5 0 0 1 22 7.87v8.196"/><path d="M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2"/><path d="m2 2 20 20"/>',
+ share:'<path d="m9 10 3-3 3 3"/><path d="M12 13V7"/><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M12 17v4"/><path d="M8 21h8"/>',
+ phoneoff:'<path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/><path d="M22 2 2 22"/>',
+ link:'<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+ check:'<path d="M20 6 9 17l-5-5"/>',
+ max:'<path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/>',
+ min:'<path d="M4 14h6v6"/><path d="M20 10h-6V4"/><path d="M14 10l7-7"/><path d="M3 21l7-7"/>',
+ captions:'<rect width="18" height="14" x="3" y="5" rx="2" ry="2"/><path d="M7 15h4M15 15h2M7 11h2M13 11h4"/>',
+ x:'<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+ dots:'<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
+ copy:'<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+ swap:'<path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/>',
+ stop:'<rect x="6" y="6" width="12" height="12" rx="2"/>',
+ down:'<path d="m6 9 6 6 6-6"/>',
+ arrowdown:'<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>',
+ download:'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+ trash:'<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>',
+ settings:'<path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/>',
+ gear:'<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+ headphones:'<path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"/>',
+ userplus:'<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6"/><path d="M22 11h-6"/>',
+ panel:'<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/>',
+ globe:'<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>',
+ recring:'<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/>',
+ play:'<path d="M7 4.5v15a1 1 0 0 0 1.5.86l12-7.5a1 1 0 0 0 0-1.72l-12-7.5A1 1 0 0 0 7 4.5Z" fill="currentColor" stroke="none"/>',
+ pause:'<rect x="6" y="4" width="4" height="16" rx="1" fill="currentColor" stroke="none"/><rect x="14" y="4" width="4" height="16" rx="1" fill="currentColor" stroke="none"/>',
+ folder:'<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+ phone:'<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>',
+ monitor:'<rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',
+ appwin:'<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 4v4"/><path d="M2 8h20"/><path d="M6 4v4"/>',
+ file:'<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>',
+ home:'<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'
+};
+const ic = (n, s = 16) => `<svg class="i" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${IC[n]}</svg>`;
+const esc = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function hue(seed) { let h = 2166136261; for (const b of new TextEncoder().encode(seed.toLowerCase())) { h ^= b; h = Math.imul(h, 16777619) >>> 0; } return h % 360; }
+const initials = n => n.trim().split(/\s+/).slice(0, 2).map(w => w[0].toUpperCase()).join('');
+const first = n => n.split(' ')[0];
+const pad = n => String(Math.floor(n)).padStart(2, '0');
+const rnd = (() => { let a = 7; return () => { a = (a * 16807) % 2147483647; return a / 2147483647; }; })();
+const LIGHTS = '<div class="lights"><i></i><i></i><i></i></div>';
+
+/* ───────── people and models ───────── */
+const P = {
+ me:{name:'Nikita'}, anna:{name:'Anna Petrova',video:1,k:'24 52% 76%',hr:'40 62% 64%'}, lee:{name:'Lee Chen',video:1,k:'32 42% 70%',hr:'220 15% 12%'},
+ mia:{name:'Mia Kovač'}, omar:{name:'Omar Haddad'}, sofia:{name:'Sofia Rossi'}, tom:{name:'Tom Becker'}, max:{name:'Max Orlov'}
+};
+const MODEL = {parakeet:'Parakeet v3', nemotron:'Nemotron 3.5', qwen:'Qwen3-ASR', whisper:'Whisper Turbo', gigaam:'GigaAM v3', apple:'Apple Speech'};
+/* Desktops with a model downloaded. Mia and Sofia are on the web; Omar, Tom and Max have no model. */
+const CAN = {me:'parakeet', anna:'nemotron', lee:'whisper'};
+const nameOf = (id, self) => id === self ? 'You' : first(P[id].name);
+const av = (id, s) => `<span class="av" style="--s:${s}px;--h:${hue(P[id].name)}">${initials(P[id].name)}</span>`;
+const vid = id => `<div class="vid" style="--h:${hue(P[id].name)};--k:${P[id].k};--hr:${P[id].hr}"></div>`;
+
+/* ───────── clock ───────── */
+const T0 = performance.now(), BASE = 11 * 3600 + 14 * 60;
+const secs = () => BASE + (performance.now() - T0) / 1000;
+const hm = t => `${pad(t / 3600 % 24)}:${pad(t / 60 % 60)}`;
+const mmss = t => `${Math.floor(t / 60)}:${pad(t % 60)}`;
+
+/* ───────── the conversation ───────── */
+const EARLIER = [
+ ['anna', "Let's start with the pricing page. I moved the monthly and yearly toggle above the cards."],
+ ['lee', 'Much better. The cards still feel heavy, though.'],
+ ['me', 'Could we drop the borders and use spacing instead?'],
+ ['lee', 'Yes. And only the Team card gets colour.']
+];
+const SCRIPT = [
+ ['anna', 'Никита, пришлёшь ссылку на макет после звонка?'],
+ ['me', 'Да, сразу пришлю.'],
+ ['mia', 'On mobile the cards stack, so the toggle ends up far from the prices.'],
+ ['anna', 'Good point. Maybe the toggle sticks to the top on small screens?'],
+ ['mia', "I'll mock that up this afternoon."],
+ ['lee', 'One more thing: the FAQ could move right under the cards.'],
+ ['me', 'Agreed. Then the page ends with the sign-up button.'],
+ ['anna', "Okay. Let's aim to ship it on Thursday."],
+ ['lee', "Thursday works. I'll update the copy tomorrow."],
+ ['me', 'Great, thanks everyone.']
+];
+
+/* A transcript: what the backend would send every participant. */
+class Feed {
+  constructor() { this.reset(); }
+  reset() { this.items = []; this.partial = null; this.state = 'off'; this.by = null; this.t0 = 0; }
+  get live() { return this.state === 'on'; }
+  ev(text, t = secs()) { this.items.push({ev: true, text, time: hm(t)}); }
+  start(by, self, t = secs()) { this.state = 'on'; this.by = by; if (!this.t0) this.t0 = t; this.ev(by === self ? 'You started the transcript' : `${first(P[by].name)} started the transcript`, t); }
+  /* A transcript that has been running for a few minutes. */
+  prefill(by, self, n = EARLIER.length) {
+    const t = secs() - 260; this.start(by, self, t);
+    EARLIER.slice(0, n).forEach(([who, text], i) => this.items.push({who, text, time: hm(t + 20 + i * 50)}));
+  }
+  get lines() { return this.items.filter(m => !m.ev).length; }
+}
+
+function chat(items, partial, self, o = {}) {
+  const out = []; let g = null;
+  const flush = () => { if (!g) return; const me = g.who === self;
+    out.push(`<div class="mg${me ? ' me' : ''}">${me ? '' : av(g.who, o.av || 24)}<div class="col"><div class="who">${me ? '' : `<b>${first(P[g.who].name)}</b>`}<span>${g.time}</span></div>${g.lines.join('')}</div></div>`); g = null; };
+  for (const m of items) {
+    if (m.ev) { flush(); out.push(`<div class="ev">${m.text} · ${m.time}</div>`); continue; }
+    if (!g || g.who !== m.who) { flush(); g = {who: m.who, time: m.time, lines: []}; }
+    g.lines.push(`<div class="bub${o.now === m ? ' now' : ''}"${o.seek ? ` data-act="hseek" data-v="${m.t}" title="Play from here"` : ''}>${esc(m.text)}</div>`);
+  }
+  if (partial) {
+    if (!g || g.who !== partial.who) { flush(); g = {who: partial.who, time: partial.time, lines: []}; }
+    g.lines.push(`<div class="bub partial">${esc(partial.text)}<span class="dots"><i></i><i></i><i></i></span></div>`);
+  }
+  flush(); return out.join('');
+}
+function txBody(f, self) {
+  const empty = f.state === 'on' && !f.lines && !f.partial;
+  return chat(f.items, f.partial, self) + (empty ? `<div class="tw-empty"><div class="wave"><i></i><i></i><i></i><i></i><i></i></div><b>Listening</b><span>Lines show up here as people talk.</span></div>` : '');
+}
+
+/* ───────── widget ───────── */
+function face(id, s, o = {}) {
+  return `<div class="face${o.speaking ? ' speaking' : ''}" data-id="${id}" style="--s:${s}px"><div class="clip">${av(id, s)}</div>${o.muted ? `<span class="b-mute">${ic('micoff', 9)}</span>` : ''}</div>`;
+}
+function stackHTML(ids) {
+  const n = ids.length, g = Math.min(n - 1, 2);
+  const ghost = (id, cls) => `<span class="ghost ${cls}">${av(id, 40)}</span>`;
+  return `<div class="stack" data-zone="people"><div class="pile" style="width:${40 + g * 9}px">${g > 1 ? ghost(ids[2], 'g2') : ''}${g > 0 ? ghost(ids[1], 'g1') : ''}<span class="front">${face(ids[0], 40)}</span></div>${n > 1 ? `<span class="cnt">+${n - 1}</span>` : ''}</div>`;
+}
+const drawer = (cls, inner) => `<div class="drawer ${cls}"><div class="din"><div class="dpad"><div class="dline"></div>${inner}</div></div></div>`;
+/* s: {self, tiles, faces, stack, muted, speaking, tx: off|on|paused|stopped, win, note, copied, nameHTML} */
+function widgetHTML(s) {
+  const sp = id => id === s.speaking;
+  const strip = s.tiles.length ? `<div class="strip"><div class="strip-in">${s.tiles.map(id => `<div class="vt${sp(id) ? ' speaking' : ''}" data-id="${id}">${vid(id)}<span class="vt-name">${nameOf(id, s.self)}</span></div>`).join('')}</div></div>` : '';
+  const faces = s.faces.map(id => face(id, 40, {speaking: sp(id), muted: id === s.self && s.muted})).join('');
+  const tb = (act, icon, cls, tip) => `<button class="tb ${cls}" data-act="${act}" title="${tip}">${ic(icon, 17)}</button>`;
+  const running = s.tx === 'on' || s.tx === 'paused';
+  const cc = running ? `<button class="tb cc${s.win ? ' open' : ''}" data-act="ccwin" data-zone="tx" title="Transcript">${ic('captions', 17)}<span class="recdot${s.tx === 'paused' ? ' paused' : ''}"></span></button>` : '';
+  const rec = s.rec ? `<button class="tb rec" data-act="recbtn" data-zone="rec" title="Recording">${ic('recring', 17)}</button>` : '';
+  const ctrls = `<div class="ctrls">${rec}${cc}<span class="ctrl3" data-zone="controls">${tb('share', 'share', '', 'Share screen')}${tb('mic', s.muted ? 'micoff' : 'mic', s.muted ? 'off' : '', s.muted ? 'Unmute' : 'Mute')}${tb('leave', 'phoneoff', 'leave', 'Leave')}</span></div>`;
+  const chip = (act, icon, label, cls = '') => `<button class="chip ${cls}" data-act="${act}">${ic(icon, 15)}${label}</button>`;
+  const row2 = (running ? '' : chip('transcribe', 'captions', 'Transcribe')) + (s.rec ? '' : chip('record', 'recring', 'Record'));
+  const chips = `<div class="chips">${chip('cam', 'videooff', 'Camera', 'off')}${chip('link', s.copied ? 'check' : 'link', s.copied ? 'Copied' : 'Copy link')}${chip('window', 'max', 'Call window')}</div>${row2 ? `<div class="chips" style="margin-top:6px">${row2}</div>` : ''}`;
+  const list = `<div class="dh">Muted or quiet · ${s.stack.length}</div><div class="pgrid">${s.stack.map(id => `<div class="pp">${face(id, 34)}<span>${nameOf(id, s.self)}</span></div>`).join('')}</div>`;
+  return strip + `<div class="main"><div class="faces">${faces}</div>${s.stack.length ? stackHTML(s.stack) : ''}<span class="vsep"></span>${ctrls}</div>`
+    + `<div class="drawer d-note"><div class="din"><div class="dpad"><div class="dline"></div>${s.note || ''}</div></div></div>`
+    + drawer('d-controls', chips) + drawer('d-people', list) + drawer('d-name', `<div class="nmrow">${s.nameHTML || ''}</div>`) + drawer('d-rec', `<div class="recrow">${s.recHTML || ''}</div>`);
+}
+function mountW(el, s, open = '') {
+  el.innerHTML = widgetHTML(s);
+  el.dataset.open = open;
+  el.classList.toggle('has-note', !!s.note);
+  el.style.setProperty('--st', s.tiles.length ? '96px' : '0px');
+}
+function txName(tx, by, self) {
+  if (tx === 'paused') return `<b>Transcript paused</b> · ${first(P[by].name)} left`;
+  return by === self ? `<b>Transcribing</b> · on your Mac with ${MODEL[CAN[by]]}` : `<b>Transcribing</b> · ${first(P[by].name)}'s Mac, ${MODEL[CAN[by]]}`;
+}
+/* r: {by, kind: audio|screen, src} */
+const recWhat = (r, self) => r.kind === 'audio' ? 'audio' : `audio and ${r.by === self ? r.src : `${first(P[r.by].name)}'s screen`}`;
+function recRow(r, self, time) {
+  const n = first(P[r.by].name);
+  if (r.by === self) return `<span class="rdot"></span><span class="nt"><b>Recording</b> ${recWhat(r, self)} · <span data-rtimer>${time}</span></span><button class="nb" data-act="rstop">Stop</button>`;
+  return `<span class="rdot"></span><span class="nt"><b>${n} is recording</b> ${recWhat(r, self)}, on ${n}'s Mac. Only ${n} can stop it.</span>`;
+}
+/* p: {kind: audio|screen, folder} */
+function recPopHTML(p) {
+  const opt = (v, icon, name, sub, size) => `<button class="wr${p.kind === v ? ' sel' : ''}" data-act="rkind" data-v="${v}"><span class="rad${p.kind === v ? ' on' : ''}"></span><span class="wi">${ic(icon, 16)}</span><span class="wm"><span class="wn">${name}</span><span class="ws wrap">${sub}</span></span><span class="wz">${size}</span></button>`;
+  const go = p.kind === 'audio' ? `<button class="pb rec" data-act="rgo">${ic('recring', 14)}Start recording</button>` : `<button class="pb rec" data-act="rpick">${ic('monitor', 14)}Choose screen…</button>`;
+  return `<div class="pop-h"><b>Record this call</b><button class="xb" data-act="pclose" title="Close">${ic('x', 14)}</button></div><div class="pop-l">What to record</div>`
+    + opt('audio', 'mic', 'Audio', 'Everyone’s voices in one file', '≈ 30 MB/h')
+    + opt('screen', 'monitor', 'Audio and screen', 'Your screen or a window, picked as when sharing', 'up to 1.4 GB/h')
+    + `<div class="pop-x">Saved on this Mac, in ${p.folder}. Only you get the file, and only you can stop it.</div><div class="pop-x">Everyone sees that you're recording.</div><div class="pop-f"><button class="lnk" data-act="recsettings">${ic('settings', 14)}Settings…</button>${go}</div>`;
+}
+const SCREENS = [['d1', 'Display 1', 'Built-in display', 'desk'], ['d2', 'Display 2', 'External display', 'desk2']];
+const WINS = [['w1', 'pricing.svelte — site', 'Editor', 'code'], ['w2', 'Pricing — quipcall.com', 'Browser', 'page'], ['w3', 'Standup notes', 'Notes', 'notes']];
+const PRESETS = ['5 fps · text', '15 fps · text', '30 fps · motion', '60 fps · motion'];
+const srcName = id => [...SCREENS, ...WINS].find(x => x[0] === id)[1];
+function thumb(look) {
+  const lines = cols => Array.from({length: 9}, (_, i) => `<i style="width:${30 + (i * 37) % 55}%;background:${cols[i % cols.length]}"></i>`).join('');
+  const code = `<span class="th th-code">${lines(['#c792ea', '#82aaff', '#c3e88d', '#f78c6c', '#9aa3b2'])}</span>`;
+  const page = '<span class="th th-page"><b></b><em></em><span><u></u><u class="hl"></u><u></u></span></span>';
+  if (look === 'code') return code;
+  if (look === 'page') return page;
+  if (look === 'notes') return `<span class="th th-notes">${lines(['#d8d6cf'])}</span>`;
+  return `<span class="th wall"><span class="th-mini">${look === 'desk2' ? page : code}</span></span>`;
+}
+/* p: {sel, preset} */
+function pickerHTML(p) {
+  const card = ([id, title, sub, look]) => `<button class="pk-card${p.sel === id ? ' sel' : ''}" data-act="pksel" data-v="${id}"><span class="pk-th">${thumb(look)}</span><span class="pk-t">${ic(id[0] === 'd' ? 'monitor' : 'appwin', 13)}<b>${title}</b></span><span class="pk-s">${sub}</span></button>`;
+  return `${LIGHTS}<div class="pk-h"><b>Record your screen</b><small>The call's audio is recorded too. Quipcall's own windows are left out, as when sharing.</small></div><div class="pk-b"><div class="pk-sec">Screens</div><div class="pk-g">${SCREENS.map(card).join('')}</div><div class="pk-sec">Windows</div><div class="pk-g">${WINS.map(card).join('')}</div></div><div class="pk-f">${PRESETS.map((l, i) => `<button class="pk-p${p.preset === i ? ' on' : ''}" data-act="pkpre" data-v="${i}">${l}</button>`).join('')}<span class="sp"></span><button class="pb sec" data-act="pkcancel">Cancel</button><button class="pb rec" data-act="pkgo">${ic('recring', 14)}Record</button></div>`;
+}
+const noteHTML = (who, text, buttons) => `<div class="note"><span class="nt">${who ? av(who, 22) : ''}<span>${text}</span></span><span class="nbs">${buttons}</span></div>`;
+
+/* ───────── "Transcribe this call" ───────── */
+/* p: {mode: start|handover, st: pick|wait, pick, ready, dl, declined, by, self} */
+function popHTML(p) {
+  const title = p.mode === 'handover' ? 'Hand over the transcript' : 'Transcribe this call';
+  const head = `<div class="pop-h"><b>${title}</b><button class="xb" data-act="pclose" title="Close">${ic('x', 14)}</button></div>`;
+  if (p.st === 'wait') {
+    const n = first(P[p.pick].name);
+    return head + `<div class="wait"><div class="spin">${av(p.pick, 44)}</div><b>Waiting for ${n}…</b><small>${n} sees a prompt in the call widget.</small></div><div class="pop-f"><button class="pb sec" data-act="pcancel">Cancel</button></div>`;
+  }
+  const rows = Object.keys(CAN).filter(id => !(p.mode === 'handover' && id === p.by)).map(id => {
+    const mine = id === p.self, sel = p.pick === id;
+    let sub = MODEL[CAN[id]] + (mine ? ' · on this Mac' : '');
+    if (mine && !p.ready) sub = p.dl != null ? `Downloading ${MODEL[CAN[id]]} · ${Math.round(p.dl * 100)}%` : `No model yet · ${MODEL[CAN[id]]} is ${MODELS.find(m => m.id === CAN[id]).size.replace('≈ ', '')}`;
+    const prog = mine && p.dl != null ? `<span class="prog" style="--p:${p.dl * 100}%"><i></i></span>` : '';
+    return `<button class="wr${sel ? ' sel' : ''}" data-act="ppick" data-v="${id}"><span class="rad${sel ? ' on' : ''}"></span>${av(id, 30)}<span class="wm"><span class="wn">${mine ? 'You' : P[id].name}</span><span class="ws">${sub}</span>${prog}</span></button>`;
+  }).join('');
+  const msg = p.declined ? `<div class="pop-msg">${av(p.declined, 18)}${first(P[p.declined].name)} said not now.</div>` : '';
+  const who = first(P[p.pick].name);
+  const btn = p.pick === p.self ? (p.ready ? 'Start' : p.dl != null ? 'Downloading…' : 'Download and start') : `${p.mode === 'handover' ? 'Hand over to' : 'Ask'} ${who}`;
+  return head + msg + `<div class="pop-l">Whose Mac transcribes</div>${rows}<div class="pop-x">Mia, Sofia and 3 others can't: they're on the web or have no model.</div><div class="pop-x">Everyone sees that the call is transcribed, and everyone gets the transcript.</div><div class="pop-f"><button class="lnk" data-act="models">${ic('settings', 14)}Models…</button><button class="pb" data-act="pgo"${p.dl != null ? ' disabled' : ''}>${btn}</button></div>`;
+}
+
+/* ───────── the transcript window ───────── */
+/* o: {feed, self, menu, unseen, timer} */
+function winHTML(o) {
+  const f = o.feed, by = f.by, st = f.state;
+  const who = by === o.self ? 'You transcribe' : `${first(P[by].name)} transcribes`;
+  const sub = st === 'paused' ? `Paused · ${first(P[by].name)} left the call` : st === 'stopped' ? `Stopped · ${f.lines} lines` : `${who} · ${MODEL[CAN[by]]}`;
+  const head = `<div class="tw-h" data-drag><div class="tw-r1"><span class="rdot ${st}"></span><b>Transcript</b><span class="tw-t" data-timer>${o.timer || ''}</span><span class="sp"></span><button class="twb${o.menu ? ' on' : ''}" data-act="wmenu" title="More">${ic('dots', 16)}</button><button class="twb" data-act="wclose" title="Close. The transcript goes on">${ic('x', 15)}</button></div><div class="tw-s">${sub}</div></div>`;
+  const pill = o.unseen ? `<button class="newpill" data-act="tobottom">${ic('arrowdown', 13)}${o.unseen} new ${o.unseen > 1 ? 'lines' : 'line'}</button>` : '';
+  let foot = '';
+  if (st === 'paused') foot = `<div class="tw-f"><span class="nt"><b>Paused.</b> ${first(P[by].name)} left, so nobody transcribes.</span><button class="pb sm" data-act="takeover">Continue here</button></div>`;
+  if (st === 'stopped') foot = `<div class="tw-f"><span class="nt"><b>Stopped at ${o.stoppedAt || '11:32'}.</b> Saved with the call in Home.</span><button class="pb sm sec" data-act="openhome">Open</button></div>`;
+  let menu = '';
+  if (o.menu) {
+    menu = `<div class="menu"><button class="mi" data-act="copy">${ic('copy', 15)}Copy transcript</button>`;
+    if (st === 'on' && by === o.self) menu += `<button class="mi" data-act="handover">${ic('swap', 15)}Hand over…</button>`;
+    if (st === 'on' || st === 'paused') menu += `<div class="msep"></div><button class="mi danger" data-act="stop">${ic('stop', 15)}Stop for everyone</button><div class="mnote">Anyone in the call can stop it.</div>`;
+    menu += '</div>';
+  }
+  return head + `<div class="tw-bw"><div class="tw-b">${txBody(f, o.self)}</div>${pill}</div>` + foot + menu;
+}
+
+/* ═════════ 1 · live call ═════════ */
+const desk = document.getElementById('desk');
+let code = '';
+for (let i = 0; i < 20; i++) { let segs = ''; for (let j = 0; j < 1 + Math.floor(rnd() * 4); j++) segs += `<i style="width:${20 + Math.round(rnd() * 100)}px;background:${['#c792ea', '#82aaff', '#c3e88d', '#f78c6c', '#89ddff', '#9aa3b2'][Math.floor(rnd() * 6)]}"></i>`; code += `<div class="cl" style="padding-left:${46 + [0, 16, 32][Math.floor(rnd() * 3)]}px">${i % 6 === 2 ? '' : segs}</div>`; }
+desk.innerHTML = `<div class="menubar"><b>Code</b><span>File</span><span>Edit</span><span>View</span><span class="r">Mon 9 Nov 11:14</span></div>
+  <div class="ed" style="left:30px;top:46px;width:640px;height:420px"><div class="ed-top"><span class="lights"><i></i><i></i><i></i></span>pricing.svelte — site</div><div style="padding-top:10px">${code}</div></div>
+  <div class="tw" id="tw" style="left:712px;top:46px;width:340px;height:480px;display:none"></div>
+  <div class="pop" id="pop" style="display:none"></div>
+  <div class="pk app" id="pk" style="left:160px;top:56px;display:none"></div>
+  <div class="w live" id="wlive" style="right:436px;--rowy:566px"></div>
+  <div class="toast" id="toast"></div>`;
+const PK = document.getElementById('pk');
+function renderPick() { if (!S.pick) { PK.style.display = 'none'; return; } PK.style.display = ''; PK.innerHTML = pickerHTML(S.pick); }
+const W = document.getElementById('wlive'), TW = document.getElementById('tw'), POP = document.getElementById('pop'), toast = document.getElementById('toast');
+function say(text) { toast.textContent = text; toast.classList.add('on'); clearTimeout(say.t); say.t = setTimeout(() => toast.classList.remove('on'), 1800); }
+
+const L = new Feed();
+const S = {rec: null, muted: false, copied: false, tx: 'off', by: null, win: false, menu: false, pop: null, ready: true, dl: null, gone: {}, note: '', speaking: null, seen: 0, stoppedAt: ''};
+const liveState = () => ({rec: S.rec, recHTML: S.rec ? recRow(S.rec, 'me', mmss(secs() - S.rec.t0)) : '', self: 'me', tiles: ['anna', 'lee'].filter(id => !S.gone[id]), faces: ['mia', 'me'], stack: ['omar', 'sofia', 'tom', 'max'], muted: S.muted, speaking: S.speaking, tx: S.tx, by: S.by, win: S.win, note: S.note, copied: S.copied});
+
+function renderLive() {
+  const open = W.dataset.open || '';
+  mountW(W, liveState(), open);
+  renderWin(); renderPop();
+}
+function renderPop() {
+  if (!S.pop) { POP.style.display = 'none'; return; }
+  POP.style.display = '';
+  POP.innerHTML = S.pop.type === 'rec' ? recPopHTML({...SET.rec, kind: S.pop.kind}) : popHTML({...S.pop, ready: S.ready, dl: S.dl, by: S.by, self: 'me'});
+  const right = W.offsetLeft + W.offsetWidth;
+  POP.style.left = `${right - 300}px`;
+  POP.style.top = `${W.offsetTop - POP.offsetHeight - 10}px`;
+}
+function renderWin() {
+  if (!S.win || L.state === 'off') { TW.style.display = 'none'; return; }
+  TW.style.display = '';
+  TW.innerHTML = winHTML({feed: L, self: 'me', menu: S.menu, unseen: 0, timer: mmss(secs() - L.t0), stoppedAt: S.stoppedAt});
+  const b = TW.querySelector('.tw-b');
+  b.scrollTop = b.scrollHeight; S.seen = L.items.length;
+  b.addEventListener('scroll', () => { if (atBottom(b)) { S.seen = L.items.length; setPill(0); } });
+}
+const atBottom = el => el.scrollHeight - el.scrollTop - el.clientHeight < 36;
+function setPill(n) {
+  const bw = TW.querySelector('.tw-bw'); if (!bw) return;
+  bw.querySelector('.newpill')?.remove();
+  if (n > 0) bw.insertAdjacentHTML('beforeend', `<button class="newpill" data-act="tobottom">${ic('arrowdown', 13)}${n} new ${n > 1 ? 'lines' : 'line'}</button>`);
+}
+function paintLive() {
+  const b = TW.querySelector('.tw-b'); if (!b || TW.style.display === 'none') return;
+  const stick = atBottom(b);
+  b.innerHTML = txBody(L, 'me');
+  if (stick) { b.scrollTop = b.scrollHeight; S.seen = L.items.length; setPill(0); }
+  else setPill(L.items.length - S.seen);
+}
+function setSpeaking(id) {
+  S.speaking = id; CS.speaking = id;
+  W.querySelectorAll('.main .faces .face, .vt').forEach(f => f.classList.toggle('speaking', f.dataset.id === id));
+  CALL.querySelectorAll('.tile').forEach(f => f.classList.toggle('speaking', f.dataset.id === id));
+}
+
+function begin(by) {
+  S.pop = null; S.tx = 'on'; S.by = by; S.note = ''; S.menu = false;
+  if (L.state === 'stopped') {
+    L.state = 'on'; L.by = by;
+    L.ev(by === 'me' ? 'You started the transcript again' : `${first(P[by].name)} started the transcript again`);
+  } else L.start(by, 'me');
+  S.win = SET.openWin || S.win;
+  renderLive();
+}
+function handover(to) {
+  L.by = to; S.by = to; L.ev(`${first(P[to].name)} took over the transcript`);
+  S.pop = null; renderLive();
+}
+function stopTx() {
+  L.state = 'stopped'; L.partial = null; L.ev('Transcript stopped');
+  S.tx = 'stopped'; S.menu = false; S.note = ''; S.stoppedAt = hm(secs());
+  renderLive();
+}
+function takeOver() {
+  if (!S.ready) { say('Download a model first (Settings › Transcription)'); return; }
+  L.state = 'on'; L.by = 'me'; S.by = 'me'; S.tx = 'on'; S.note = '';
+  L.ev('You took over the transcript');
+  renderLive();
+}
+function flash(note, ms = 6000) { S.note = note; renderLive(); setTimeout(() => { if (S.note === note) { S.note = ''; renderLive(); } }, ms); }
+function recSize(r, d) { const mb = d / 3600 * (r.kind === 'audio' ? 30 : (r.preset || '').startsWith('5 ') ? 700 : 1400); return mb < 1000 ? `${Math.max(1, Math.round(mb))} MB` : `${(mb / 1000).toFixed(1)} GB`; }
+function stopRec() {
+  const r = S.rec, d = secs() - r.t0;
+  S.rec = null; W.dataset.open = ''; syncSeg('ctl-rec', 'off');
+  flash(noteHTML(null, `<b>Recording saved.</b> ${mmss(d)}, ${recSize(r, d)}. It's with this call in Home.`, '<button class="nb" data-act="showfinder">Show in Finder</button>'));
+}
+function download(then) {
+  S.dl = 0; renderPop();
+  const t = setInterval(() => {
+    S.dl = Math.min(1, S.dl + 0.035 + rnd() * 0.03);
+    if (S.dl >= 1) { clearInterval(t); S.dl = null; S.ready = true; SET.have[SET.model] = true; renderSet(); syncSeg('ctl-model', '1'); then(); }
+    else renderPop();
+  }, 110);
+}
+function resetLive(v) {
+  S.gone = {}; S.note = ''; S.pop = null; S.menu = false; S.dl = null; S.stoppedAt = '';
+  L.reset();
+  if (v === 'off') { S.tx = 'off'; S.by = null; S.win = false; }
+  else { S.tx = 'on'; S.by = v; S.win = true; L.prefill(v, 'me'); }
+  renderLive();
+}
+
+/* hover rows, as in the widget prototype */
+let closeT = 0, nameT = 0;
+W.addEventListener('mouseover', e => {
+  clearTimeout(closeT);
+  const z = e.target.closest('[data-zone], .d-controls, .d-people, .d-name, .d-rec, .main .faces .face[data-id]');
+  if (!z) return;
+  const fill = html => { W.querySelector('.nmrow').innerHTML = html; };
+  if (z.matches('[data-zone="controls"], .d-controls')) { clearTimeout(nameT); W.dataset.open = 'controls'; }
+  else if (z.matches('[data-zone="people"], .d-people')) { clearTimeout(nameT); W.dataset.open = 'people'; }
+  else if (z.matches('[data-zone="tx"]')) { clearTimeout(nameT); fill(txName(S.tx, S.by, 'me')); W.dataset.open = 'name'; }
+  else if (z.matches('[data-zone="rec"], .d-rec')) { clearTimeout(nameT); W.dataset.open = 'rec'; }
+  else if (z.matches('.face')) {
+    const id = z.dataset.id; clearTimeout(nameT);
+    nameT = setTimeout(() => { fill(`<b>${id === 'me' ? 'You' : P[id].name}</b> · ${id === S.speaking ? 'speaking' : id === 'me' ? (S.muted ? 'muted' : 'unmuted') : 'spoke a moment ago'}`); W.dataset.open = 'name'; }, 250);
+  }
+});
+W.addEventListener('mouseleave', () => { clearTimeout(nameT); closeT = setTimeout(() => { W.dataset.open = ''; }, 250); });
+
+desk.addEventListener('click', e => {
+  const a = e.target.closest('[data-act]');
+  if (!a) { if (S.menu && !e.target.closest('.menu')) { S.menu = false; renderWin(); } return; }
+  const v = a.dataset.v;
+  switch (a.dataset.act) {
+    case 'mic': S.muted = !S.muted; break;
+    case 'share': say('Share opens the share picker'); return;
+    case 'cam': say('The camera stays off in this prototype'); return;
+    case 'link': S.copied = true; setTimeout(() => { S.copied = false; renderLive(); }, 1500); break;
+    case 'window': say('Opens the call window: section 4'); return;
+    case 'leave': say(S.rec && S.rec.by === 'me' ? 'Leaving stops your recording and saves it' : S.by && S.by !== 'me' && S.tx === 'on' ? `You leave; ${first(P[S.by].name)} keeps transcribing` : 'Leave ends the call for you'); return;
+    case 'transcribe': S.pop = {mode: 'start', st: 'pick', pick: 'me', declined: null}; W.dataset.open = ''; renderPop(); return;
+    case 'record': S.pop = {type: 'rec', kind: SET.rec.kind}; W.dataset.open = ''; renderPop(); return;
+    case 'rkind': S.pop.kind = v; renderPop(); return;
+    case 'rgo': S.rec = {by: 'me', kind: 'audio', t0: secs()}; S.pop = null; syncSeg('ctl-rec', 'me'); break;
+    case 'rpick': S.pop = null; renderPop(); S.pick = {sel: 'd1', preset: 1}; renderPick(); return;
+    case 'pksel': S.pick.sel = v; renderPick(); return;
+    case 'pkpre': S.pick.preset = Number(v); renderPick(); return;
+    case 'pkcancel': S.pick = null; renderPick(); return;
+    case 'pkgo': S.rec = {by: 'me', kind: 'screen', src: srcName(S.pick.sel), preset: PRESETS[S.pick.preset], t0: secs()}; S.pick = null; renderPick(); syncSeg('ctl-rec', 'me'); break;
+    case 'recbtn': W.dataset.open = 'rec'; return;
+    case 'rstop': stopRec(); return;
+    case 'recsettings': S.pop = null; renderPop(); SET.tab = 'rec'; renderSet(); document.getElementById('settings').scrollIntoView({behavior: 'smooth'}); return;
+    case 'showfinder': say('Shows the file in Finder'); return;
+    case 'ccwin': S.win = !S.win; S.menu = false; renderLive(); return;
+    case 'ppick': S.pop.pick = v; S.pop.declined = null; renderPop(); return;
+    case 'pclose': S.pop = null; renderPop(); return;
+    case 'pcancel': S.pop.st = 'pick'; renderPop(); return;
+    case 'models': S.pop = null; renderPop(); document.getElementById('settings').scrollIntoView({behavior: 'smooth'}); return;
+    case 'pgo': {
+      const p = S.pop;
+      if (p.pick === 'me') { if (S.ready) begin('me'); else download(() => begin('me')); return; }
+      p.st = 'wait'; renderPop();
+      setTimeout(() => {
+        if (S.pop !== p || p.st !== 'wait') return;
+        if (p.pick === 'lee') { p.st = 'pick'; p.declined = 'lee'; p.pick = p.mode === 'handover' ? 'anna' : 'me'; renderPop(); }
+        else if (p.mode === 'handover') handover(p.pick); else begin(p.pick);
+      }, 2600);
+      return;
+    }
+    case 'wclose': S.win = false; S.menu = false; renderLive(); return;
+    case 'wmenu': S.menu = !S.menu; renderWin(); return;
+    case 'copy': S.menu = false; renderWin(); say(`Copied ${L.lines} lines as text`); return;
+    case 'handover': S.menu = false; renderWin(); S.pop = {mode: 'handover', st: 'pick', pick: 'anna', declined: null}; renderPop(); return;
+    case 'stop': stopTx(); return;
+    case 'takeover': takeOver(); return;
+    case 'notenot': S.note = ''; renderLive(); return;
+    case 'openhome': say('Opens Home on this call, Transcript tab'); return;
+    case 'tobottom': { const b = TW.querySelector('.tw-b'); b.scrollTop = b.scrollHeight; return; }
+  }
+  renderLive();
+});
+
+/* drag the transcript window by its top */
+let drag = null;
+TW.addEventListener('mousedown', e => {
+  if (!e.target.closest('[data-drag]') || e.target.closest('button')) return;
+  const k = desk.getBoundingClientRect().width / 1080;
+  drag = {x: e.clientX, y: e.clientY, l: TW.offsetLeft, t: TW.offsetTop, k}; e.preventDefault();
+});
+addEventListener('mousemove', e => { if (!drag) return; TW.style.left = `${drag.l + (e.clientX - drag.x) / drag.k}px`; TW.style.top = `${Math.max(26, drag.t + (e.clientY - drag.y) / drag.k)}px`; });
+addEventListener('mouseup', () => { drag = null; });
+
+/* ═════════ 4 · call window ═════════ */
+const CALL = document.getElementById('cv-call');
+const C = new Feed();
+const CS = {panel: true, tab: 'tx', speaking: null, rec: null, pop: false, kind: 'audio'};
+function callHTML() {
+  const tile = id => `<div class="tile${id === CS.speaking ? ' speaking' : ''}" data-id="${id}">${P[id].video ? vid(id) : `<div class="tav" style="--h:${hue(P[id].name)}">${av(id, 72)}</div>`}<span class="tname">${id === 'me' ? 'You' : first(P[id].name)}</span></div>`;
+  const on = C.state === 'on';
+  const pill = (CS.rec ? `<button class="pill rec" data-act="crec" title="Recording on this Mac. Click to stop">${ic('recring', 12)}REC <span data-crtimer>${mmss(secs() - CS.rec.t0)}</span></button>` : '')
+    + (on ? `<button class="pill" data-act="cpanel" title="Show the transcript"><span class="rdot"></span>Transcribing</button>` : '');
+  let panel = '';
+  if (CS.panel) {
+    const tabs = `<div class="p-tabs"><button class="tab${CS.tab === 'tx' ? ' on' : ''}" data-act="ctab" data-v="tx">Transcript</button><button class="tab${CS.tab === 'people' ? ' on' : ''}" data-act="ctab" data-v="people">People<span class="n">8</span></button></div>`;
+    if (CS.tab === 'tx') {
+      const info = on ? `<div class="p-info"><span class="rdot"></span><span class="sp">You transcribe · ${MODEL[CAN.me]}</span><button class="lnk danger" data-act="cstop">${ic('stop', 13)}Stop</button></div>`
+        : `<div class="p-info"><span class="sp">${C.state === 'stopped' ? 'Transcript stopped' : 'Not transcribed'}</span><button class="pb sm" data-act="cstart">Transcribe</button></div>`;
+      panel = tabs + info + `<div class="p-body" id="cbody">${txBody(C, 'me')}</div>`;
+    } else {
+      const ppl = ['me', 'anna', 'lee', 'mia', 'omar', 'sofia', 'tom', 'max'].map(id => {
+        const can = CAN[id] && id !== 'me';
+        const sub = id === 'me' ? (on ? 'Transcribing' : '') : CAN[id] ? MODEL[CAN[id]] : ['mia', 'sofia'].includes(id) ? 'On the web' : '';
+        const muted = ['tom', 'max'].includes(id);
+        return `<div class="prow">${av(id, 28)}<span class="name">${id === 'me' ? 'You' : P[id].name}${sub ? `<small>${sub}</small>` : ''}</span>${id === 'me' && on ? '<span class="tag">CC</span>' : ''}<span class="state">${ic(muted ? 'micoff' : 'mic', 15).replace('class="i"', `class="i${muted ? ' mo' : ''}"`)}</span>${can ? `<button class="pb sm sec ask" data-act="cask" data-v="${id}">Ask to transcribe</button>` : ''}</div>`;
+      }).join('');
+      panel = tabs + `<div class="p-body" style="padding-top:6px">${ppl}</div>`;
+    }
+    panel = `<div class="panel">${panel}</div>`;
+  }
+  return `${LIGHTS}<div class="call"><div class="c-top"><div class="c-title"><b>Design review</b><span>14:02</span></div>${pill}<span class="sp"></span><button class="cbtn" data-act="cinvite">${ic('userplus', 15)}Invite</button></div>
+    <div class="c-body"><div class="stagearea"><div class="tiles">${['anna', 'lee', 'mia', 'me'].map(tile).join('')}</div>
+    <div class="toolbar"><button class="tb">${ic('mic', 18)}</button><button class="tb off">${ic('videooff', 18)}</button><button class="tb">${ic('share', 18)}</button><span class="sep"></span><button class="tb${CS.rec ? ' rec' : ''}" data-act="crec" title="${CS.rec ? 'Stop recording' : 'Record'}">${ic('recring', 18)}</button><button class="tb" data-act="ccc" title="Transcribe">${ic('captions', 18)}${on ? '<span class="recdot"></span>' : ''}</button><span class="sep"></span><button class="tb${CS.panel ? ' sel' : ''}" data-act="cpanelt" title="Side panel">${ic('panel', 18)}</button><button class="tb" title="Minimal">${ic('min', 18)}</button><span class="sep"></span><button class="leave">${ic('phoneoff', 17)}Leave</button></div>${CS.pop ? `<div class="pop">${recPopHTML({...SET.rec, kind: CS.kind})}</div>` : ''}</div>${panel}</div></div>`;
+}
+CALL.innerHTML = `<div class="win" id="cwin" style="left:20px;top:20px;width:1040px;height:660px"></div><div class="toast" id="ctoast"></div>`;
+const CW = document.getElementById('cwin'), ctoast = document.getElementById('ctoast');
+function csay(text) { ctoast.textContent = text; ctoast.classList.add('on'); clearTimeout(csay.t); csay.t = setTimeout(() => ctoast.classList.remove('on'), 1800); }
+function renderCall() { CW.innerHTML = callHTML(); const b = CW.querySelector('#cbody'); if (b) b.scrollTop = b.scrollHeight; }
+function paintCall() { const b = CW.querySelector('#cbody'); if (!b) return; const stick = atBottom(b); b.innerHTML = txBody(C, 'me'); if (stick) b.scrollTop = b.scrollHeight; }
+CALL.addEventListener('click', e => {
+  const a = e.target.closest('[data-act]'); if (!a) return;
+  switch (a.dataset.act) {
+    case 'cpanel': CS.panel = true; CS.tab = 'tx'; break;
+    case 'cpanelt': CS.panel = !CS.panel; break;
+    case 'ctab': CS.tab = a.dataset.v; break;
+    case 'cstop': C.state = 'stopped'; C.partial = null; C.ev('Transcript stopped'); break;
+    case 'cstart': if (C.state === 'stopped') { C.state = 'on'; C.ev('You started the transcript again'); } else C.start('me', 'me'); break;
+    case 'cask': csay(`Asks ${first(P[a.dataset.v].name)}: the same prompt as in section 2`); return;
+    case 'cinvite': csay('Copies the call link'); return;
+    case 'crec':
+      if (CS.rec) { const d = secs() - CS.rec.t0; csay(`Recording saved: ${mmss(d)}, ${recSize(CS.rec, d)}. It's with this call in Home`); CS.rec = null; }
+      else { CS.pop = !CS.pop; CS.kind = SET.rec.kind; }
+      break;
+    case 'rkind': CS.kind = a.dataset.v; break;
+    case 'rgo': CS.rec = {by: 'me', kind: 'audio', t0: secs()}; CS.pop = false; break;
+    case 'rpick': CS.rec = {by: 'me', kind: 'screen', src: 'Display 1', preset: PRESETS[1], t0: secs()}; CS.pop = false; csay('The share picker opens first, as in section 1'); break;
+    case 'pclose': CS.pop = false; break;
+    case 'recsettings': CS.pop = false; SET.tab = 'rec'; renderSet(); document.getElementById('settings').scrollIntoView({behavior: 'smooth'}); break;
+    case 'ccc':
+      if (C.state === 'stopped') { C.state = 'on'; C.ev('You started the transcript again'); }
+      else if (C.state !== 'on') C.start('me', 'me');
+      CS.panel = true; CS.tab = 'tx';
+      break;
+    default: return;
+  }
+  renderCall();
+});
+C.prefill('me', 'me');
+
+/* ═════════ 5 · settings ═════════ */
+const LANGS = [['auto', 'Auto-detect'], ['en', 'English'], ['ru', 'Русский'], ['zh', '中文'], ['de', 'Deutsch'], ['es', 'Español']];
+const LNAME = {en: 'English', ru: 'Russian', zh: 'Chinese', de: 'German', es: 'Spanish'};
+const ALL = ['en', 'ru', 'zh', 'de', 'es'];
+const MODELS = [
+ {id: 'parakeet', name: 'Parakeet TDT v3', by: 'NVIDIA', size: '≈ 640 MB', langs: '25 European languages', speed: 'very fast', sup: ['en', 'ru', 'de', 'es'], lag: 0.4},
+ {id: 'nemotron', name: 'Nemotron 3.5 ASR', by: 'NVIDIA', size: '≈ 650 MB', langs: '32 languages', speed: 'streams word by word', sup: ['en', 'zh', 'de', 'es'], unsure: ['ru'], lag: 0.2},
+ {id: 'qwen', name: 'Qwen3-ASR 0.6B', by: 'Alibaba', size: '≈ 710 MB', langs: '30 languages, 22 Chinese dialects', speed: 'streams', sup: ALL, lag: 0.5},
+ {id: 'whisper', name: 'Whisper Large v3 Turbo', by: 'OpenAI', size: '≈ 550 MB', langs: '99 languages', speed: 'slower, waits for pauses', sup: ALL, lag: 1.4},
+ {id: 'gigaam', name: 'GigaAM v3', by: 'Sber', size: '≈ 220 MB', langs: 'Russian only', speed: 'fast and small', sup: ['ru'], lag: 0.3},
+ {id: 'apple', name: 'Apple Speech', by: 'built into macOS 26+', size: 'no download', langs: 'the languages macOS has', speed: 'streams', sup: ['en', 'zh', 'de', 'es'], lag: 0.4, builtin: true}
+];
+const SUGGEST = {auto: 'qwen', en: 'parakeet', ru: 'gigaam', zh: 'qwen', de: 'parakeet', es: 'parakeet'};
+const TRY = {auto: 'Testing, one, two, three. А теперь по-русски.', en: 'Testing, one, two, three. Can you hear me?', ru: 'Раз, два, три. Проверка связи.', zh: '你好，这是一个测试。', de: 'Eins, zwei, drei. Hört ihr mich?', es: 'Uno, dos, tres. ¿Me oís?'};
+const SET = {rec: {kind: 'audio', tracks: false, folder: 'Movies › Quipcall'}, tab: 'tx', lang: 'auto', model: 'parakeet', have: {parakeet: true, nemotron: true, apple: true}, dl: {}, langOpen: false, allow: true, ask: 'ask', openWin: true, tryState: 0, tryText: '', after: {}};
+const CSET = document.getElementById('cv-set');
+CSET.innerHTML = `<div class="win" id="swin" style="left:120px;top:30px;width:760px;height:940px"></div>`;
+const SW = document.getElementById('swin');
+const mdl = id => MODELS.find(m => m.id === id);
+const knows = (m, l) => l === 'auto' || m.sup.includes(l) || (m.unsure || []).includes(l);
+const sw = (act, on) => `<button class="switch${on ? ' on' : ''}" data-act="${act}" aria-pressed="${on}"></button>`;
+
+function setHTML() {
+  const tab = (id, icon, label) => `<button class="stab${SET.tab === id ? ' on' : ''}" data-act="stab" data-v="${id}">${ic(icon, 20)}${label}</button>`;
+  const top = `<div class="set-top">${tab('general', 'gear', 'General')}${tab('av', 'headphones', 'Audio & video')}${tab('rec', 'recring', 'Recording')}${tab('tx', 'captions', 'Transcription')}</div>`;
+  if (SET.tab === 'rec') {
+    const r = SET.rec, s2 = (act, cur, opts) => `<span class="seg2">${opts.map(([v, n]) => `<button class="${cur === v ? 'on' : ''}" data-act="${act}" data-v="${v}">${n}</button>`).join('')}</span>`;
+    return LIGHTS + top + `<div class="set-body">
+      <div class="shd">What to record</div>
+      <div class="sgrp">
+        <div class="srow"><div class="sl"><b>Record starts with</b><small>What the Record panel picks first. You can change it each time.</small></div>${s2('rdef', r.kind, [['audio', 'Audio'], ['screen', 'Audio and screen']])}</div>
+        <div class="srow"><div class="sl"><b>Screen</b><small>Picked in the share picker, with its frame rates. Up to about 1.4 GB an hour; audio alone is about 30 MB.</small></div></div>
+        <div class="srow"><div class="sl"><b>Keep each voice on its own track</b><small>Still one file. Handy for editing, or for transcribing the call again later with another model.</small></div>${sw('rtracks', r.tracks)}</div>
+      </div>
+      <div class="shd">Where</div>
+      <div class="sgrp"><div class="srow"><div class="sl"><b>Save recordings in</b><small>One file per recording, named after the room and the time it started.</small></div><span class="pathbox">${ic('folder', 14)}${r.folder}</span><button class="pb sm sec" data-act="rfolder">Change…</button></div></div>
+      <div class="sfoot">Recordings use 2.3 GB · <a data-act="sfinder">Show in Finder</a></div>
+    </div>`;
+  }
+  if (SET.tab !== 'tx') {
+    const [t, x] = SET.tab === 'general' ? ['General', 'Your name, the menu bar and how calls open. These come with Stage 4.'] : ['Audio & video', 'Mic, speaker and camera, and the noise filter (Strong, Light, Off). These come with Stage 4.'];
+    return LIGHTS + top + `<div class="set-body"><div class="sempty"><b>${t}</b><span>${x}</span></div></div>`;
+  }
+  const l = SET.lang, cur = mdl(SET.model);
+  const langName = LANGS.find(x => x[0] === l)[1];
+  const dd = SET.langOpen ? `<div class="dd">${LANGS.map(([v, n]) => `<button class="mi" data-act="slang" data-v="${v}"><span class="ck">${v === l ? ic('check', 13) : ''}</span>${n}</button>`).join('')}</div>` : '';
+  const warn = knows(cur, l) ? '' : `<small class="warn">${cur.name} doesn't know ${LNAME[l]}. Pick a model below.</small>`;
+  const rows = MODELS.map(m => {
+    const ok = knows(m, l), sel = m.id === SET.model, have = SET.have[m.id], dl = SET.dl[m.id];
+    let badge = '';
+    if (!ok) badge = `<span class="badge warn">No ${LNAME[l]}</span>`;
+    else if ((m.unsure || []).includes(l)) badge = `<span class="badge q">${LNAME[l]}: to check</span>`;
+    else if (SUGGEST[l] === m.id) badge = '<span class="badge">Suggested</span>';
+    let act;
+    if (m.builtin) act = `<span class="have">${ic('check', 14)}Built in</span>`;
+    else if (dl != null) act = `<span class="dlp"><small>${Math.round(dl * 100)}%</small><span class="prog" style="--p:${dl * 100}%"><i></i></span></span>`;
+    else if (have) act = `<span class="have${sel ? '' : ' rmv'}">${ic('check', 14)}On this Mac</span>${sel ? '' : `<span class="rm" data-act="srm" data-v="${m.id}">${ic('trash', 13)}Remove</span>`}`;
+    else act = `<span class="dlb" data-act="sdl" data-v="${m.id}">${ic('download', 13)}Download</span>`;
+    return `<button class="mrow${ok ? '' : ' dis'}" data-act="${ok ? 'smodel' : ''}" data-v="${m.id}"><span class="rad${sel ? ' on' : ''}"></span><span class="mm"><span class="mt"><b>${m.name}</b><span class="by">${m.by}</span>${badge}</span><span class="ms" style="display:block">${m.langs} · ${m.speed}</span></span><span class="mz">${m.size}</span><span class="ma">${act}</span></button>`;
+  }).join('');
+  const canTry = knows(cur, l) && SET.have[cur.id];
+  let tryOut = `<span class="dim">${canTry ? `Say something and see what ${cur.name} makes of it.` : !knows(cur, l) ? `${cur.name} doesn't know ${LNAME[l]}. Pick another model to try it.` : `Download ${cur.name} to try it.`}</span>`;
+  if (SET.tryState === 1) tryOut = `<span class="wave"><i></i><i></i><i></i><i></i><i></i></span><span>${esc(SET.tryText) || '<span class="dim">Listening…</span>'}</span>`;
+  if (SET.tryState === 2) tryOut = `<span>${esc(SET.tryText)}</span>`;
+  const tryNote = SET.tryState === 2 ? `<small>${cur.name} was ${cur.lag.toFixed(1)} s behind your voice.</small>` : '<small>Uses your mic. Nothing is saved.</small>';
+  const used = MODELS.filter(m => SET.have[m.id] && !m.builtin).reduce((n, m) => n + parseInt(m.size.replace(/\D/g, ''), 10), 0);
+  return LIGHTS + top + `<div class="set-body">
+    <div class="shd">Language</div>
+    <div class="sgrp"><div class="srow"><div class="sl"><b>What you speak in calls</b><small>Auto-detect handles mixed calls. Picking one language helps accuracy a little.</small>${warn}</div><button class="select" data-act="slangopen">${langName}${ic('down', 14)}</button>${dd}</div></div>
+    <div class="shd">Model <small>Runs on this Mac. No audio leaves it.</small></div>
+    <div class="sgrp">${rows}</div>
+    <div class="sgrp" style="margin-top:10px"><div class="srow"><div class="sl"><b>Try it</b>${tryNote}<div class="tryout" style="margin-top:6px">${tryOut}</div></div><button class="pb sm sec" data-act="stry"${canTry ? '' : ' disabled'}>${SET.tryState === 1 ? 'Stop' : SET.tryState === 2 ? 'Try again' : 'Try with your voice'}</button></div></div>
+    <div class="shd">When you're in a call</div>
+    <div class="sgrp">
+      <div class="srow"><div class="sl"><b>Others can ask this Mac to transcribe</b><small>You show up in their "Whose Mac transcribes" list with ${cur.name}.</small></div>${sw('sallow', SET.allow)}</div>
+      <div class="srow"><div class="sl"><b>When someone asks</b><small>"Start right away" skips the prompt in your widget.</small></div><span class="seg2${SET.allow ? '' : ' dis'}"><button class="${SET.ask === 'ask' ? 'on' : ''}" data-act="sask" data-v="ask">Ask me</button><button class="${SET.ask === 'auto' ? 'on' : ''}" data-act="sask" data-v="auto">Start right away</button></span></div>
+      <div class="srow"><div class="sl"><b>Open the transcript window</b><small>When a call you're in starts being transcribed. Otherwise only the red dot shows.</small></div>${sw('sopen', SET.openWin)}</div>
+    </div>
+    <div class="sfoot">Models use ${(used / 1000).toFixed(1)} GB in <code>~/Library/Application Support/Quipcall/Models</code> · <a data-act="sfinder">Show in Finder</a></div>
+  </div>`;
+}
+function renderSet() {
+  const b = SW.querySelector('.set-body'), y = b ? b.scrollTop : 0;
+  SW.innerHTML = setHTML();
+  const nb = SW.querySelector('.set-body'); if (nb) nb.scrollTop = y;
+}
+function setDownload(id, select) {
+  if (SET.dl[id] != null) return;
+  SET.dl[id] = 0; if (select) SET.after[id] = true; renderSet();
+  const t = setInterval(() => {
+    SET.dl[id] = Math.min(1, SET.dl[id] + 0.03 + rnd() * 0.03);
+    if (SET.dl[id] >= 1) { clearInterval(t); delete SET.dl[id]; SET.have[id] = true; if (SET.after[id]) { delete SET.after[id]; pickModel(id); } }
+    renderSet();
+  }, 120);
+}
+function pickModel(id) {
+  SET.model = id; CAN.me = id; SET.tryState = 0;
+  S.ready = !!SET.have[id]; syncSeg('ctl-model', S.ready ? '1' : '0');
+  renderLive(); renderCall();
+}
+let tryTimer = 0;
+SW.addEventListener('click', e => {
+  const a = e.target.closest('[data-act]');
+  if (SET.langOpen && !(a && a.dataset.act === 'slang')) { SET.langOpen = false; if (!a || a.dataset.act === 'slangopen') { renderSet(); return; } }
+  if (!a || !a.dataset.act) return;
+  const v = a.dataset.v;
+  switch (a.dataset.act) {
+    case 'stab': SET.tab = v; break;
+    case 'rdef': SET.rec.kind = v; break;
+    case 'rtracks': SET.rec.tracks = !SET.rec.tracks; break;
+    case 'rfolder': return;
+    case 'slangopen': SET.langOpen = true; break;
+    case 'slang': SET.lang = v; SET.langOpen = false; SET.tryState = 0; break;
+    case 'sdl': e.stopPropagation(); setDownload(v, false); return;
+    case 'srm': e.stopPropagation(); delete SET.have[v]; break;
+    case 'smodel': if (SET.have[v]) pickModel(v); else setDownload(v, true); break;
+    case 'sallow': SET.allow = !SET.allow; break;
+    case 'sask': SET.ask = v; break;
+    case 'sopen': SET.openWin = !SET.openWin; break;
+    case 'sfinder': return;
+    case 'stry': {
+      clearInterval(tryTimer);
+      if (SET.tryState === 1) { SET.tryState = 0; break; }
+      if (!SET.have[SET.model] || !knows(mdl(SET.model), SET.lang)) { SET.tryState = 0; break; }
+      const words = TRY[SET.lang].split(' '); let k = 0;
+      SET.tryState = 1; SET.tryText = '';
+      tryTimer = setInterval(() => { k++; SET.tryText = words.slice(0, k).join(' '); if (k >= words.length) { clearInterval(tryTimer); SET.tryState = 2; } renderSet(); }, 380);
+      break;
+    }
+  }
+  renderSet();
+});
+
+/* ═════════ 7 · after the call ═════════ */
+const HOME = document.getElementById('cv-home');
+HOME.innerHTML = `<div class="win" id="hwin" style="left:20px;top:20px;width:960px;height:620px"></div><div class="toast" id="htoast"></div>`;
+const htoast = document.getElementById('htoast');
+function hsay(text) { htoast.textContent = text; htoast.classList.add('on'); clearTimeout(hsay.t); hsay.t = setTimeout(() => htoast.classList.remove('on'), 1800); }
+const HW = document.getElementById('hwin');
+const FIN = (() => {
+  const items = [{ev: true, text: 'Call started', time: '11:09', t: 0}, {ev: true, text: 'Nikita started recording · audio and Display 1', time: '11:09', t: 4}, {ev: true, text: 'Nikita started the transcript', time: '11:09', t: 6}];
+  [...EARLIER, ...SCRIPT].forEach(([who, text], i) => { const t = 14 + i * 26; items.push({who, text, t, time: hm(BASE - 300 + t)}); });
+  items.push({ev: true, text: 'Call ended · 6 min', time: '11:15', t: 376});
+  return {items, dur: 372};
+})();
+const HS = {as: 'me', tab: 'tx', playing: false, pos: 0};
+let hTimer = 0;
+const BARS = (() => { let out = ''; for (let i = 0; i < 90; i++) { const t0 = i / 90 * FIN.dur; const talk = FIN.items.some(m => !m.ev && m.t >= t0 - 8 && m.t <= t0 + 18); out += `<i style="height:${Math.round((talk ? .45 + rnd() * .55 : .12 + rnd() * .2) * 100)}%"></i>`; } return out; })();
+function nowLine() { if (HS.pos <= 0) return null; let cur = null; for (const m of FIN.items) if (!m.ev && m.t <= HS.pos) cur = m; return cur; }
+function homeHTML() {
+  const mine = HS.as === 'me', self = mine ? 'me' : 'anna';
+  const row = (name, who, meta, sel, marks = '') => `<div class="hrow${sel ? ' sel' : ''}">${av(who, 36)}<span class="hm"><b>${name}</b><small>${meta}${marks}</small></span></div>`;
+  const side = `<div class="side"><div class="side-top"></div><div class="qseg"><span class="on">Rooms</span><span>History</span></div><div class="hlist">${row('Design review', 'anna', 'Today 11:09 · 6 min', true, ` ${ic('captions', 12)}${mine ? ic('recring', 12) : ''}`)}${row('Team standup', 'max', 'Today 10:02 · 32 min')}${row('Family', 'sofia', 'Yesterday 20:15 · 1 h 04 min')}${row('Max Orlov', 'max', 'Nov 2 · 12 min')}</div><div class="me-row">${av(self, 28)}<b>${mine ? 'Nikita' : 'Anna Petrova'}</b><button class="ibtn" data-act="hsettings" title="Settings (⌘,)">${ic('gear', 16)}</button></div></div>`;
+  const tabs = [['tx', 'Transcript', ''], ['rec', 'Recordings', mine ? 1 : 0], ['files', 'Files', 0]].map(([k, n, c]) => `<button class="tab${HS.tab === k ? ' on' : ''}" data-act="htab" data-v="${k}">${n}${c !== '' ? `<span class="n">${c}</span>` : ''}</button>`).join('');
+  let body = '', foot = '';
+  if (HS.tab === 'tx') {
+    body = chat(FIN.items, null, self, {av: 28, seek: mine, now: mine ? nowLine() : null});
+    foot = mine ? `<div class="player"><button class="pbtn2" data-act="hplay" title="${HS.playing ? 'Pause' : 'Play'}">${ic(HS.playing ? 'pause' : 'play', 15)}</button><span class="tm" data-hcur>${mmss(HS.pos)}</span><div class="pwave" data-act="hwave" style="--p:${HS.pos / FIN.dur * 100}%"><div class="bars">${BARS}</div><div class="bars on">${BARS}</div></div><span class="tm">${mmss(FIN.dur)}</span><span class="psel">Audio and screen</span></div>`
+      : `<div class="nofile">${ic('recring', 16)}<span><b>Nikita recorded this call.</b> The file is on Nikita's Mac, so there's nothing to play here.</span></div>`;
+  } else if (HS.tab === 'rec') {
+    body = mine ? `<div class="rcards"><div><div class="thumb" data-act="hplayrec" title="Open in QuickTime Player">${thumb('desk')}<span class="dur">${mmss(FIN.dur)}</span><div class="pl"><span>${ic('play', 18)}</span></div></div><div class="rec-t">Whole call</div><div class="rec-m">11:09–11:15 · Audio and Display 1 · 15 fps · 90 MB</div><div class="rec-a"><button class="ibtn" data-act="hfinder" title="Show in Finder">${ic('folder', 14)}</button><button class="ibtn" title="More">${ic('dots', 14)}</button></div></div></div>`
+      : `<div class="hempty"><div class="ei">${ic('recring', 22)}</div><b>Recorded on Nikita's Mac</b><p>Only Nikita has the file for now. Sharing recordings with the room comes with the backend.</p></div>`;
+  } else body = `<div class="hempty"><div class="ei">${ic('file', 22)}</div><b>No files</b><p>Files dropped into the call show up here.</p></div>`;
+  return LIGHTS + `<div class="home">${side}<div class="detail"><div class="d-top"><h3>Design review</h3><span class="sp"></span><button class="ibtn" title="Copy link">${ic('link', 16)}</button><button class="pb sm">${ic('phone', 13)}Call</button></div><div class="d-sub"><span class="avs">${['anna', 'lee', 'mia', 'me'].map(id => av(id, 20)).join('')}</span><span>Anna, Lee, Mia and 5 others</span><span class="sp"></span><span>Today 11:09 · 6 min</span></div><div class="htabs">${tabs}</div><div class="d-body" id="hbody">${body}</div>${foot}</div></div>`;
+}
+function renderHome() { const b = HW.querySelector('#hbody'), y = b ? b.scrollTop : 0; HW.innerHTML = homeHTML(); const nb = HW.querySelector('#hbody'); if (nb) nb.scrollTop = y; }
+let hLast = null;
+function hTick() {
+  HS.pos = Math.min(FIN.dur, HS.pos + 0.75);
+  const w = HW.querySelector('.pwave'); if (w) w.style.setProperty('--p', `${HS.pos / FIN.dur * 100}%`);
+  const c = HW.querySelector('[data-hcur]'); if (c) c.textContent = mmss(HS.pos);
+  const cur = nowLine(), body = HW.querySelector('#hbody');
+  HW.querySelectorAll('.bub[data-act="hseek"]').forEach(b => {
+    const on = !!cur && Number(b.dataset.v) === cur.t; b.classList.toggle('now', on);
+    if (on && cur !== hLast && body) { const y = b.offsetTop - body.offsetTop; if (y < body.scrollTop || y > body.scrollTop + body.clientHeight - 60) body.scrollTop = y - 80; }
+  });
+  hLast = cur;
+  if (HS.pos >= FIN.dur) { HS.playing = false; clearInterval(hTimer); renderHome(); }
+}
+function hPlay(on) { HS.playing = on; clearInterval(hTimer); if (on) { if (HS.pos >= FIN.dur) HS.pos = 0; hTimer = setInterval(hTick, 250); } renderHome(); }
+HOME.addEventListener('click', e => {
+  const a = e.target.closest('[data-act]'); if (!a) return;
+  switch (a.dataset.act) {
+    case 'htab': HS.tab = a.dataset.v; break;
+    case 'hplay': hPlay(!HS.playing); return;
+    case 'hseek': HS.pos = Number(a.dataset.v); hPlay(true); return;
+    case 'hwave': { const r = a.getBoundingClientRect(); HS.pos = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * FIN.dur; hPlay(true); return; }
+    case 'hplayrec': hsay('Opens the file in QuickTime Player'); return;
+    case 'hfinder': hsay('Shows the file in Finder'); return;
+    case 'hsettings': document.getElementById('settings').scrollIntoView({behavior: 'smooth'}); return;
+    default: return;
+  }
+  renderHome();
+});
+
+/* ═════════ the conversation, feeding both transcripts ═════════ */
+let talking = true, si = 0;
+const FEEDS = [L, C];
+function paintFeeds() { paintLive(); paintCall(); }
+function nextLine() {
+  if (!talking) { setTimeout(nextLine, 700); return; }
+  const [who, text] = SCRIPT[si++ % SCRIPT.length];
+  if ((who === 'me' && S.muted) || S.gone[who]) { setTimeout(nextLine, 300); return; }
+  const words = text.split(' '), t = secs(); let k = 0;
+  setSpeaking(who);
+  const tick = () => {
+    k++;
+    for (const f of FEEDS) if (f.live) f.partial = {who, text: words.slice(0, k).join(' '), time: hm(t)};
+    paintFeeds();
+    if (k < words.length) { setTimeout(tick, 190 + rnd() * 140); return; }
+    setTimeout(() => {
+      for (const f of FEEDS) if (f.live && f.partial && f.partial.who === who) { f.items.push({who, text, time: hm(t)}); f.partial = null; }
+      setSpeaking(null); paintFeeds(); setTimeout(nextLine, 700 + rnd() * 700);
+    }, 500);
+  };
+  setTimeout(tick, 250);
+}
+setInterval(() => {
+  const el = TW.querySelector('[data-timer]');
+  if (el && L.state === 'on') el.textContent = mmss(secs() - L.t0);
+  const rt = W.querySelector('[data-rtimer]'); if (rt && S.rec) rt.textContent = mmss(secs() - S.rec.t0);
+  const ct = CW.querySelector('[data-crtimer]'); if (ct && CS.rec) ct.textContent = mmss(secs() - CS.rec.t0);
+}, 1000);
+
+/* ═════════ 2 and 3 · frozen states ═════════ */
+const base = {self: 'me', tiles: ['anna', 'lee'], faces: ['mia', 'me'], stack: ['omar', 'sofia', 'tom', 'max'], muted: false, speaking: 'lee', tx: 'off', by: null, win: false, note: '', copied: false};
+function staticW(s, open = '', name = '') { const el = document.createElement('div'); el.className = 'w static app'; mountW(el, {...base, ...s, nameHTML: name}, open); return el; }
+function staticPop(p) { const el = document.createElement('div'); el.className = 'pop static app'; el.innerHTML = popHTML({mode: 'start', st: 'pick', pick: 'me', ready: true, dl: null, declined: null, by: null, self: 'me', ...p}); return el; }
+function staticWin(o, w = 330, h = 400) { const el = document.createElement('div'); el.className = 'tw static app'; el.style.width = `${w}px`; el.style.height = `${h}px`; el.innerHTML = winHTML({self: 'me', menu: false, unseen: 0, timer: '4:20', ...o}); const b = el.querySelector('.tw-b'); requestAnimationFrame(() => { b.scrollTop = o.top ? 0 : b.scrollHeight; }); return el; }
+const col = (...els) => { const c = document.createElement('div'); c.className = 'vcol'; els.forEach(e => c.append(e)); return c; };
+function feedOf(by, o = {}) {
+  const f = new Feed(); const t = secs() - 260; f.start(by, o.self || 'me', t);
+  const lines = o.lines ?? EARLIER.length + 3;
+  [...EARLIER, ...SCRIPT].slice(0, lines).forEach(([who, text], i) => f.items.push({who, text, time: hm(t + 20 + i * 40)}));
+  return f;
+}
+const annaSide = {self: 'anna', tiles: ['lee'], faces: ['mia', 'anna'], stack: ['me', 'omar', 'sofia', 'tom', 'max'], speaking: 'lee'};
+
+const WHO = [
+  ['Start, with a model on your Mac', 'You come first and are picked. Anna and Lee could do it too; the rest are summed up in one line.', () => col(staticPop({}), staticW({}))],
+  ['No model on your Mac yet', '“Download and start” fetches your selected model and starts when it lands. Or pick Anna.', () => col(staticPop({ready: false}), staticW({}))],
+  ['Downloading', 'Progress shows in your row. The transcript starts by itself.', () => col(staticPop({ready: false, dl: 0.42}), staticW({}))],
+  ['Asking Anna', 'Anna gets a prompt in her widget. You can cancel.', () => col(staticPop({pick: 'anna', st: 'wait'}), staticW({}))],
+  ['Lee said not now', 'Back to the list with a note on top.', () => col(staticPop({pick: 'anna', declined: 'lee'}), staticW({}))],
+  ['On Anna’s screen', 'The prompt sits in the notice row under her main row, and says which of her models will run.', () => staticW({...annaSide, note: noteHTML('me', `<b>Nikita</b> asks you to transcribe this call. It runs on your Mac with ${MODEL[CAN.anna]}.`, '<button class="nb">Not now</button><button class="nb pri">Transcribe</button>')})],
+  ['Transcribing: hovering the button', 'The red dot is on everyone’s widget. Hovering says who transcribes and with what.', () => staticW({tx: 'on', by: 'anna', win: false}, 'name', txName('on', 'anna', 'me'))],
+  ['Hover row with Transcribe', 'The fourth chip. It wraps to a second line when the widget is narrow; once the transcript runs, the chip is gone and the captions button takes over.', () => staticW({}, 'controls')],
+  ['The transcriber left', 'Everyone whose Mac can transcribe gets this. The first to accept carries on; the dot goes grey meanwhile.', () => staticW({tiles: ['lee'], tx: 'paused', by: 'anna', note: noteHTML(null, '<b>Anna left</b>, so the transcript paused. Keep it going from your Mac?', '<button class="nb">Not now</button><button class="nb pri">Transcribe</button>')})]
+];
+const WIN = [
+  ['Just started', 'Nobody has said anything yet.', () => { const f = new Feed(); f.start('me', 'me', secs() - 3); return staticWin({feed: f, timer: '0:03'}); }],
+  ['Running', 'Anna is talking: the grey line fills in as the model hears it.', () => { const f = feedOf('me'); f.partial = {who: 'anna', text: 'Good point. Maybe the toggle', time: hm(secs())}; return staticWin({feed: f}); }],
+  ['Someone else transcribes', 'The same window for everyone; only the line under the title changes.', () => staticWin({feed: feedOf('anna')})],
+  ['Joined late', 'Tom gets the history, then a divider where he came in.', () => { const f = feedOf('me', {self: 'tom', lines: 6}); f.ev('You joined'); f.items.push({who: 'mia', text: "I'll mock that up this afternoon.", time: hm(secs())}); return staticWin({feed: f, self: 'tom'}); }],
+  ['Scrolled up', 'New lines wait in a pill.', () => staticWin({feed: feedOf('me', {lines: 9}), unseen: 3, top: true})],
+  ['⋯ menu', 'Copy, hand over, and stop for everyone.', () => staticWin({feed: feedOf('me'), menu: true})],
+  ['Paused', 'The transcriber left. Anyone with a model can carry on from here too.', () => { const f = feedOf('anna'); f.ev('Anna left, so the transcript paused'); f.state = 'paused'; return staticWin({feed: f}); }],
+  ['Stopped', 'Saved with the call. Open goes to Home.', () => { const f = feedOf('me'); f.ev('Transcript stopped'); f.state = 'stopped'; return staticWin({feed: f, stoppedAt: '11:32'}); }]
+];
+const staticRecPop = kind => { const el = document.createElement('div'); el.className = 'pop static app'; el.innerHTML = recPopHTML({...SET.rec, kind}); return el; };
+const staticPick = () => { const el = document.createElement('div'); el.className = 'pk static app'; el.innerHTML = pickerHTML({sel: 'd1', preset: 1}); return el; };
+const R_ME = {by: 'me', kind: 'screen', src: 'Display 1'}, R_ANNA = {by: 'anna', kind: 'screen'};
+const REC = [
+  ['The hover row', 'Transcribe and Record get a line of their own, under Camera, Copy link and Call window.', () => staticW({}, 'controls')],
+  ['Record: audio', 'The default: everyone’s voices in one file.', () => col(staticRecPop('audio'), staticW({}))],
+  ['Record: audio and screen', '“Choose screen…” opens the share picker, below.', () => col(staticRecPop('screen'), staticW({}))],
+  ['Picking what to record', 'The share picker with a Record button: the same cards, live thumbnails and presets as when sharing. The call’s audio goes into the same file.', staticPick, true],
+  ['You’re recording', 'A red button joins the row. Hovering it shows what’s recorded, the time, and Stop.', () => staticW({rec: R_ME, recHTML: recRow(R_ME, 'me', '4:12')}, 'rec')],
+  ['Recording and transcribing', 'Both buttons sit left of Share. Share, Mic and Leave stay put.', () => staticW({rec: R_ME, tx: 'on', by: 'me'})],
+  ['Anna records', 'A notice when it starts, and Record leaves your hover row: one recording per call.', () => staticW({rec: R_ANNA, note: noteHTML('anna', `<b>Anna started recording</b> · ${recWhat(R_ANNA, 'me')}`, '<button class="nb">OK</button>')}, 'controls')],
+  ['Hovering Anna’s recording', 'Whose Mac has it, and that only Anna can stop it.', () => staticW({rec: R_ANNA, recHTML: recRow(R_ANNA, 'me', '')}, 'rec')],
+  ['Anna left', 'The recording stops and stays on Anna’s Mac. Record is back for everyone.', () => staticW({tiles: ['lee'], note: noteHTML(null, "<b>Anna left</b>, so the recording stopped. It's saved on Anna's Mac.", '<button class="nb">OK</button>')}, 'controls')],
+  ['Saved', 'Stopping, or leaving, saves the file. The notice goes away by itself.', () => staticW({note: noteHTML(null, "<b>Recording saved.</b> 6:12, 90 MB. It's with this call in Home.", '<button class="nb">Show in Finder</button>')})],
+  ['The disk filled up', 'Recording stops, and everything before that is kept.', () => staticW({note: noteHTML(null, '<b>Recording stopped:</b> the disk is full. The first 41 min are saved.', '<button class="nb">Show in Finder</button>')})]
+];
+function gallery(id, list) {
+  const g = document.getElementById(id);
+  g.innerHTML = list.map(([t, x, , wide]) => `<div class="gitem${wide ? ' wide' : ''}"><div class="gbox wall"></div><p><b>${t}.</b> ${x}</p></div>`).join('');
+  g.querySelectorAll('.gbox').forEach((box, i) => box.append(list[i][2]()));
+}
+function fitGallery() {
+  document.querySelectorAll('.gbox').forEach(box => {
+    const el = box.firstElementChild; if (!el) return;
+    el.style.zoom = 1;
+    el.style.zoom = Math.min(1, (box.clientWidth - 24) / el.offsetWidth);
+  });
+}
+
+/* ═════════ page ═════════ */
+function seg(id, fn) {
+  document.getElementById(id).addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    syncSeg(id, b.dataset.v); fn(b.dataset.v);
+  });
+}
+function syncSeg(id, v) { document.querySelectorAll(`#${id} button`).forEach(x => x.setAttribute('aria-pressed', String(x.dataset.v === v))); }
+seg('ctl-start', resetLive);
+seg('ctl-model', v => { S.ready = v === '1'; S.dl = null; renderPop(); });
+seg('ctl-talk', v => { talking = v === '1'; if (!talking) setSpeaking(null); });
+seg('ctl-rec', v => {
+  S.pop = null;
+  if (v === 'off') { S.rec = null; S.note = ''; renderLive(); return; }
+  if (v === 'anna' && S.gone.anna) { syncSeg('ctl-rec', 'off'); say('Anna has left the call'); return; }
+  S.rec = {by: v, kind: v === 'me' ? SET.rec.kind : 'screen', src: 'Display 1', preset: PRESETS[1], t0: secs() - (v === 'me' ? 95 : 2)};
+  if (v === 'anna') flash(noteHTML('anna', `<b>Anna started recording</b> · ${recWhat(S.rec, 'me')}`, '<button class="nb" data-act="notenot">OK</button>'));
+  else { S.note = ''; renderLive(); }
+});
+seg('ctl-as', v => { HS.as = v; HS.playing = false; clearInterval(hTimer); HS.pos = 0; renderHome(); });
+document.getElementById('ctl-leave').addEventListener('click', () => {
+  const tx = S.by === 'anna' && S.tx === 'on', rec = !!S.rec && S.rec.by === 'anna';
+  if (!tx && !rec) { say('Set Transcript or Recording to Anna first'); return; }
+  S.gone.anna = true; S.pop = null;
+  if (rec) { S.rec = null; syncSeg('ctl-rec', 'off'); }
+  if (!tx) { flash(noteHTML(null, "<b>Anna left</b>, so the recording stopped. It's saved on Anna's Mac.", '<button class="nb" data-act="notenot">OK</button>')); return; }
+  L.state = 'paused'; L.partial = null; L.ev('Anna left, so the transcript paused');
+  S.tx = 'paused';
+  S.note = noteHTML(null, `<b>Anna left</b>, so the transcript paused${rec ? " and the recording stopped (it's saved on Anna's Mac)" : ''}. Keep the transcript going from your Mac?`, '<button class="nb" data-act="notenot">Not now</button><button class="nb pri" data-act="takeover">Transcribe</button>');
+  renderLive();
+});
+if (!getComputedStyle(document.documentElement).getPropertyValue('--background').trim()) document.body.classList.add('standalone');
+function fit() {
+  document.querySelectorAll('.stage').forEach(st => {
+    const Wd = Number(st.dataset.w), H = Number(st.dataset.h), cw = st.clientWidth, k = Math.min(1, cw / Wd), c = st.firstElementChild;
+    c.style.width = Wd + 'px'; c.style.height = H + 'px'; c.style.transform = `scale(${k})`;
+    c.style.left = cw > Wd ? `${(cw - Wd) / 2}px` : '0'; st.style.height = Math.round(H * k) + 'px';
+  });
+  fitGallery();
+}
+renderLive(); renderCall(); renderSet(); renderHome();
+gallery('g-who', WHO); gallery('g-win', WIN); gallery('g-rec', REC);
+fit(); addEventListener('resize', fit);
+nextLine();
+})();
+</script>
+</body>
+</html>

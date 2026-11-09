@@ -17,11 +17,10 @@
  #include "api/audio_codecs/builtin_audio_decoder_factory.h"
  #include "api/audio_codecs/builtin_audio_encoder_factory.h"
  #include "api/audio/builtin_audio_processing_builder.h"
-@@ -46,6 +52,196 @@
- #include "rtc_base/thread.h"
+@@ -47,6 +53,215 @@
  #include "webrtc-sys/src/peer_connection.rs.h"
  #include "webrtc-sys/src/peer_connection_factory.rs.h"
-+
+ 
 +// Quipcall patch: an extra filter after the microphone's echo cancellation,
 +// optionally followed by WebRTC's adaptive gain control (AGC2), so gain
 +// follows the cleaned voice rather than the noise. Plus switches for WebRTC's
@@ -38,11 +37,18 @@
 +                                            int sample_rate_hz);
 +// The APM behind `stream` is gone.
 +typedef void (*quipcall_capture_release_fn)(const void* stream);
++// A copy of each finished 10 ms microphone frame, after the filter and gain
++// control: what the call sends, before encoding. Mono, `num_frames` floats in
++// the 16-bit range, at the processor's rate. Called on the capture thread.
++typedef void (*quipcall_capture_tap_fn)(const float* samples,
++                                        size_t num_frames,
++                                        int sample_rate_hz);
 +}
 +
 +namespace {
 +std::atomic<quipcall_capture_process_fn> quipcall_capture_process{nullptr};
 +std::atomic<quipcall_capture_release_fn> quipcall_capture_release{nullptr};
++std::atomic<quipcall_capture_tap_fn> quipcall_capture_tap{nullptr};
 +std::atomic<bool> quipcall_capture_gain_control{false};
 +std::atomic<bool> quipcall_device_noise_suppression{true};
 +std::atomic<bool> quipcall_device_gain_control{true};
@@ -66,6 +72,7 @@
 +    }
 +  }
 +  void Initialize(int sample_rate_hz, int num_channels) override {
++    sample_rate_hz_ = sample_rate_hz;
 +    // WebRTC processes the microphone at the lower of its rate and the
 +    // codec's, so 8, 16 or 32 kHz are possible. The filter (DeepFilterNet)
 +    // only runs at 48 kHz, and WebRTC's own suppressor is off while it runs.
@@ -115,6 +122,11 @@
 +    if (gain && gain_control_) {
 +      gain_control_->Process(/*input_volume_changed=*/false, audio);
 +    }
++    // Recording and transcription read the frame as it's sent. Offline tests
++    // have no call to record.
++    if (auto tap = quipcall_capture_tap.load(); tap && !test_) {
++      tap(audio->channels()[0], audio->num_frames(), sample_rate_hz_);
++    }
 +  }
 +  std::string ToString() const override { return "QuipcallCaptureProcessor"; }
 +  void SetRuntimeSetting(webrtc::AudioProcessing::RuntimeSetting) override {}
@@ -132,6 +144,7 @@
 +  std::unique_ptr<webrtc::PushResampler<float>> to_filter_;
 +  std::unique_ptr<webrtc::PushResampler<float>> from_filter_;
 +  float filter_frame_[kFilterFrames] = {};
++  int sample_rate_hz_ = kFilterRate;
 +};
 +
 +struct QuipcallTestApm {
@@ -146,6 +159,11 @@
 +    quipcall_capture_release_fn release) {
 +  quipcall_capture_release.store(release);
 +  quipcall_capture_process.store(process);
++}
++
++// Hands every microphone frame to `tap` from the next frame on; null stops.
++extern "C" void quipcall_set_capture_tap(quipcall_capture_tap_fn tap) {
++  quipcall_capture_tap.store(tap);
 +}
 +
 +// AGC2 after the filter, from the next frame on.
@@ -211,10 +229,11 @@
 +extern "C" void quipcall_test_apm_destroy(void* apm) {
 +  delete static_cast<QuipcallTestApm*>(apm);
 +}
- 
++
  namespace livekit_ffi {
  namespace {
-@@ -192,7 +388,11 @@
+ 
+@@ -192,7 +407,11 @@
        std::move(std::make_unique<livekit_ffi::VideoDecoderFactory>());
    dependencies.audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
    dependencies.audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
@@ -227,7 +246,7 @@
  
    webrtc::EnableMedia(dependencies);
    peer_factory_ =
-@@ -248,8 +448,8 @@
+@@ -248,8 +467,8 @@
    // Create an audio source that uses the ADM for capture
    webrtc::AudioOptions audio_options;
    audio_options.echo_cancellation = true;
