@@ -187,7 +187,7 @@ impl Transcript {
                         format!("{} · {when}", first_name(&s.name))
                     }
                 });
-                bubble(&s.text, s.mine, !s.done, header).into_any_element()
+                bubble(&s.text, s.mine, !s.done, false, header).into_any_element()
             }
         }
     }
@@ -203,8 +203,8 @@ pub fn clock_at(start: u64, at_ms: i64) -> String {
 }
 
 /// One line of a transcript, with its header ("Anna · 10:02") if it starts
-/// someone's turn.
-pub fn bubble(text: &str, mine: bool, draft: bool, header: Option<String>) -> Div {
+/// someone's turn. `playing`: Home's player is on it.
+pub fn bubble(text: &str, mine: bool, draft: bool, playing: bool, header: Option<String>) -> Div {
     div()
         .w_full()
         .flex()
@@ -234,6 +234,12 @@ pub fn bubble(text: &str, mine: bool, draft: bool, header: Option<String>) -> Di
                 .text_size(px(13.0))
                 .line_height(px(18.0))
                 .text_color(if draft { rgb(TEXT_DIM) } else { rgb(TEXT) })
+                .border_1()
+                .border_color(if playing {
+                    gpui::Hsla::from(rgb(ACCENT))
+                } else {
+                    white(0.0)
+                })
                 .child(SharedString::from(text.to_owned())),
         )
 }
@@ -393,7 +399,32 @@ impl TranscriptWindow {
     fn menu(&self, cx: &mut Context<Self>) -> Div {
         let c = self.call.read(cx);
         let running = c.transcription.is_some();
+        let mine = c.transcription.as_ref().is_some_and(|t| t.mine);
         let transcript = self.transcript.clone();
+        // Yours: hand it to another Mac that can, which takes over once it
+        // has started.
+        let handovers: Vec<_> = if mine {
+            c.capable(cx)
+                .into_iter()
+                .enumerate()
+                .map(|(ix, (identity, name, _))| {
+                    button(
+                        ("hand-over", ix),
+                        format!("Hand over to {}", first_name(&name)),
+                        Some(Icon::Captions),
+                        Kind::Secondary,
+                        true,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu = false;
+                        this.call
+                            .update(cx, |c, cx| c.ask_to_transcribe(&identity, cx));
+                    }))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         div()
             .absolute()
             .top(px(42.0))
@@ -423,6 +454,7 @@ impl TranscriptWindow {
                     cx.notify();
                 })),
             )
+            .children(handovers)
             // Anyone can stop it, for everyone.
             .when(running, |el| {
                 el.child(

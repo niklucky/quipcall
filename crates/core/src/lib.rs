@@ -14,6 +14,8 @@ pub mod models;
 pub mod permissions;
 #[cfg(target_os = "macos")]
 pub mod pixel_buffer;
+#[cfg(target_os = "macos")]
+pub mod player;
 pub mod record;
 #[cfg(target_os = "macos")]
 mod record_mac;
@@ -54,8 +56,12 @@ pub use video::{FrameSink, VideoSubscription};
 /// "audio", or "screen" (audio and their screen). Everyone's app shows it.
 const RECORDING: &str = "quipcall.recording";
 /// The participant attribute that says someone's Mac transcribes the call:
-/// the speech model's id.
+/// "<model id>@<unix ms it started>". If two Macs ever do, the one that
+/// started last carries on (a handover), and the other stops.
 const TRANSCRIBING: &str = "quipcall.transcribing";
+/// The participant attribute that says a Mac could transcribe the call: the
+/// id of the model it has ready.
+const CAN_TRANSCRIBE: &str = "quipcall.can_transcribe";
 
 /// Stable identifier of a remote track inside the UI.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -140,9 +146,10 @@ pub enum Event {
         line: TranscriptLine,
     },
     /// Your transcription stopped, and every line is out. `by` asked for it,
-    /// if it wasn't you.
+    /// if it wasn't you; `handed_over`: their Mac carries on.
     TranscriptionStopped {
         by: Option<String>,
+        handed_over: bool,
     },
     /// Your transcription couldn't start.
     TranscriptionFailed(String),
@@ -151,6 +158,22 @@ pub enum Event {
     ParticipantTranscribing {
         identity: String,
         model: Option<String>,
+    },
+    /// Someone's Mac can transcribe the call, with `model`, or can't any more.
+    ParticipantCanTranscribe {
+        identity: String,
+        model: Option<String>,
+    },
+    /// `from` asks your Mac to transcribe the call; `handover`: their Mac
+    /// does now, and stops once yours has started.
+    TranscriptAsked {
+        from: String,
+        handover: bool,
+    },
+    /// `from` answered your ask.
+    TranscriptAnswered {
+        from: String,
+        accepted: bool,
     },
     Error(String),
 }
@@ -163,6 +186,9 @@ pub struct TranscribeOptions {
     pub dir: PathBuf,
     /// ISO 639-1, or `None` to let the model tell.
     pub language: Option<String>,
+    /// Take over from whoever transcribes now (they asked): start even
+    /// though someone does.
+    pub handover: bool,
 }
 
 pub struct Engine {
@@ -200,6 +226,10 @@ struct State {
     transcribe_starting: bool,
     /// The final lines your Mac transcribed in this call, for whoever joins.
     transcribed: Vec<TranscriptLine>,
+    /// When your transcription started, unix ms (see [`TRANSCRIBING`]).
+    transcribing_since: u64,
+    /// The model your Mac could transcribe with, told to everyone.
+    can_transcribe: Option<String>,
     /// `disconnect` saying goodbye to the server; see [`Engine::closed`].
     closing: Vec<Closing>,
 }
@@ -618,13 +648,50 @@ impl Engine {
 
     /// Ask `identity`'s Mac to stop transcribing the call: anyone may.
     pub fn ask_to_stop_transcript(&self, identity: &str) {
+        self.send_transcript_to(identity, TranscriptMessage::Stop);
+    }
+
+    /// Ask `identity`'s Mac to transcribe the call; `handover` if yours does
+    /// now. [`Event::TranscriptAnswered`] follows, unless they just start.
+    pub fn ask_to_transcribe(&self, identity: &str, handover: bool) {
+        self.send_transcript_to(identity, TranscriptMessage::Ask { handover });
+    }
+
+    /// Answer `identity`'s ask.
+    pub fn answer_transcript_ask(&self, identity: &str, accepted: bool) {
+        self.send_transcript_to(identity, TranscriptMessage::Answer { accepted });
+    }
+
+    /// Tell everyone your Mac could transcribe the call with `model` (it's
+    /// downloaded), or that it can't. Kept for the next call too.
+    pub fn set_can_transcribe(&self, model: Option<&'static ModelInfo>) {
+        let value = model.map(|m| m.id.to_owned());
+        let room = {
+            let mut s = self.state.lock();
+            if s.can_transcribe == value {
+                return;
+            }
+            s.can_transcribe = value.clone();
+            s.room.clone()
+        };
+        if let Some(room) = room {
+            self.rt().spawn(async move {
+                let value = value.as_deref().unwrap_or("");
+                if let Err(e) = set_attribute(&room, CAN_TRANSCRIBE, value).await {
+                    tracing::warn!("can-transcribe attribute: {e}");
+                }
+            });
+        }
+    }
+
+    fn send_transcript_to(&self, identity: &str, message: TranscriptMessage) {
         let Some(room) = self.state.lock().room.clone() else {
             return;
         };
         let to = identity.to_owned();
         self.rt().spawn(async move {
-            if let Err(e) = send_transcript(&room, &TranscriptMessage::Stop, Some(to)).await {
-                tracing::warn!("asking to stop the transcript: {e}");
+            if let Err(e) = send_transcript(&room, &message, Some(to)).await {
+                tracing::warn!("transcript message {message:?}: {e}");
             }
         });
     }
@@ -634,6 +701,15 @@ async fn stop_transcribing(
     state: &Arc<Mutex<State>>,
     events: &async_channel::Sender<Event>,
     by: Option<String>,
+) {
+    stop_transcribing_for(state, events, by, false).await
+}
+
+async fn stop_transcribing_for(
+    state: &Arc<Mutex<State>>,
+    events: &async_channel::Sender<Event>,
+    by: Option<String>,
+    handed_over: bool,
 ) {
     let (room, transcribing) = {
         let mut s = state.lock();
@@ -648,7 +724,9 @@ async fn stop_transcribing(
     {
         tracing::warn!("transcribing attribute: {e}");
     }
-    let _ = events.send(Event::TranscriptionStopped { by }).await;
+    let _ = events
+        .send(Event::TranscriptionStopped { by, handed_over })
+        .await;
 }
 
 /// A transcript message to everyone, or to one person.
@@ -707,6 +785,17 @@ async fn on_transcript(
             let (state, events) = (state.clone(), events.clone());
             tokio::spawn(async move { stop_transcribing(&state, &events, Some(by)).await });
         }
+        Ok(TranscriptMessage::Ask { handover }) => {
+            tracing::info!(%by, handover, "asked to transcribe");
+            let _ = events
+                .send(Event::TranscriptAsked { from: by, handover })
+                .await;
+        }
+        Ok(TranscriptMessage::Answer { accepted }) => {
+            let _ = events
+                .send(Event::TranscriptAnswered { from: by, accepted })
+                .await;
+        }
         Err(e) => tracing::warn!(%by, "transcript message: {e}"),
     }
 }
@@ -726,7 +815,9 @@ async fn start_transcribing(
         );
         s.transcribe_starting = true;
     }
-    if let Some(p) = room.remote_participants().values().find(|p| transcribes(p)) {
+    if !options.handover
+        && let Some(p) = room.remote_participants().values().find(|p| transcribes(p))
+    {
         anyhow::bail!("{} is already transcribing this call", p.name());
     }
     let model = options.model;
@@ -775,7 +866,11 @@ async fn start_transcribing(
         tokio::task::spawn_blocking(move || quipcall_stt::Transcriber::start(stt, on_line))
             .await??;
     // Everyone sees it before a single word is heard.
-    if let Err(e) = set_attribute(&room, TRANSCRIBING, model.id).await {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    state.lock().transcribing_since = since;
+    if let Err(e) = set_attribute(&room, TRANSCRIBING, &format!("{}@{since}", model.id)).await {
         let _ = tokio::task::spawn_blocking(move || transcriber.stop()).await;
         return Err(e.context("couldn't let the others know, so nothing is transcribed"));
     }
@@ -923,6 +1018,21 @@ fn transcribes(participant: &RemoteParticipant) -> bool {
         .is_some_and(|v| !v.is_empty())
 }
 
+/// A [`TRANSCRIBING`] value: the model's id, and when it started.
+fn parse_transcribing(value: &str) -> (&str, u64) {
+    match value.split_once('@') {
+        Some((model, since)) => (model, since.parse().unwrap_or(0)),
+        None => (value, 0),
+    }
+}
+
+/// Someone else started transcribing while your Mac does. The one who
+/// started last carries on: a handover, or two people pressing Transcribe at
+/// once (both Macs agree on who stops).
+fn yields_to(mine: (u64, &str), theirs: (u64, &str)) -> bool {
+    theirs > mine
+}
+
 /// What a participant's attributes say they do, for everyone's UI. `changed`
 /// limits it to those attributes (an update); `None` reports all (they
 /// joined).
@@ -952,6 +1062,12 @@ fn attribute_events(
     }
     if let Some(v) = value(TRANSCRIBING) {
         events.push(Event::ParticipantTranscribing {
+            identity: identity.to_owned(),
+            model: (!v.is_empty()).then(|| parse_transcribing(v).0.to_owned()),
+        });
+    }
+    if let Some(v) = value(CAN_TRANSCRIBE) {
+        events.push(Event::ParticipantCanTranscribe {
             identity: identity.to_owned(),
             model: (!v.is_empty()).then(|| v.to_owned()),
         });
@@ -1109,10 +1225,20 @@ async fn connect(
         "connected"
     );
 
-    {
+    let can_transcribe = {
         let mut s = state.lock();
         s.room = Some(room.clone());
         s.audio = audio.clone();
+        s.can_transcribe.clone()
+    };
+    // Others can ask this Mac to transcribe.
+    if let Some(model) = can_transcribe {
+        let room = room.clone();
+        tokio::spawn(async move {
+            if let Err(e) = set_attribute(&room, CAN_TRANSCRIBE, &model).await {
+                tracing::warn!("can-transcribe attribute: {e}");
+            }
+        });
     }
     let identity = room.local_participant().identity().to_string();
     events
@@ -1207,6 +1333,31 @@ async fn connect(
                 ..
             } if topic == TRANSCRIPT_TOPIC => {
                 on_transcript(&state, &events, from, payload).await;
+            }
+            // Someone else started transcribing while you do: the newest
+            // carries on.
+            RoomEvent::ParticipantAttributesChanged {
+                participant: Participant::Remote(p),
+                changed_attributes,
+            } if changed_attributes
+                .get(TRANSCRIBING)
+                .is_some_and(|v| !v.is_empty()) =>
+            {
+                let (_, since) = parse_transcribing(&changed_attributes[TRANSCRIBING]);
+                let identity = p.identity().to_string();
+                let you = room.local_participant().identity().to_string();
+                let yields = {
+                    let s = state.lock();
+                    s.transcribing.is_some()
+                        && yields_to((s.transcribing_since, &you), (since, &identity))
+                };
+                if yields {
+                    tracing::info!(%identity, "their Mac takes over the transcript");
+                    let (state, events) = (state.clone(), events.clone());
+                    tokio::spawn(async move {
+                        stop_transcribing_for(&state, &events, Some(identity), true).await
+                    });
+                }
             }
             // Someone joining while your Mac transcribes gets what was said.
             RoomEvent::ParticipantConnected(p) => {
@@ -1381,6 +1532,20 @@ fn translate(event: RoomEvent) -> Option<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_newest_transcriber_carries_on() {
+        assert_eq!(parse_transcribing("parakeet@1700"), ("parakeet", 1700));
+        assert_eq!(parse_transcribing("parakeet"), ("parakeet", 0));
+        // A handover: they started after you.
+        assert!(yields_to((1000, "you"), (2000, "anna")));
+        assert!(!yields_to((2000, "you"), (1000, "anna")));
+        // At the same moment, both Macs agree on one.
+        assert!(
+            yields_to((1000, "anna"), (1000, "boris"))
+                != yields_to((1000, "boris"), (1000, "anna"))
+        );
+    }
 
     /// Goodbyes already said don't pile up, even if nothing awaited them.
     #[test]

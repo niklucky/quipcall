@@ -34,6 +34,8 @@ icons! {
     LogIn => "log-in",
     LogOut => "log-out",
     PanelRight => "panel-right",
+    Pause => "pause",
+    Play => "play",
     Pencil => "pencil",
     Phone => "phone",
     Trash => "trash-2",

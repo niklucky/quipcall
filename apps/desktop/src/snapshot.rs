@@ -20,7 +20,10 @@
 //!   (home's Recordings tab), `transcribe` (starts or stops your transcript;
 //!   with `QUIPCALL_MODELS_DIR` pointing at models already downloaded),
 //!   `transcript-window` (opens or closes it), `transcribe-choice` /
-//!   `hover-transcript` (the capsule's rows), `settings`.
+//!   `hover-transcript` (the capsule's rows), `settings`, `ask` (asks the
+//!   first other Mac that can transcribe, or hands yours over to it),
+//!   `accept` / `decline` (answers the question you're asked), `play`
+//!   (Home plays the selected call from its first line, muted).
 
 use std::time::Duration;
 
@@ -163,6 +166,14 @@ fn act(action: &str, cx: &mut App) {
         .detach();
         return;
     }
+    if action == "play" {
+        for handle in cx.windows() {
+            if let Some(home) = handle.downcast::<crate::home::Home>() {
+                let _ = home.update(cx, |h, _, cx| h.play_first_line(cx));
+            }
+        }
+        return;
+    }
     if action == "recordings" {
         for handle in cx.windows() {
             if let Some(home) = handle.downcast::<crate::home::Home>() {
@@ -197,6 +208,15 @@ fn act(action: &str, cx: &mut App) {
         "share" => c.toggle_share(cx),
         "record" => c.toggle_record(cx),
         "transcribe" => c.toggle_transcribe(cx),
+        "ask" => match c.capable(cx).first() {
+            Some((identity, ..)) => {
+                let identity = identity.clone();
+                c.ask_to_transcribe(&identity, cx)
+            }
+            None => tracing::warn!("script: no other Mac can transcribe"),
+        },
+        "accept" => c.accept_prompt(cx),
+        "decline" => c.decline_prompt(cx),
         "transcript-window" => {
             let open = !c.transcript_open;
             c.set_transcript_open(open, cx)

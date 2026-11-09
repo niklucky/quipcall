@@ -102,9 +102,9 @@ export function recorder(room: Room): { name: string; screen: boolean } | null {
 export const TRANSCRIBING_ATTRIBUTE = 'quipcall.transcribing';
 
 /** Whose Mac transcribes the call, if anyone's. */
-export function transcriber(room: Room): string | null {
+export function transcriber(room: Room): { identity: string; name: string } | null {
   for (const p of room.remoteParticipants.values()) {
-    if (p.attributes[TRANSCRIBING_ATTRIBUTE]) return p.name || p.identity;
+    if (p.attributes[TRANSCRIBING_ATTRIBUTE]) return { identity: p.identity, name: p.name || p.identity };
   }
   return null;
 }

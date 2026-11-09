@@ -253,6 +253,7 @@ impl Render for Settings {
             .map(|m| self.model_row(m, cx))
             .collect();
         let open_by_itself = !settings.keep_window_closed;
+        let accept_asks = settings.accept_asks;
         let credits = catalog::MODELS
             .iter()
             .copied()
@@ -311,7 +312,7 @@ impl Render for Settings {
                     )
                     .child(heading("Model"))
                     .child(div().flex().flex_col().gap(px(8.0)).children(rows))
-                    .child(heading("Transcript window"))
+                    .child(heading("Transcript"))
                     .child(
                         div()
                             .id("open-by-itself")
@@ -320,9 +321,23 @@ impl Render for Settings {
                             .gap(px(10.0))
                             .cursor_pointer()
                             .child(toggle(open_by_itself))
-                            .child("Open it when a transcript starts")
+                            .child("Open the transcript window when a transcript starts")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.set(cx, |t| t.keep_window_closed = open_by_itself);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("accept-asks")
+                            .mt(px(10.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .cursor_pointer()
+                            .child(toggle(accept_asks))
+                            .child("Start when someone in the call asks this Mac to transcribe")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set(cx, |t| t.accept_asks = !accept_asks);
                             })),
                     )
                     .child(

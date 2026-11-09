@@ -64,6 +64,9 @@ pub struct TranscriptionSettings {
     /// Don't open the transcript window when a transcript starts.
     #[serde(default)]
     pub keep_window_closed: bool,
+    /// Start transcribing when someone in the call asks, without a prompt.
+    #[serde(default)]
+    pub accept_asks: bool,
 }
 
 impl TranscriptionSettings {
@@ -86,6 +89,22 @@ pub struct RecordingFile {
     /// Your screen is in it too (an .mp4), not only the sound.
     #[serde(default)]
     pub screen: bool,
+    /// When it started, in milliseconds since the call connected: what
+    /// lines its player plays from. Recordings from before this have `at`.
+    #[serde(default)]
+    pub at_ms: Option<i64>,
+}
+
+impl RecordingFile {
+    pub fn start_ms(&self) -> i64 {
+        self.at_ms.unwrap_or(self.at as i64 * 1000)
+    }
+
+    /// It holds the moment `at_ms` of its call.
+    pub fn covers(&self, at_ms: i64) -> bool {
+        let start = self.start_ms();
+        (start..start + self.duration_secs as i64 * 1000 + 1000).contains(&at_ms)
+    }
 }
 
 /// Something that happened in a call, `at` seconds after it connected.

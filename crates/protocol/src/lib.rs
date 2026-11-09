@@ -39,7 +39,8 @@ pub const TRANSCRIPT_TOPIC: &str = "quipcall.transcript";
 
 /// A message on [`TRANSCRIPT_TOPIC`]. The Mac that transcribes a call sends
 /// each line to everyone as it comes (drafts too), and the lines so far to
-/// whoever joins late. Anyone can ask it to stop.
+/// whoever joins late. Anyone can ask it to stop, or ask another Mac to
+/// transcribe.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TranscriptMessage {
@@ -48,6 +49,15 @@ pub enum TranscriptMessage {
     },
     /// Stop transcribing this call, for everyone.
     Stop,
+    /// Transcribe this call on your Mac. `handover`: the asker transcribes
+    /// now, and stops once you've started.
+    Ask {
+        handover: bool,
+    },
+    /// The answer to an [`TranscriptMessage::Ask`].
+    Answer {
+        accepted: bool,
+    },
 }
 
 /// What someone said in a call, or a draft of it while they talk.
@@ -92,6 +102,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<TranscriptMessage>(r#"{"type":"stop"}"#).unwrap(),
             TranscriptMessage::Stop
+        );
+        assert_eq!(
+            serde_json::to_string(&TranscriptMessage::Ask { handover: true }).unwrap(),
+            r#"{"type":"ask","handover":true}"#
         );
     }
 }

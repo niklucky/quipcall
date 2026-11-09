@@ -122,6 +122,8 @@ pub struct Member {
     /// When they last joined, unmuted or spoke: the capsule shows whoever
     /// was active last.
     pub last_active: Option<Instant>,
+    /// Their Mac could transcribe the call, with this model.
+    pub can_transcribe: Option<&'static ModelInfo>,
 }
 
 impl Member {
@@ -159,6 +161,23 @@ pub struct Transcription {
     pub mine: bool,
 }
 
+/// A question for you in the call, until answered.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Prompt {
+    /// Who it's about.
+    pub identity: String,
+    pub name: String,
+    pub kind: PromptKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PromptKind {
+    /// They ask your Mac to transcribe; `handover`: theirs does now.
+    Asked { handover: bool },
+    /// Their Mac transcribed and they left: carry on with yours?
+    TakeOver,
+}
+
 /// Getting ready to transcribe on this Mac.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Preparing {
@@ -180,8 +199,8 @@ pub struct Recording {
     pub file: Option<PathBuf>,
     /// The recorder's screen is in it too.
     pub screen: bool,
-    /// When it started, in seconds since you connected.
-    at: u64,
+    /// When it started, since you connected.
+    at: Duration,
 }
 
 impl Recording {
@@ -256,6 +275,10 @@ pub struct Call {
     pub transcript: Entity<Transcript>,
     /// The transcript window is open (minimal mode).
     pub transcript_open: bool,
+    /// Asked to transcribe, or to take over: waits for your answer.
+    pub prompt: Option<Prompt>,
+    /// The next start takes over from whoever transcribes (they asked).
+    handover: bool,
     flash: Option<Flash>,
     pub mode: Mode,
     pub waiting_for: Option<MediaDevice>,
@@ -271,6 +294,7 @@ pub struct Call {
     windows: Windows,
     _tasks: Vec<Task<()>>,
     _models: gpui::Subscription,
+    _settings: gpui::Subscription,
 }
 
 impl EventEmitter<Ended> for Call {}
@@ -302,6 +326,7 @@ impl Call {
         // A download finishing starts the transcription waiting for it.
         let models = Models::global(cx);
         let models_task = cx.observe(&models, |call, models, cx| {
+            call.advertise(cx);
             // Tried again from Settings: the error has had its say.
             if call.error_action == Some(NoticeAction::Settings) {
                 let model = Shell::global(cx).read(cx).store.transcription.model();
@@ -336,6 +361,7 @@ impl Call {
             speaking: false,
             mic_muted: true,
             last_active: None,
+            can_transcribe: None,
         });
 
         let join = engine.join(&args.server, &room.id, &identity, &args.name);
@@ -373,6 +399,8 @@ impl Call {
             preparing: None,
             transcript,
             transcript_open: false,
+            prompt: None,
+            handover: false,
             flash: None,
             mode: if args.regular {
                 Mode::Regular
@@ -389,6 +417,8 @@ impl Call {
             windows: Windows::default(),
             _tasks: vec![events_task, join_task],
             _models: models_task,
+            // Settings may change the model, and with it what this Mac can do.
+            _settings: cx.observe(&Shell::global(cx), |call, _, cx| call.advertise(cx)),
         }
     }
 
@@ -709,6 +739,75 @@ impl Call {
         self.transcription.is_none() && self.preparing.is_none() && self.status == Status::Connected
     }
 
+    /// Tell everyone whether this Mac could transcribe: its model is here.
+    fn advertise(&self, cx: &mut Context<Self>) {
+        let model = Shell::global(cx).read(cx).store.transcription.model();
+        let ready = Models::global(cx).read(cx).is_ready(model);
+        self.engine.set_can_transcribe(ready.then_some(model));
+    }
+
+    /// Others whose Macs could transcribe: identity, name, model.
+    pub fn capable(&self, cx: &App) -> Vec<(String, String, &'static ModelInfo)> {
+        self.others
+            .iter()
+            .filter_map(|m| {
+                let m = m.read(cx);
+                Some((m.identity.clone(), m.name.clone(), m.can_transcribe?))
+            })
+            .collect()
+    }
+
+    /// Ask `identity`'s Mac to transcribe the call, or to take over from
+    /// yours.
+    pub fn ask_to_transcribe(&mut self, identity: &str, cx: &mut Context<Self>) {
+        let handover = self.transcription.as_ref().is_some_and(|t| t.mine);
+        if self.transcription.is_some() && !handover {
+            return;
+        }
+        self.engine.ask_to_transcribe(identity, handover);
+        let name = self
+            .member(identity, cx)
+            .map(|m| first_name(&m.read(cx).name).to_owned())
+            .unwrap_or_default();
+        self.flash(
+            Notice {
+                text: if handover {
+                    format!("Asked {name} to take over")
+                } else {
+                    format!("Asked {name} to transcribe")
+                },
+                error: false,
+                action: None,
+            },
+            cx,
+        );
+    }
+
+    /// Yes to the prompt: transcribe on this Mac.
+    pub fn accept_prompt(&mut self, cx: &mut Context<Self>) {
+        let Some(prompt) = self.prompt.take() else {
+            return;
+        };
+        match prompt.kind {
+            PromptKind::Asked { handover } => {
+                self.engine.answer_transcript_ask(&prompt.identity, true);
+                self.handover = handover;
+                self.start_transcribing(cx);
+            }
+            PromptKind::TakeOver => self.start_transcribing(cx),
+        }
+        cx.notify();
+    }
+
+    pub fn decline_prompt(&mut self, cx: &mut Context<Self>) {
+        if let Some(prompt) = self.prompt.take() {
+            if matches!(prompt.kind, PromptKind::Asked { .. }) {
+                self.engine.answer_transcript_ask(&prompt.identity, false);
+            }
+            cx.notify();
+        }
+    }
+
     /// Transcribe the call on this Mac (downloading the model first if it
     /// isn't here), stop the transcript, or stop waiting for the download.
     pub fn toggle_transcribe(&mut self, cx: &mut Context<Self>) {
@@ -725,7 +824,12 @@ impl Call {
     }
 
     pub fn start_transcribing(&mut self, cx: &mut Context<Self>) {
-        if !self.can_transcribe() {
+        // Taking over from someone who asked: they transcribe until you do.
+        let taking_over = self.handover
+            && self.preparing.is_none()
+            && self.status == Status::Connected
+            && self.transcription.as_ref().is_some_and(|t| !t.mine);
+        if !self.can_transcribe() && !taking_over {
             return;
         }
         let model = Shell::global(cx).read(cx).store.transcription.model();
@@ -750,6 +854,7 @@ impl Call {
             model,
             dir: store::models_dir(),
             language,
+            handover: std::mem::take(&mut self.handover),
         });
         self.preparing = Some(Preparing::Loading);
         cx.notify();
@@ -866,9 +971,10 @@ impl Call {
         if let Some(file) = &recording.file {
             self.recordings.push(RecordingFile {
                 path: file.clone(),
-                at: recording.at,
+                at: recording.at.as_secs(),
                 duration_secs: duration.as_secs(),
                 screen: recording.screen,
+                at_ms: Some(recording.at.as_millis() as i64),
             });
             let me = self.me.read(cx).name.clone();
             self.log(me, Happened::StoppedRecording, cx);
@@ -939,6 +1045,7 @@ impl Call {
                         speaking: false,
                         mic_muted: false,
                         last_active: Some(Instant::now()),
+                        can_transcribe: None,
                     });
                     self.others.push(member);
                     windows_changed = true;
@@ -964,7 +1071,16 @@ impl Call {
                 }
                 if let Some(t) = self.transcription.take_if(|t| t.identity == identity) {
                     self.log(t.name.clone(), Happened::StoppedTranscribing, cx);
-                    if self.flash.is_none() {
+                    // Whoever's Mac can carry on is asked; the first to
+                    // start wins.
+                    let model = Shell::global(cx).read(cx).store.transcription.model();
+                    if Models::global(cx).read(cx).is_ready(model) && self.preparing.is_none() {
+                        self.prompt = Some(Prompt {
+                            identity: t.identity.clone(),
+                            name: t.name.clone(),
+                            kind: PromptKind::TakeOver,
+                        });
+                    } else if self.flash.is_none() {
                         self.flash(
                             Notice {
                                 text: format!(
@@ -977,6 +1093,12 @@ impl Call {
                             cx,
                         );
                     }
+                }
+                // Whoever asked you is gone.
+                if self.prompt.as_ref().is_some_and(|p| {
+                    p.identity == identity && matches!(p.kind, PromptKind::Asked { .. })
+                }) {
+                    self.prompt = None;
                 }
                 let before = self.others.len() + self.screens.len();
                 self.others.retain(|m| m.read(cx).identity != identity);
@@ -1109,7 +1231,7 @@ impl Call {
                     since: Instant::now(),
                     file: Some(path),
                     screen,
-                    at: self.elapsed().map_or(0, |e| e.as_secs()),
+                    at: self.elapsed().unwrap_or_default(),
                 });
                 self.log(name, Happened::StartedRecording, cx);
             }
@@ -1160,7 +1282,7 @@ impl Call {
                             since: Instant::now(),
                             file: None,
                             screen,
-                            at: self.elapsed().map_or(0, |e| e.as_secs()),
+                            at: self.elapsed().unwrap_or_default(),
                         });
                         self.log(name.clone(), Happened::StartedRecording, cx);
                         let what = if screen {
@@ -1226,7 +1348,36 @@ impl Call {
                 // Lines don't change anything else on screen.
                 return;
             }
-            Event::TranscriptionStopped { by } => {
+            Event::TranscriptionStopped {
+                by,
+                handed_over: true,
+            } => {
+                // Their Mac carries on (we heard it start while ours ran).
+                if self.transcription.take_if(|t| t.mine).is_some()
+                    && let Some(member) = by.as_deref().and_then(|id| self.member(id, cx))
+                {
+                    let (identity, name, model) = {
+                        let m = member.read(cx);
+                        (m.identity.clone(), m.name.clone(), m.can_transcribe)
+                    };
+                    self.log(name.clone(), Happened::StartedTranscribing, cx);
+                    self.flash(
+                        Notice {
+                            text: format!("{}'s Mac took over the transcript", first_name(&name)),
+                            error: false,
+                            action: None,
+                        },
+                        cx,
+                    );
+                    self.transcription = Some(Transcription {
+                        identity,
+                        name,
+                        model,
+                        mine: false,
+                    });
+                }
+            }
+            Event::TranscriptionStopped { by, .. } => {
                 if let Some(t) = self.transcription.take_if(|t| t.mine) {
                     // Someone else stopped it: say who.
                     let name = by
@@ -1249,8 +1400,56 @@ impl Call {
                     }
                 }
             }
+            Event::ParticipantCanTranscribe { identity, model } => {
+                if let Some(member) = self.member(&identity, cx) {
+                    let model = model.as_deref().and_then(quipcall_core::catalog::model);
+                    member.update(cx, |m, cx| {
+                        m.can_transcribe = model;
+                        cx.notify();
+                    });
+                }
+            }
+            Event::TranscriptAsked { from, handover } => {
+                let name = self
+                    .member(&from, cx)
+                    .map(|m| m.read(cx).name.clone())
+                    .unwrap_or_else(|| from.clone());
+                let accept_asks = Shell::global(cx).read(cx).store.transcription.accept_asks;
+                let free = self.can_transcribe()
+                    || (handover && self.transcription.as_ref().is_some_and(|t| !t.mine));
+                if !free {
+                    self.engine.answer_transcript_ask(&from, false);
+                } else {
+                    self.prompt = Some(Prompt {
+                        identity: from,
+                        name,
+                        kind: PromptKind::Asked { handover },
+                    });
+                    // Settings can say yes for you.
+                    if accept_asks {
+                        self.accept_prompt(cx);
+                    }
+                }
+            }
+            Event::TranscriptAnswered { from, accepted } => {
+                if !accepted {
+                    let name = self
+                        .member(&from, cx)
+                        .map(|m| first_name(&m.read(cx).name).to_owned())
+                        .unwrap_or_default();
+                    self.flash(
+                        Notice {
+                            text: format!("{name} can't transcribe now"),
+                            error: false,
+                            action: None,
+                        },
+                        cx,
+                    );
+                }
+            }
             Event::TranscriptionFailed(message) => {
                 self.preparing = None;
+                self.handover = false;
                 self.fail_with(
                     format!("transcript: {message}"),
                     Some(NoticeAction::Settings),
@@ -1264,6 +1463,14 @@ impl Call {
                     .unwrap_or_else(|| identity.clone());
                 match model {
                     Some(model) => {
+                        // Someone carries on: nothing to take over.
+                        if self
+                            .prompt
+                            .as_ref()
+                            .is_some_and(|p| p.kind == PromptKind::TakeOver)
+                        {
+                            self.prompt = None;
+                        }
                         if self.transcription.as_ref().is_none_or(|t| !t.mine) {
                             let first = first_name(&name).to_owned();
                             self.transcription = Some(Transcription {

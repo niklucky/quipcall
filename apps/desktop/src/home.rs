@@ -69,7 +69,18 @@ pub struct Home {
     renaming: Option<(String, Entity<TextInput>, Subscription)>,
     /// The trash button was pressed once: press again to remove.
     confirm_remove: Option<String>,
+    /// The selected call's recording, playing under its transcript.
+    playback: Option<Playback>,
     _subscription: Subscription,
+}
+
+/// A recording in Home's player.
+struct Playback {
+    player: quipcall_core::player::Player,
+    /// Where the recording starts in its call, ms.
+    start_ms: i64,
+    playing: bool,
+    _tick: gpui::Task<()>,
 }
 
 impl Home {
@@ -78,6 +89,21 @@ impl Home {
     pub fn show_recordings(&mut self, cx: &mut Context<Self>) {
         self.tab = Tab::Recordings;
         cx.notify();
+    }
+
+    /// Snapshot tests: play the selected call from its first line.
+    #[cfg(feature = "snapshot")]
+    pub fn play_first_line(&mut self, cx: &mut Context<Self>) {
+        let shell = Shell::global(cx);
+        let item = self.selected.as_ref().and_then(|sel| {
+            calls(&shell.read(cx).store, &sel.room)
+                .get(sel.call)
+                .map(|i| (*i).clone())
+        });
+        if let Some(item) = item {
+            let at = item.transcript.first().map_or(0, |l| l.at_ms);
+            self.play_from(&item.recordings, at, cx);
+        }
     }
 
     fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -110,6 +136,7 @@ impl Home {
             tab: Tab::Transcript,
             renaming: None,
             confirm_remove: None,
+            playback: None,
             _subscription: cx.observe(&shell, |_, _, cx| cx.notify()),
         }
     }
@@ -119,10 +146,179 @@ impl Home {
         if self.selected.as_ref() != Some(&selected) {
             self.selected = Some(selected);
             self.tab = Tab::Transcript;
+            self.playback = None;
             self.renaming = None;
             self.confirm_remove = None;
             cx.notify();
         }
+    }
+
+    /// Play the call from `at_ms` (since it connected), in the recording
+    /// that holds that moment, or from the start of the first.
+    fn play_from(
+        &mut self,
+        recordings: &[store::RecordingFile],
+        at_ms: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(rec) = recordings
+            .iter()
+            .find(|r| r.covers(at_ms))
+            .or_else(|| recordings.first())
+        else {
+            return;
+        };
+        if self
+            .playback
+            .as_ref()
+            .is_none_or(|p| p.player.path() != rec.path)
+        {
+            let Some(player) = quipcall_core::player::Player::open(&rec.path) else {
+                return;
+            };
+            // Follows the sound, and notices when it ends.
+            let tick = cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(250))
+                        .await;
+                    let alive = this.update(cx, |home, cx| {
+                        if let Some(p) = &mut home.playback {
+                            let playing = p.player.is_playing();
+                            if playing || p.playing != playing {
+                                p.playing = playing;
+                                cx.notify();
+                            }
+                        }
+                    });
+                    if alive.is_err() {
+                        break;
+                    }
+                }
+            });
+            self.playback = Some(Playback {
+                player,
+                start_ms: rec.start_ms(),
+                playing: false,
+                _tick: tick,
+            });
+        }
+        if let Some(p) = &mut self.playback {
+            let offset = (at_ms - p.start_ms).max(0) as u64;
+            p.player.seek(std::time::Duration::from_millis(offset));
+            p.player.play();
+            p.playing = true;
+        }
+        cx.notify();
+    }
+
+    fn toggle_play(&mut self, recordings: &[store::RecordingFile], cx: &mut Context<Self>) {
+        match &mut self.playback {
+            Some(p) if p.player.is_playing() => {
+                p.player.pause();
+                p.playing = false;
+            }
+            Some(p) => {
+                p.player.play();
+                p.playing = true;
+            }
+            None => {
+                let start = recordings.first().map_or(0, |r| r.start_ms());
+                self.play_from(recordings, start, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Where the player is, in its call's time.
+    fn playing_at(&self) -> Option<i64> {
+        let p = self.playback.as_ref()?;
+        Some(p.start_ms + p.player.position().as_millis() as i64)
+    }
+
+    /// Under the transcript: ▶, the time, and a bar to jump along.
+    fn player_bar(&self, item: &HistoryItem, cx: &mut Context<Self>) -> Div {
+        let (playing, position, duration) = match &self.playback {
+            Some(p) => (p.playing, p.player.position(), p.player.duration()),
+            None => (
+                false,
+                std::time::Duration::ZERO,
+                item.recordings
+                    .first()
+                    .map(|r| std::time::Duration::from_secs(r.duration_secs)),
+            ),
+        };
+        let total = duration.unwrap_or_default().as_secs_f32().max(0.001);
+        let done = (position.as_secs_f32() / total).clamp(0.0, 1.0);
+        let recordings = item.recordings.clone();
+        // A hundred slices: click one to go there.
+        let slices: Vec<_> = (0..100usize)
+            .map(|i| {
+                let recordings = recordings.clone();
+                let at = i as f32 / 100.0;
+                div()
+                    .id(("seek", i))
+                    .flex_1()
+                    .h_full()
+                    .cursor_pointer()
+                    .bg(if at < done {
+                        rgb(TEXT_DIM)
+                    } else {
+                        rgb(RAISED_2)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let start = this
+                            .playback
+                            .as_ref()
+                            .map(|p| p.start_ms)
+                            .or_else(|| recordings.first().map(|r| r.start_ms()))
+                            .unwrap_or(0);
+                        this.play_from(&recordings, start + (at * total * 1000.0) as i64, cx);
+                    }))
+            })
+            .collect();
+        let play_recordings = item.recordings.clone();
+        div()
+            .flex_none()
+            .h(px(52.0))
+            .px(px(28.0))
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .border_t_1()
+            .border_color(rgb(LINE))
+            .child(
+                ui::round_button(
+                    "play",
+                    if playing { Icon::Pause } else { Icon::Play },
+                    32.0,
+                    ui::Tone::Plain,
+                )
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.toggle_play(&play_recordings, cx)),
+                ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(96.0))
+                    .text_size(px(12.0))
+                    .text_color(rgb(TEXT_DIM))
+                    .child(format!(
+                        "{} / {}",
+                        crate::capsule::clock(position),
+                        crate::capsule::clock(duration.unwrap_or_default())
+                    )),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .h(px(6.0))
+                    .rounded_full()
+                    .overflow_hidden()
+                    .flex()
+                    .children(slices),
+            )
     }
 
     fn new_room(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -769,7 +965,7 @@ impl Home {
                         "Not transcribed. Press Transcribe in a call, and what everyone says shows up here.",
                     ))
                 })
-                .children(transcript_items(item, &me))
+                .children(self.transcript_items(item, &me, cx))
                 .into_any_element(),
             (Some(item), Tab::Recordings) if item.recordings.is_empty() => empty_state(
                 Icon::CircleDot,
@@ -796,68 +992,116 @@ impl Home {
             .into_any_element(),
         };
 
-        pane.child(header).children(sub).child(tabs).child(
-            div()
-                .id("detail-body")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .px(px(28.0))
-                .pt(px(14.0))
-                .pb(px(24.0))
-                .child(body),
-        )
+        // The call's sound under its transcript, when you recorded it.
+        let player = item
+            .as_ref()
+            .filter(|i| self.tab == Tab::Transcript && !i.recordings.is_empty())
+            .map(|i| self.player_bar(i, cx));
+        pane.child(header)
+            .children(sub)
+            .child(tabs)
+            .child(
+                div()
+                    .id("detail-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(28.0))
+                    .pt(px(14.0))
+                    .pb(px(24.0))
+                    .child(body),
+            )
+            .children(player)
+    }
+}
+
+impl Home {
+    /// A past call: its timeline with what was said between, in time order.
+    /// With a recording, a line plays from where it was said, and the line
+    /// playing is outlined.
+    fn transcript_items(
+        &self,
+        item: &HistoryItem,
+        me: &str,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        enum Entry<'a> {
+            Event(&'a store::CallEvent),
+            Said(&'a store::SaidLine),
+        }
+        let mut entries: Vec<(i64, Entry)> = item
+            .events
+            .iter()
+            .map(|e| (e.at as i64 * 1000, Entry::Event(e)))
+            .chain(item.transcript.iter().map(|s| (s.at_ms, Entry::Said(s))))
+            .collect();
+        entries.sort_by_key(|(at, _)| *at);
+        let mut out: Vec<AnyElement> = Vec::new();
+        if item.started > 0 {
+            out.push(timeline::started(item.started).into_any_element());
+        }
+        // The line the player is on: the last begun before where it is.
+        let playing_at = self.playing_at();
+        let playing = playing_at.and_then(|at| {
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, e))| matches!(e, Entry::Said(_)))
+                .take_while(|(_, (start, _))| *start <= at)
+                .last()
+                .map(|(ix, _)| ix)
+        });
+        let mut last: Option<(&str, bool)> = None;
+        for (ix, (_, entry)) in entries.iter().enumerate() {
+            match entry {
+                Entry::Event(e) => {
+                    last = None;
+                    out.push(timeline::event_line(e, item.started, me).into_any_element());
+                }
+                Entry::Said(s) => {
+                    let first = last != Some((s.who.as_str(), s.mine));
+                    last = Some((s.who.as_str(), s.mine));
+                    let header = first.then(|| {
+                        let when = crate::transcript::clock_at(item.started, s.at_ms);
+                        if s.mine {
+                            when
+                        } else {
+                            format!("{} · {when}", first_name(&s.who))
+                        }
+                    });
+                    let bubble = crate::transcript::bubble(
+                        &s.text,
+                        s.mine,
+                        false,
+                        playing == Some(ix),
+                        header,
+                    );
+                    if item.recordings.iter().any(|r| r.covers(s.at_ms)) {
+                        let (recordings, at) = (item.recordings.clone(), s.at_ms);
+                        out.push(
+                            div()
+                                .id(("said", ix))
+                                .cursor_pointer()
+                                .child(bubble)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.play_from(&recordings, at, cx)
+                                }))
+                                .into_any_element(),
+                        );
+                    } else {
+                        out.push(bubble.into_any_element());
+                    }
+                }
+            }
+        }
+        if item.started > 0 {
+            out.push(timeline::ended(item.started, item.duration_secs).into_any_element());
+        }
+        out
     }
 }
 
 /// One of a call's recordings: opens in QuickTime Player, or shows in Finder.
-/// A past call: its timeline with what was said between, in time order.
-fn transcript_items(item: &HistoryItem, me: &str) -> Vec<AnyElement> {
-    enum Entry<'a> {
-        Event(&'a store::CallEvent),
-        Said(&'a store::SaidLine),
-    }
-    let mut entries: Vec<(i64, Entry)> = item
-        .events
-        .iter()
-        .map(|e| (e.at as i64 * 1000, Entry::Event(e)))
-        .chain(item.transcript.iter().map(|s| (s.at_ms, Entry::Said(s))))
-        .collect();
-    entries.sort_by_key(|(at, _)| *at);
-    let mut out: Vec<AnyElement> = Vec::new();
-    if item.started > 0 {
-        out.push(timeline::started(item.started).into_any_element());
-    }
-    let mut last: Option<(&str, bool)> = None;
-    for (_, entry) in &entries {
-        match entry {
-            Entry::Event(e) => {
-                last = None;
-                out.push(timeline::event_line(e, item.started, me).into_any_element());
-            }
-            Entry::Said(s) => {
-                let first = last != Some((s.who.as_str(), s.mine));
-                last = Some((s.who.as_str(), s.mine));
-                let header = first.then(|| {
-                    let when = crate::transcript::clock_at(item.started, s.at_ms);
-                    if s.mine {
-                        when
-                    } else {
-                        format!("{} · {when}", first_name(&s.who))
-                    }
-                });
-                out.push(
-                    crate::transcript::bubble(&s.text, s.mine, false, header).into_any_element(),
-                );
-            }
-        }
-    }
-    if item.started > 0 {
-        out.push(timeline::ended(item.started, item.duration_secs).into_any_element());
-    }
-    out
-}
-
 fn recording_row(ix: usize, r: &store::RecordingFile, call_started: u64) -> Stateful<Div> {
     let size = std::fs::metadata(&r.path).ok().map(|m| m.len());
     let name = r

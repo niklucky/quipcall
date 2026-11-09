@@ -103,14 +103,51 @@ impl Regular {
             .transcription
             .model();
         let ready = crate::models::Models::global(cx).read(cx).is_ready(model);
-        let start = if ready {
-            "Start".to_owned()
-        } else {
-            format!(
-                "Download {} and start",
-                crate::store::file_size(model.bytes)
-            )
+        let others = self.call.read(cx).capable(cx);
+        let size = crate::store::file_size(model.bytes);
+        let (question, start) = match (ready, others.is_empty()) {
+            (true, true) => (
+                format!(
+                    "Transcribe on this Mac with {}. Everyone sees it.",
+                    model.name
+                ),
+                "Start".to_owned(),
+            ),
+            (false, true) => (
+                format!(
+                    "Transcribe on this Mac with {}. Everyone sees it.",
+                    model.name
+                ),
+                format!("Download {size} and start"),
+            ),
+            (true, false) => (
+                "Transcribe on whose Mac? Everyone sees it.".to_owned(),
+                "This Mac".to_owned(),
+            ),
+            (false, false) => (
+                "Transcribe on whose Mac? Everyone sees it.".to_owned(),
+                format!("This Mac · {size}"),
+            ),
         };
+        // Others whose Macs have a model ready.
+        let people: Vec<_> = others
+            .into_iter()
+            .enumerate()
+            .map(|(ix, (identity, name, _))| {
+                button(
+                    ("ask", ix),
+                    first_name(&name).to_owned(),
+                    None,
+                    Kind::Secondary,
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.transcribe_menu = false;
+                    this.call
+                        .update(cx, |c, cx| c.ask_to_transcribe(&identity, cx));
+                }))
+            })
+            .collect();
         Some(
             div()
                 .absolute()
@@ -133,10 +170,7 @@ impl Regular {
                         .shadow_lg()
                         .text_size(px(12.0))
                         .text_color(rgb(TEXT_DIM))
-                        .child(format!(
-                            "Transcribe on this Mac with {}. Everyone sees it.",
-                            model.name
-                        ))
+                        .child(question)
                         .child(
                             button(
                                 "transcribe-start",
@@ -155,6 +189,7 @@ impl Regular {
                                 this.call.update(cx, |c, cx| c.start_transcribing(cx));
                             })),
                         )
+                        .children(people)
                         .child(
                             button(
                                 "transcribe-settings",
@@ -421,6 +456,22 @@ impl Regular {
             (None, Some(Preparing::Loading)) => Some("Starting the transcript".to_owned()),
             (None, None) => None,
         };
+        let prompt = c.prompt.clone().map(|p| {
+            let first = first_name(&p.name).to_owned();
+            match p.kind {
+                crate::call::PromptKind::Asked { handover: false } => {
+                    (format!("{first} asks your Mac to transcribe"), "Accept")
+                }
+                crate::call::PromptKind::Asked { handover: true } => (
+                    format!("{first} asks your Mac to take over the transcript"),
+                    "Accept",
+                ),
+                crate::call::PromptKind::TakeOver => (
+                    format!("{first} left. Carry on with the transcript here?"),
+                    "Transcribe",
+                ),
+            }
+        });
         let copied = c.copied_at.is_some();
         let call = self.call.clone();
         div()
@@ -472,6 +523,23 @@ impl Regular {
                     pill(notice.text, rgb(TEXT_DIM), rgb(RAISED))
                 }
             }))
+            // A question for you: transcribe here?
+            .when_some(prompt, |el, (question, yes)| {
+                el.child(pill(question, rgb(TEXT), rgb(RAISED)))
+                    .child(
+                        button("prompt-yes", yes, Some(Icon::Captions), Kind::Primary, true)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.call.update(cx, |c, cx| c.accept_prompt(cx))
+                            })),
+                    )
+                    .child(
+                        button("prompt-no", "Not now", None, Kind::Secondary, true).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.call.update(cx, |c, cx| c.decline_prompt(cx))
+                            }),
+                        ),
+                    )
+            })
             // A failed download: try it again in Settings.
             .when(notice_settings, |el| {
                 el.child(
@@ -1034,9 +1102,32 @@ impl Regular {
                         )
                         .into_any_element(),
                 ];
-                rows.extend(c.members().map(|m| {
+                // Someone whose Mac can transcribe can be asked to, or to
+                // take over from yours.
+                let nobody = c.transcription.is_none() && c.preparing.is_none();
+                let mine = c.transcription.as_ref().is_some_and(|t| t.mine);
+                rows.extend(c.members().enumerate().map(|(ix, m)| {
                     let m = m.read(cx);
                     let muted = m.mic_muted;
+                    let ask = (!m.is_local && m.can_transcribe.is_some() && (nobody || mine)).then(
+                        || {
+                            let (call, identity) = (self.call.clone(), m.identity.clone());
+                            button(
+                                ("ask-transcribe", ix),
+                                if mine {
+                                    "Hand over"
+                                } else {
+                                    "Ask to transcribe"
+                                },
+                                Some(Icon::Captions),
+                                Kind::Secondary,
+                                true,
+                            )
+                            .on_click(move |_, _, cx| {
+                                call.update(cx, |c, cx| c.ask_to_transcribe(&identity, cx))
+                            })
+                        },
+                    );
                     div()
                         .flex()
                         .items_center()
@@ -1055,6 +1146,7 @@ impl Regular {
                                     m.name.clone()
                                 }),
                         )
+                        .children(ask)
                         .child(icon(
                             if muted { Icon::MicOff } else { Icon::Mic },
                             15.0,

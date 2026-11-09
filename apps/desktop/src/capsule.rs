@@ -24,7 +24,7 @@ use gpui::{
 };
 
 use crate::assets::Icon;
-use crate::call::{Call, Camera, Member, Mode, NoticeAction, Preparing};
+use crate::call::{Call, Camera, Member, Mode, NoticeAction, Preparing, PromptKind};
 use crate::mac;
 use crate::theme::{
     ACCENT, DANGER, RECORDING, SPEAKING, TEXT, TEXT_DIM, avatar_background, black, first_name,
@@ -118,6 +118,8 @@ enum Drawer {
     TranscribeChoice,
     /// Whose Mac transcribes, with which model; Stop if it's yours.
     Transcript,
+    /// A question until you answer it: transcribe on this Mac?
+    Prompt,
     /// "Joining…", a permission prompt or an error.
     Notice,
 }
@@ -330,15 +332,14 @@ impl Capsule {
         }
     }
 
-    /// The drawer showing: the one opened by hovering, else a notice.
+    /// The drawer showing: the one opened by hovering, else a question,
+    /// else a notice.
     fn drawer(&self, cx: &App) -> Option<Drawer> {
-        self.open.clone().or_else(|| {
-            self.call
-                .read(cx)
-                .notice()
-                .is_some()
-                .then_some(Drawer::Notice)
-        })
+        let c = self.call.read(cx);
+        self.open
+            .clone()
+            .or_else(|| c.prompt.is_some().then_some(Drawer::Prompt))
+            .or_else(|| c.notice().is_some().then_some(Drawer::Notice))
     }
 
     /// Size the window for what's on show, keeping the main row in place.
@@ -346,7 +347,9 @@ impl Capsule {
         let plan = self.plan(cx);
         // As wide as the row and the tiles. The rows that open on hover fit
         // in that, so hovering never changes the width.
-        let wide = plan.preview.is_some() || self.call.read(cx).notice().is_some();
+        let wide = plan.preview.is_some()
+            || self.call.read(cx).notice().is_some()
+            || self.call.read(cx).prompt.is_some();
         let width = row_width(&plan)
             .max(strip_width(&plan))
             .max(controls_width(plan.controls))
@@ -448,6 +451,7 @@ impl Capsule {
             "record-choice" => Some(Drawer::RecordChoice),
             "transcribe-choice" => Some(Drawer::TranscribeChoice),
             "transcript" => Some(Drawer::Transcript),
+            "prompt" => Some(Drawer::Prompt),
             "none" => None,
             _ => Some(Drawer::Controls),
         };
@@ -536,7 +540,7 @@ fn drawer_height(drawer: &Drawer, plan: &Plan, width: f32) -> f32 {
     match drawer {
         Drawer::Controls => CONTROLS_H,
         Drawer::Recording => BUTTON_LINE_H,
-        Drawer::RecordChoice | Drawer::TranscribeChoice => CHOICE_H,
+        Drawer::RecordChoice | Drawer::TranscribeChoice | Drawer::Prompt => CHOICE_H,
         Drawer::Transcript => BUTTON_LINE_H,
         Drawer::Notice if plan.notice_button => BUTTON_LINE_H,
         Drawer::Name(_) | Drawer::Notice => LINE_H,
@@ -1085,6 +1089,7 @@ impl Capsule {
             Drawer::RecordChoice => self.record_choice(cx).into_any_element(),
             Drawer::TranscribeChoice => self.transcribe_choice(cx).into_any_element(),
             Drawer::Transcript => self.transcript_line(cx),
+            Drawer::Prompt => self.prompt_view(cx).into_any_element(),
             Drawer::Notice => self.notice_line(cx),
         };
         let line = || div().flex_none().h(px(1.0)).mx(px(12.0)).bg(white(0.08));
@@ -1401,7 +1406,8 @@ impl Capsule {
     }
 
     /// "Parakeet v3 on this Mac. Everyone sees it." [Start], or [Download
-    /// and start] when the model isn't here yet.
+    /// and start] when the model isn't here yet. With others whose Macs can
+    /// transcribe: whose Mac? [This Mac] [Anna] …
     fn transcribe_choice(&self, cx: &mut Context<Self>) -> Div {
         let model = crate::Shell::global(cx)
             .read(cx)
@@ -1409,14 +1415,71 @@ impl Capsule {
             .transcription
             .model();
         let ready = crate::models::Models::global(cx).read(cx).is_ready(model);
-        let start = if ready {
-            "Start".to_owned()
-        } else {
-            format!(
+        let others = self.call.read(cx).capable(cx);
+        let start_label = match (ready, others.is_empty()) {
+            (true, true) => "Start".to_owned(),
+            (true, false) => "This Mac".to_owned(),
+            (false, true) => format!(
                 "Download {} and start",
                 crate::store::file_size(model.bytes)
-            )
+            ),
+            (false, false) => format!("This Mac · {}", crate::store::file_size(model.bytes)),
         };
+        let question = if others.is_empty() {
+            format!("{} on this Mac. Everyone sees it.", model.name)
+        } else {
+            "Transcribe on whose Mac? Everyone sees it.".to_owned()
+        };
+        let start = button(
+            "transcribe-start",
+            start_label,
+            Some(if ready {
+                Icon::Captions
+            } else {
+                Icon::Download
+            }),
+            Kind::Primary,
+            true,
+        )
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.set_open(None, window, cx);
+            this.call.update(cx, |c, cx| c.start_transcribing(cx));
+        }));
+        // Two at most: the widget is narrow. The call window lists everyone.
+        let people: Vec<_> = others
+            .into_iter()
+            .take(2)
+            .enumerate()
+            .map(|(ix, (identity, name, _))| {
+                button(
+                    ("ask", ix),
+                    first_name(&name).to_owned(),
+                    None,
+                    Kind::Secondary,
+                    true,
+                )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.set_open(None, window, cx);
+                    this.call
+                        .update(cx, |c, cx| c.ask_to_transcribe(&identity, cx));
+                }))
+            })
+            .collect();
+        let settings = if people.is_empty() {
+            button(
+                "transcribe-settings",
+                "Settings",
+                Some(Icon::Settings),
+                Kind::Secondary,
+                true,
+            )
+        } else {
+            icon_button("transcribe-settings", Icon::Settings, 24.0)
+        }
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(|_, _, cx| crate::settings::open(cx));
         div()
             .px(px(12.0))
             .flex()
@@ -1430,40 +1493,67 @@ impl Capsule {
                     .truncate()
                     .text_size(px(12.0))
                     .text_color(rgb(TEXT_DIM))
-                    .child(format!("{} on this Mac. Everyone sees it.", model.name)),
+                    .child(question),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(start)
+                    .children(people)
+                    .child(settings),
+            )
+    }
+
+    /// "Anna asks your Mac to transcribe the call" [Accept] [Not now], or
+    /// whether to carry on after the transcriber left.
+    fn prompt_view(&self, cx: &mut Context<Self>) -> Div {
+        let Some(prompt) = self.call.read(cx).prompt.clone() else {
+            return div();
+        };
+        let first = first_name(&prompt.name).to_owned();
+        let (question, yes) = match prompt.kind {
+            PromptKind::Asked { handover: false } => {
+                (format!("{first} asks your Mac to transcribe"), "Accept")
+            }
+            PromptKind::Asked { handover: true } => {
+                (format!("{first} asks your Mac to take over"), "Accept")
+            }
+            PromptKind::TakeOver => (format!("{first} left. Transcribe here?"), "Transcribe"),
+        };
+        div()
+            .px(px(12.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .h(px(18.0))
+                    .max_w_full()
+                    .truncate()
+                    .text_size(px(12.0))
+                    .text_color(rgb(TEXT))
+                    .child(question),
             )
             .child(
                 div()
                     .flex()
                     .gap(px(6.0))
                     .child(
-                        button(
-                            "transcribe-start",
-                            start,
-                            Some(if ready {
-                                Icon::Captions
-                            } else {
-                                Icon::Download
-                            }),
-                            Kind::Primary,
-                            true,
-                        )
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_open(None, window, cx);
-                            this.call.update(cx, |c, cx| c.start_transcribing(cx));
-                        })),
+                        button("prompt-yes", yes, Some(Icon::Captions), Kind::Primary, true)
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.call.update(cx, |c, cx| c.accept_prompt(cx))
+                            })),
                     )
                     .child(
-                        button(
-                            "transcribe-settings",
-                            "Settings",
-                            Some(Icon::Settings),
-                            Kind::Secondary,
-                            true,
-                        )
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(|_, _, cx| crate::settings::open(cx)),
+                        button("prompt-no", "Not now", None, Kind::Secondary, true)
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.call.update(cx, |c, cx| c.decline_prompt(cx))
+                            })),
                     ),
             )
     }

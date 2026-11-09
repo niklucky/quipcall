@@ -19,6 +19,14 @@
     type ScreenSharePreset,
     type Tile,
   } from './call';
+  import {
+    TRANSCRIPT_TOPIC,
+    apply,
+    askToStop,
+    clock,
+    type Line,
+    type TranscriptMessage,
+  } from './transcript';
 
   // Test participants: `?room=spike&name=Bot&autojoin=1`, plus `codec=vp8`
   // (camera codec) and `mic=0` (join without a microphone).
@@ -40,7 +48,10 @@
   let camOn = $state(false);
   let sharing = $state<ScreenSharePreset | null>(null);
   let recordedBy = $state<{ name: string; screen: boolean } | null>(null);
-  let transcribedBy = $state<string | null>(null);
+  let transcribedBy = $state<{ identity: string; name: string } | null>(null);
+  let lines = $state<Line[]>([]);
+  let transcriptOpen = $state(false);
+  let transcriptEl = $state<HTMLElement | undefined>();
 
   const refresh = () => {
     if (!room) return;
@@ -49,8 +60,20 @@
     camOn = room.localParticipant.isCameraEnabled;
     if (!room.localParticipant.isScreenShareEnabled) sharing = null;
     recordedBy = recorder(room);
+    const before = transcribedBy;
     transcribedBy = transcriber(room);
+    // The transcript opens for everyone when it starts.
+    if (transcribedBy && !before) transcriptOpen = true;
   };
+
+  // Follows the newest line while you're at the bottom.
+  $effect.pre(() => {
+    void lines.length;
+    const el = transcriptEl;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (atBottom) queueMicrotask(() => el.scrollTo({ top: el.scrollHeight }));
+  });
 
   async function join() {
     error = '';
@@ -77,7 +100,18 @@
         .on(RoomEvent.Disconnected, () => {
           room = undefined;
           tiles = [];
+          lines = [];
+          transcriptOpen = false;
           status = 'idle';
+        })
+        .on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
+          if (topic !== TRANSCRIPT_TOPIC || !participant) return;
+          try {
+            const message = JSON.parse(new TextDecoder().decode(payload)) as TranscriptMessage;
+            if (message.type === 'lines') lines = apply(lines, participant.identity, message.lines, r);
+          } catch (e) {
+            console.warn('transcript message', e);
+          }
         });
       for (const ev of [
         RoomEvent.ParticipantConnected,
@@ -105,6 +139,11 @@
       error = (e as Error).message;
       status = 'idle';
     }
+  }
+
+  /** Anyone can stop the transcript, for everyone. */
+  async function stopTranscript() {
+    if (room && transcribedBy) await askToStop(room, transcribedBy.identity);
   }
 
   async function leave() {
@@ -190,10 +229,11 @@
         </span>
       {/if}
       {#if transcribedBy}
-        <span class="rec">● {transcribedBy}'s Mac is transcribing this call</span>
+        <span class="rec">● {transcribedBy.name}'s Mac is transcribing this call</span>
       {/if}
       {#if error}<span class="error">{error}</span>{/if}
     </header>
+    <div class="body">
     <section class="grid" style:grid-template-columns="repeat({cols}, 1fr)">
       {#each tiles as tile (tile.id)}
         <div
@@ -223,6 +263,36 @@
         </div>
       {/each}
     </section>
+    {#if transcriptOpen}
+      <aside class="transcript">
+        <div class="transcript-head">
+          <strong>Transcript</strong>
+          <span class="muted">
+            {transcribedBy ? `On ${transcribedBy.name}'s Mac` : 'Stopped'}
+          </span>
+          {#if transcribedBy}
+            <button onclick={stopTranscript}>Stop for everyone</button>
+          {/if}
+          <button aria-label="Close" onclick={() => (transcriptOpen = false)}>×</button>
+        </div>
+        <div class="lines" bind:this={transcriptEl}>
+          {#if lines.length === 0}
+            <p class="muted empty">
+              {transcribedBy ? 'What anyone says shows up here.' : 'Nobody transcribes this call. Start it from the Quipcall app for Mac.'}
+            </p>
+          {/if}
+          {#each lines as line, i (line.key)}
+            <div class="said" class:mine={line.mine}>
+              {#if i === 0 || lines[i - 1].speaker !== line.speaker}
+                <span class="who">{line.mine ? '' : `${line.name.split(' ')[0]} · `}{clock(line.atMs)}</span>
+              {/if}
+              <span class="bubble" class:draft={!line.done}>{line.text}</span>
+            </div>
+          {/each}
+        </div>
+      </aside>
+    {/if}
+    </div>
     <footer>
       <button class:active={micOn} onclick={toggleMic}>{micOn ? 'Mic on' : 'Mic off'}</button>
       <button class:active={camOn} onclick={toggleCam}>{camOn ? 'Camera on' : 'Camera off'}</button>
@@ -233,6 +303,11 @@
         </button>
       {/each}
       {#if sharing}<button onclick={stopShare}>Stop sharing</button>{/if}
+      {#if transcribedBy || lines.length > 0}
+        <button class:active={transcriptOpen} onclick={() => (transcriptOpen = !transcriptOpen)}>
+          Transcript
+        </button>
+      {/if}
       <button class="danger" onclick={leave}>Leave</button>
     </footer>
   {/if}
@@ -245,7 +320,21 @@
   .join a { color: #8ab4ff; text-align: center; text-decoration: none; }
   .join a.dim { color: #9aa3b2; font-size: 12px; }
   header { display: flex; justify-content: space-between; padding: 8px 16px; border-bottom: 1px solid #262a33; }
+  .body { flex: 1; display: flex; min-height: 0; }
   .grid { flex: 1; display: grid; gap: 8px; padding: 8px; min-height: 0; grid-auto-rows: 1fr; }
+  .transcript { width: 320px; display: flex; flex-direction: column; border-left: 1px solid #262a33; min-height: 0; }
+  .transcript-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #262a33; }
+  .transcript-head .muted { margin-left: 0; flex: 1; min-width: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .transcript-head button { white-space: nowrap; }
+  .transcript-head button { padding: 2px 8px; font-size: 12px; }
+  .lines { flex: 1; overflow-y: auto; padding: 4px 12px 12px; }
+  .empty { text-align: center; font-size: 12px; margin-top: 24px; }
+  .said { display: flex; flex-direction: column; align-items: flex-start; margin-top: 3px; }
+  .said.mine { align-items: flex-end; }
+  .who { font-size: 11px; color: #676d78; margin: 8px 4px 3px; }
+  .bubble { max-width: 86%; padding: 6px 10px; border-radius: 12px; background: #22242b; line-height: 18px; font-size: 13px; }
+  .mine .bubble { background: rgb(79 140 255 / 28%); }
+  .bubble.draft { color: #9ba1ac; }
   .tile { position: relative; background: #1b1e25; border-radius: 8px; overflow: hidden; border: 2px solid transparent; min-height: 0; }
   .tile.speaking { border-color: #3fb950; }
   video { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -261,5 +350,7 @@
   .rec { color: #ff6b61; font-weight: 600; }
   @media (max-width: 640px) {
     .grid { grid-template-columns: 1fr !important; }
+    .body { flex-direction: column; }
+    .transcript { width: auto; max-height: 40vh; border-left: 0; border-top: 1px solid #262a33; }
   }
 </style>
