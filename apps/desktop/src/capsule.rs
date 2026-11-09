@@ -43,7 +43,9 @@ const MAIN: f32 = 56.0;
 const TILE_W: f32 = 120.0;
 const TILE_H: f32 = 90.0;
 const TILE_RADIUS: f32 = 18.0;
-const MIN_WIDTH: f32 = 240.0;
+/// The narrowest the widget gets while your preview or a notice shows; it
+/// fits its row otherwise.
+const WIDE: f32 = 240.0;
 const RADIUS: f64 = 26.0;
 /// Covers the steps of [`rounded_video`]; green while someone speaks.
 const RING: f32 = 2.5;
@@ -55,6 +57,10 @@ const COUNT: f32 = 26.0;
 /// A person in the stack's row: avatar and first name.
 const PERSON: f32 = 54.0;
 const CONTROLS_H: f32 = 73.0;
+/// The hover row's Camera, Copy link and Call window: three of them fit in
+/// the narrowest widget, you alone (195 px).
+const CONTROL_W: f32 = 60.0;
+const CONTROL_GAP: f32 = 4.0;
 const LINE_H: f32 = 37.0;
 /// Rows open and close after the cursor settles this long.
 const HOVER_DELAY: Duration = Duration::from_millis(250);
@@ -73,7 +79,7 @@ pub fn open(call: Entity<Call>, cx: &mut App) -> Option<WindowHandle<Capsule>> {
         .map(|d| d.visible_bounds())
         .unwrap_or_else(|| Bounds::new(point(px(0.0), px(0.0)), size(px(1440.0), px(900.0))));
     // A first size; the widget fits itself as soon as it opens.
-    let s = size(MIN_WIDTH, MAIN);
+    let s = size(WIDE, MAIN);
     let bounds = Bounds::new(
         point(
             area.origin.x + (area.size.width - px(s.width)) / 2.0,
@@ -306,7 +312,12 @@ impl Capsule {
     /// Size the window for what's on show, keeping the main row in place.
     fn fit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Plan {
         let plan = self.plan(cx);
-        let width = row_width(&plan).max(strip_width(&plan)).max(MIN_WIDTH);
+        // As wide as the row and the tiles. The rows that open on hover fit
+        // in that, so hovering never changes the width.
+        let wide = plan.preview.is_some() || self.call.read(cx).notice().is_some();
+        let width = row_width(&plan)
+            .max(strip_width(&plan))
+            .max(if wide { WIDE } else { 0.0 });
         let base = preview_height(&plan, width) + strip_height(&plan);
         let drawer_h = self
             .drawer(cx)
@@ -396,15 +407,16 @@ impl Capsule {
         }));
     }
 
-    /// Open a row as if hovered (snapshot tests): `controls`, `people`.
+    /// Open a row as if hovered (snapshot tests): `controls`, `people`, or
+    /// `none` to close it.
     #[cfg(feature = "snapshot")]
     pub fn show(&mut self, which: &str, cx: &mut Context<Self>) {
-        let open = match which {
-            "people" => Drawer::People,
-            _ => Drawer::Controls,
-        };
         // Not through set_open: the cursor is elsewhere in tests.
-        self.open = Some(open);
+        self.open = match which {
+            "people" => Some(Drawer::People),
+            "none" => None,
+            _ => Some(Drawer::Controls),
+        };
         cx.notify();
     }
 }
@@ -730,11 +742,9 @@ impl Capsule {
             .absolute()
             .top(px(top))
             .right(px(right))
-            .size(px(18.0))
+            .size(px(16.0))
             .rounded_full()
             .bg(rgb(ACCENT))
-            .border_2()
-            .border_color(rgb(EDGE))
             .flex()
             .items_center()
             .justify_center()
@@ -1024,24 +1034,29 @@ impl Capsule {
         } else {
             m.name.clone()
         };
+        // The widget is as narrow as its row: a long name gives way to the
+        // status.
         div()
             .h(px(18.0))
             .px(px(12.0))
             .flex()
             .justify_center()
             .gap(px(4.0))
+            .overflow_hidden()
             .text_size(px(12.0))
             .text_color(rgb(TEXT_DIM))
             .child(
                 div()
+                    .min_w_0()
+                    .truncate()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(TEXT))
                     .child(name),
             )
-            .child(format!(
+            .child(div().flex_none().child(format!(
                 "· {}",
                 status(m, plan.sharers.contains(&m.identity))
-            ))
+            )))
             .into_any_element()
     }
 
@@ -1084,7 +1099,7 @@ impl Capsule {
                     label: &'static str,
                     action: Box<dyn Fn(&mut App)>| {
             div()
-                .w(px(64.0))
+                .w(px(CONTROL_W))
                 .flex()
                 .flex_col()
                 .items_center()
@@ -1093,7 +1108,8 @@ impl Capsule {
                 .child(
                     div()
                         .h(px(14.0))
-                        .text_size(px(10.5))
+                        .whitespace_nowrap()
+                        .text_size(px(10.0))
                         .text_color(rgb(TEXT_DIM))
                         .child(label),
                 )
@@ -1102,7 +1118,7 @@ impl Capsule {
         div()
             .flex()
             .justify_center()
-            .gap(px(10.0))
+            .gap(px(CONTROL_GAP))
             .child(item(
                 "camera",
                 if camera_off {
@@ -1138,13 +1154,11 @@ impl Capsule {
 fn mute_badge() -> Div {
     div()
         .absolute()
-        .right(px(-3.0))
-        .bottom(px(-3.0))
-        .size(px(16.0))
+        .right(px(-2.0))
+        .bottom(px(-2.0))
+        .size(px(14.0))
         .rounded_full()
         .bg(rgb(DANGER))
-        .border_2()
-        .border_color(rgb(EDGE))
         .flex()
         .items_center()
         .justify_center()

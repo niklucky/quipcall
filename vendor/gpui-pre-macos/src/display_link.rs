@@ -306,7 +306,13 @@ pub struct MetalFrames {
     source: RefCell<Option<MetalFrameSource>>,
     /// Whether GPUI asked for a frame since the current update began.
     woken: Cell<bool>,
+    /// Updates skipped in a row for a drawable of the wrong size.
+    stale: Cell<u8>,
 }
+
+/// Wrong-size drawables skipped in a row before drawing into one anyway, in
+/// case a layer's size and its drawables' never match.
+const MAX_STALE_SKIPS: u8 = 4;
 
 impl MetalFrames {
     pub fn replace(&self, source: Option<MetalFrameSource>) {
@@ -329,6 +335,17 @@ impl MetalFrames {
 
     pub fn begin_frame(&self) {
         self.woken.set(false);
+    }
+
+    /// Whether to skip an update whose drawable doesn't have the layer's size
+    /// (quipcall patch). The link acquires drawables ahead of time, so the
+    /// first after a resize can have the old size. Drawn into, one shows
+    /// stretched to the new size until the next frame, and an idle window
+    /// may not have one for seconds.
+    pub fn skip_stale(&self, stale: bool) -> bool {
+        let skip = stale && self.stale.get() < MAX_STALE_SKIPS;
+        self.stale.set(if skip { self.stale.get() + 1 } else { 0 });
+        skip
     }
 
     /// Ends an update, pausing the link if GPUI neither used its drawable nor
@@ -617,6 +634,19 @@ mod tests {
 
         frames.begin_frame();
         assert!(frames.end_frame(false), "an idle update pauses the link");
+    }
+
+    // quipcall patch.
+    #[test]
+    fn wrong_size_drawables_are_skipped_a_few_in_a_row() {
+        let frames = MetalFrames::default();
+        for _ in 0..MAX_STALE_SKIPS {
+            assert!(frames.skip_stale(true));
+        }
+        assert!(!frames.skip_stale(true), "draws once too many were skipped");
+        assert!(frames.skip_stale(true), "and counts again from there");
+        assert!(!frames.skip_stale(false), "a drawable of the right size draws");
+        assert!(frames.skip_stale(true), "and resets the count");
     }
 
     #[test]

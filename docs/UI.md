@@ -52,7 +52,7 @@ One small glass widget floats above all apps and Spaces and never takes focus. P
 - **Hovering the stack** opens a row with everyone in it (name, mic state). **Hovering a face** for a moment shows the name and what they're doing ("speaking", "active 40 s ago").
 - **While you share**, the widget grows upward with your screen's live preview on top (once its first frame arrives, in its shape), and a Stop button.
 - **Someone sharing** has a screen badge on their face or tile; click it to bring their share window to the front. Anyone sharing stays in the row.
-- **The main row never moves**: the widget grows around it, up for tiles and your preview, down for the hover rows, and sideways from its left end, so Share, Mic and Leave stay under the cursor. Near the bottom of the screen the hover rows open above it instead. A row closes once the cursor has been outside the widget for a quarter of a second.
+- **The main row never moves**: the widget grows around it, up for tiles and your preview, down for the hover rows, and sideways from its left end, so Share, Mic and Leave stay under the cursor. It's as wide as its row (wider only while your preview or a notice shows), and the hover rows fit in that width, so hovering never changes it; people joining and leaving do. Near the bottom of the screen the hover rows open above it instead. A row closes once the cursor has been outside the widget for a quarter of a second.
 - "Joining…", permission prompts and errors show in a slim row under the main one.
 - **Drag** the widget by any empty spot.
 - Someone else's **screen share** floats as its own rounded rectangle you can move and resize. **Double-click** it, or press ⤢ on it, to watch it **fullscreen** (macOS fullscreen in its own Space). Esc, a double-click or ⤡ brings it back. When the share ends it says so and closes a moment later, but only once you're on its Space: macOS can't take a window out of fullscreen from another Space, and closing it anyway left a black Space that ignored every key and click.
@@ -81,9 +81,10 @@ One window (1040 × 680): the room's name and the call's time in the title bar, 
 ## How it's built
 
 - The widget and each floating share are borderless, non-activating panels (GPUI `WindowKind::PopUp`): above other apps, on all Spaces, never stealing focus. The widget's window resizes around its main row (`mac::Anchor::Row`), and macOS rounds its corners. It repaints at most 30 times a second.
-- Glass is the system blur behind the window (GPUI's `Blurred` background, an `NSVisualEffectView`) under a faint dark tint.
+- Glass is the system blur behind the window (GPUI's `Blurred` background, an `NSVisualEffectView`) under a dark tint (78%). The blur adds no colour, so over a white page the tint is what keeps the widget dark.
 - GPUI clips video only to rectangles, so rounded tiles and previews are drawn in horizontal bands, each clipped to the shape's width, under an opaque ring that hides the steps (`rounded_video` in `ui.rs`): about 10 draws for a widget tile. Patching GPUI's surface shader for rounded corners would make it one draw, but that means vendoring GPUI itself.
 - The text field is GPUI's `input.rs` example, adapted (`text_input.rs`).
 - Screenshots and screen recordings show our floating windows. Our own screen shares leave every Quipcall window out through their ScreenCaptureKit filter, so nobody sees the widget (or a preview of the preview) in your share.
+- Resizing draws the new frame in the same AppKit transaction, so the widget never shows its old frame stretched to the new size. That needed two GPUI patches (see `vendor/README.md`).
 - No widget library: the look is custom, and every dependency costs footprint. Shared pieces (avatars, buttons, tooltips, empty states) are in `ui.rs`.
 - Icons: [Lucide](https://lucide.dev) (ISC licence), embedded as SVG.

@@ -2,10 +2,10 @@
 
 ## gpui-pre-macos 0.3.11
 
-GPUI's macOS backend, copied from crates.io with three window fixes. Search
+GPUI's macOS backend, copied from crates.io with five window fixes. Search
 for `quipcall patch` to locate each modification in `src/window.rs`,
-`src/gpui_macos.rs`, `src/accessibility.rs`, `Cargo.toml`, and
-`tests/accessibility.rs`.
+`src/display_link.rs`, `src/gpui_macos.rs`, `src/accessibility.rs`,
+`Cargo.toml`, and `tests/accessibility.rs`.
 
 Title-less `PopUp` windows are created borderless. Upstream creates every
 window titled, so our floating circles and toolbar had to switch the style
@@ -25,6 +25,24 @@ Floating windows and popups also set `hidesOnDeactivate` to `false` when
 created. They are NSPanels, whose default hides them when another app takes
 focus. That made the share picker and call controls disappear while audio
 continued, especially when switching to the app being shared.
+
+A resized window draws its new frame straight away. AppKit asks for that
+frame (`displayLayer:`) during the resize, to show in the same transaction,
+but GPUI throttles windows that aren't key to 30 fps, and our floating
+panels never are. Whenever a frame had been drawn less than 33 ms earlier,
+which is usual right after a hover, the request was dropped. The old frame
+then showed stretched (or squashed) to the new size until the display link's
+next frame. The request now asks for presentation, which GPUI never
+throttles.
+
+The display link also skips a drawable whose size doesn't match the layer's,
+up to four in a row (`MetalFrames::skip_stale`). The link acquires drawables
+ahead of time, so the first after a resize can have the old size. Drawn
+into, it shows stretched until the next frame, and an idle window may not
+draw again for seconds. A unit test in `src/display_link.rs` covers it; run it
+with `MACOSX_DEPLOYMENT_TARGET=12.3 CARGO_TARGET_DIR=target/vendor-test cargo
+test --manifest-path vendor/gpui-pre-macos/Cargo.toml --features
+test-support,runtime_shaders --lib display_link`.
 
 To update: copy the new version from `~/.cargo/registry/src/*/gpui-pre-macos-<version>`,
 re-apply every marked patch (including the module and test target), and bump

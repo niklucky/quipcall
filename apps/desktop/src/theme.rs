@@ -39,9 +39,11 @@ pub fn black(alpha: f32) -> Hsla {
     hsla(0.0, 0.0, 0.0, alpha)
 }
 
-/// A faint tint over the system blur, so glass stays readable over white.
+/// A dark tint over the system blur. The blur adds no colour of its own, so
+/// over a white page this is all that keeps the glass dark: at 38% it came
+/// out pale grey and the white icons got lost.
 pub fn glass_tint() -> Hsla {
-    hsla(0.0, 0.0, 0.08, 0.38)
+    hsla(0.0, 0.0, 0.08, 0.78)
 }
 
 /// Gradient for an avatar, picked from the person's name so they keep their
