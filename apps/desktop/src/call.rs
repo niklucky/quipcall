@@ -739,7 +739,7 @@ fn sync_windows(call: &Entity<Call>, cx: &mut App) {
         c.fullscreen.retain(|key, _| live.contains(key));
         c.screen_bounds.retain(|key, _| live.contains(key));
     });
-    let (minimal, regular, screens, fullscreen, screen_bounds, mut windows) = {
+    let (minimal, regular, screens, fullscreen, shares, screen_bounds, mut windows) = {
         let c = call.read(cx);
         let live = c.status != Status::Ended;
         let minimal = live && c.mode == Mode::Minimal;
@@ -763,11 +763,18 @@ fn sync_windows(call: &Entity<Call>, cx: &mut App) {
         } else {
             Vec::new()
         };
+        // Shares still going, to tell a fullscreen you left from one that ended.
+        let shares: Vec<TrackKey> = if live {
+            c.screens.iter().map(|s| s.read(cx).key.clone()).collect()
+        } else {
+            Vec::new()
+        };
         (
             minimal,
             regular,
             screens,
             fullscreen,
+            shares,
             c.screen_bounds.clone(),
             Windows::default(),
         )
@@ -825,8 +832,17 @@ fn sync_windows(call: &Entity<Call>, cx: &mut App) {
         .collect();
     windows.fullscreen.retain(|key, handle| {
         let keep = wanted.contains(key);
-        if !keep {
+        if !keep && shares.contains(key) {
+            // You left it, from its own Space.
             close(handle, cx);
+        } else if !keep {
+            // The share or the call ended, maybe while you were on another
+            // Space: it closes itself when it can.
+            let handle = *handle;
+            cx.spawn(async move |cx| {
+                let _ = handle.update(cx, |view, window, cx| view.end(window, cx));
+            })
+            .detach();
         }
         keep
     });

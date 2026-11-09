@@ -2,6 +2,9 @@
 //! Space, so you can still swipe back to your apps, with the circles and
 //! the toolbar on top. Esc, a double-click, the exit button or leaving
 //! fullscreen closes it, and the floating window comes back where it was.
+//!
+//! When the share ends, it says so and closes once its Space is the current
+//! one (see [`Fullscreen::end`]).
 
 use std::time::{Duration, Instant};
 
@@ -13,13 +16,19 @@ use gpui::{
 };
 
 use crate::assets::Icon;
-use crate::call::{Call, Screen};
+use crate::call::{Call, Screen, Status};
+use crate::mac;
 use crate::theme::TEXT;
 
 actions!(fullscreen, [Exit]);
 
 /// The name and exit button hide once the mouse has been still this long.
 const CONTROLS_FOR: Duration = Duration::from_millis(2500);
+/// After the share ends, how long "Anna stopped sharing" shows on screen
+/// before the window closes.
+const ENDED_FOR: Duration = Duration::from_millis(1500);
+/// How often a window whose share ended checks whether its Space is showing.
+const SPACE_POLL: Duration = Duration::from_millis(250);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", Exit, Some("ScreenFullscreen"))]);
@@ -67,6 +76,8 @@ pub struct Fullscreen {
     focus: FocusHandle,
     /// macOS has put the window in fullscreen (it starts out windowed).
     entered: bool,
+    /// The share (or the call) is over: the window is waiting to close.
+    ended: bool,
     /// The controls show until then.
     controls_until: Option<Instant>,
     hide_pending: bool,
@@ -92,7 +103,7 @@ impl Fullscreen {
                     this.entered = true;
                 } else if this.entered {
                     // Left with the green button, the menu or ctrl-cmd-F.
-                    this.exit(cx);
+                    this.exit(window, cx);
                 }
             }),
         ];
@@ -106,6 +117,7 @@ impl Fullscreen {
             screen,
             focus,
             entered: false,
+            ended: false,
             controls_until: None,
             hide_pending: false,
             _subscriptions: subscriptions,
@@ -115,9 +127,51 @@ impl Fullscreen {
         this
     }
 
-    fn exit(&mut self, cx: &mut Context<Self>) {
+    fn exit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ended {
+            // The call has forgotten this window; you're on its Space.
+            window.remove_window();
+            return;
+        }
         let key = self.screen.read(cx).key.clone();
         self.call.update(cx, |c, cx| c.close_fullscreen(&key, cx));
+    }
+
+    /// The share or the call is over: close, but only from this window's own
+    /// Space. macOS takes a window out of fullscreen only while its Space is
+    /// the current one. Closed from elsewhere, the window went but its Space
+    /// stayed behind: black, deaf to keys and clicks, and impossible to close
+    /// until the app quit. So the window stays, saying the share ended, and
+    /// closes a moment after you come to it.
+    pub fn end(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ended {
+            return;
+        }
+        self.ended = true;
+        self.controls_until = None;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let mut showing_since: Option<Instant> = None;
+            loop {
+                cx.background_executor().timer(SPACE_POLL).await;
+                let Ok(due) = this.update_in(cx, |_, window, _| {
+                    if mac::on_screen(window).unwrap_or(true) {
+                        showing_since.get_or_insert_with(Instant::now).elapsed() >= ENDED_FOR
+                    } else {
+                        showing_since = None;
+                        false
+                    }
+                }) else {
+                    return;
+                };
+                if due {
+                    break;
+                }
+            }
+            tracing::debug!("closing the fullscreen share that ended");
+            let _ = this.update_in(cx, |_, window, _| window.remove_window());
+        })
+        .detach();
     }
 
     fn controls_visible(&self) -> bool {
@@ -125,6 +179,9 @@ impl Fullscreen {
     }
 
     fn show_controls(&mut self, cx: &mut Context<Self>) {
+        if self.ended {
+            return;
+        }
         let was_visible = self.controls_visible();
         self.controls_until = Some(Instant::now() + CONTROLS_FOR);
         if !was_visible {
@@ -170,7 +227,33 @@ impl Render for Fullscreen {
         }
         let screen = self.screen.read(cx);
         let frame = screen.video.sink.latest();
-        let controls = self.controls_visible().then(|| {
+        // The last frame stays, dimmed, under what happened.
+        let ended = self.ended.then(|| {
+            let what = if self.call.read(cx).status == Status::Ended {
+                "The call ended".to_string()
+            } else {
+                format!("{} stopped sharing", screen.owner)
+            };
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(hsla(0.0, 0.0, 0.0, 0.6))
+                .child(
+                    div()
+                        .px_4()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(hsla(0.0, 0.0, 0.0, 0.55))
+                        .text_color(rgb(TEXT))
+                        .child(what),
+                )
+        });
+        let controls = (self.controls_visible() && !self.ended).then(|| {
             div()
                 .absolute()
                 .top_0()
@@ -202,9 +285,9 @@ impl Render for Fullscreen {
                         .cursor_pointer()
                         .hover(|s| s.bg(hsla(0.0, 0.0, 0.2, 0.75)))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
-                            this.exit(cx);
+                            this.exit(window, cx);
                         }))
                         .child(
                             svg()
@@ -218,7 +301,7 @@ impl Render for Fullscreen {
             .id("fullscreen")
             .key_context("ScreenFullscreen")
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &Exit, _, cx| this.exit(cx)))
+            .on_action(cx.listener(|this, _: &Exit, window, cx| this.exit(window, cx)))
             .size_full()
             .relative()
             .bg(rgb(0x000000))
@@ -227,11 +310,12 @@ impl Render for Fullscreen {
                     .object_fit(ObjectFit::Contain)
                     .size_full()
             }))
+            .children(ended)
             .children(controls)
             .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| this.show_controls(cx)))
-            .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
                 if event.click_count() >= 2 {
-                    this.exit(cx);
+                    this.exit(window, cx);
                 }
             }))
     }

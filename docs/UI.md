@@ -55,7 +55,7 @@ One small glass widget floats above all apps and Spaces and never takes focus. P
 - **The main row never moves**: the widget grows around it, up for tiles and your preview, down for the hover rows, and sideways from its left end, so Share, Mic and Leave stay under the cursor. Near the bottom of the screen the hover rows open above it instead. A row closes once the cursor has been outside the widget for a quarter of a second.
 - "Joining…", permission prompts and errors show in a slim row under the main one.
 - **Drag** the widget by any empty spot.
-- Someone else's **screen share** floats as its own rounded rectangle you can move and resize. **Double-click** it, or press ⤢ on it, to watch it **fullscreen** (macOS fullscreen in its own Space). Esc, a double-click or ⤡ brings it back.
+- Someone else's **screen share** floats as its own rounded rectangle you can move and resize. **Double-click** it, or press ⤢ on it, to watch it **fullscreen** (macOS fullscreen in its own Space). Esc, a double-click or ⤡ brings it back. When the share ends it says so and closes a moment later, but only once you're on its Space: macOS can't take a window out of fullscreen from another Space, and closing it anyway left a black Space that ignored every key and click.
 - **Screen share** opens a picker with live thumbnails of your screens and windows and the frame-rate presets (5 / 15 fps for text, 30 / 60 fps for motion). Clicking share again stops sharing.
 
 ## Call: regular mode

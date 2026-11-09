@@ -134,6 +134,17 @@ pub fn cursor_inside(window: &Window) -> Option<bool> {
     )
 }
 
+/// Whether any of `window` is on screen now (`None` if the window can't be
+/// found). For a fullscreen window: whether its Space is the one showing on
+/// its display, the only time macOS will take it out of fullscreen.
+pub fn on_screen(window: &Window) -> Option<bool> {
+    Some(
+        ns_window(window)?
+            .occlusionState()
+            .contains(NSWindowOcclusionState::Visible),
+    )
+}
+
 /// Resize to `size`, keeping `anchor` where it is, and re-apply `mask`. A
 /// window that was fully on its screen stays on it, except while a resize
 /// handle is dragged: moving the corner under the cursor would feed back into
