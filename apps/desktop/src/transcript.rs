@@ -91,11 +91,22 @@ impl Transcript {
     /// A line, or a new version of one. A final line with no text takes
     /// its draft back.
     pub fn said(&mut self, said: Said, cx: &mut Context<Self>) {
+        if let Some(splice) = self.take(said) {
+            cx.emit(splice);
+            cx.notify();
+        }
+    }
+
+    /// What [`Transcript::said`] changes, if anything. A final line stays as
+    /// it is: a draft that comes late (another Mac relayed the final first)
+    /// doesn't undo it.
+    fn take(&mut self, said: Said) -> Option<Splice> {
         let existing = self
             .items
             .iter()
             .position(|i| matches!(i, Item::Said(s) if s.id == said.id));
-        let splice = match existing {
+        Some(match existing {
+            Some(ix) if matches!(&self.items[ix], Item::Said(s) if s.done) => return None,
             Some(ix) if said.text.is_empty() => {
                 self.items.remove(ix);
                 Splice {
@@ -110,11 +121,9 @@ impl Transcript {
                     count: 1,
                 }
             }
-            None if said.text.is_empty() => return,
+            None if said.text.is_empty() => return None,
             None => self.insert(Item::Said(said)),
-        };
-        cx.emit(splice);
-        cx.notify();
+        })
     }
 
     pub fn event(&mut self, event: CallEvent, cx: &mut Context<Self>) {
@@ -568,5 +577,37 @@ impl Render for TranscriptWindow {
             .children(menu)
             .children(knob)
             .children(tracker)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Another Mac relayed the final line before its draft came: the late
+    /// draft doesn't undo it, nor does anything else.
+    #[test]
+    fn a_final_line_stays() {
+        let line = |text: &str, done| Said {
+            id: "anna-mac/7".into(),
+            identity: "anna".into(),
+            name: "Anna".into(),
+            mine: false,
+            at_ms: 1000,
+            text: text.into(),
+            done,
+        };
+        let mut t = Transcript::new("Me".into());
+        assert!(t.take(line("Hello", true)).is_some());
+        assert!(t.take(line("Hel", false)).is_none());
+        assert!(t.take(line("", true)).is_none());
+        assert!(t.take(line("Changed", true)).is_none());
+        let texts: Vec<&str> = t.lines().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["Hello"]);
+        // A draft is still replaced, and taken back.
+        let mut d = Transcript::new("Me".into());
+        d.take(line("Hel", false));
+        d.take(line("", true));
+        assert_eq!(d.lines().count(), 0);
     }
 }

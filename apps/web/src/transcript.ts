@@ -105,11 +105,13 @@ export function apply(
   for (const l of incoming) {
     const key = `${l.by ?? by}/${l.id}`;
     const at = next.findIndex((x) => x.key === key);
+    // A final line stays as it is, whoever sends: a draft that comes late
+    // (another Mac relayed the final first) doesn't undo it.
+    if (at >= 0 && next[at].done) continue;
     // Another Mac's line, relayed (history after a handover), only adds what
-    // isn't here, or finishes a draft: it never changes or takes back a
-    // final line.
+    // isn't here, or finishes a draft.
     const relayed = (l.by ?? by) !== by;
-    if (relayed && (!l.done || !l.text || (at >= 0 && next[at].done))) continue;
+    if (relayed && (!l.done || !l.text)) continue;
     if (!l.text) {
       // A final line with no text takes its draft back.
       if (at >= 0) next.splice(at, 1);

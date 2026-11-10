@@ -250,12 +250,16 @@ struct State {
     /// Your transcription, while your Mac transcribes.
     transcribing: Option<transcribe::Transcribing>,
     /// Your transcription on its way: the model loading, the claim going
-    /// out. Stop can come meanwhile, and wins.
+    /// out. Stop can come meanwhile, and wins; leaving drops it.
     start: Start,
-    /// The Mac you asked to take over your transcript, and when it did, if
-    /// it has: a Stop that comes to you meanwhile, or just after, goes on
-    /// to it, so it doesn't carry on a transcript that was stopped.
-    handover_to: Option<(String, Option<Instant>)>,
+    /// Starts so far, counted: each knows which is its own.
+    starts: u64,
+    /// The Macs you asked to take over your transcript, with the claim you
+    /// have now: any of them may. A Stop that comes to you meanwhile goes on
+    /// to each, so none carries on a transcript that was stopped.
+    handover_asked: Vec<String>,
+    /// The one that took over, and when: a Stop just after goes on to it.
+    handed_to: Option<(String, Instant)>,
     /// The call's final lines, from your Mac or whoever transcribed before
     /// (a handover keeps them), for whoever joins while yours transcribes.
     transcribed: Vec<TranscriptLine>,
@@ -272,13 +276,14 @@ struct State {
 
 type Closing = futures_util::future::Shared<futures_util::future::BoxFuture<'static, ()>>;
 
+/// A start of your transcription, by its number.
 #[derive(Debug, Default, PartialEq)]
 enum Start {
     #[default]
     No,
-    Going,
+    Going(u64),
     /// Stop came, from them (or you), before it listened: it won't.
-    Stopped(Option<String>),
+    Stopped(u64, Option<String>),
 }
 
 /// A transcription stopped before it listened to anyone.
@@ -387,7 +392,10 @@ impl Engine {
             s.mic = None;
             s.transcribed.clear();
             s.stopped_transcribing.clear();
-            s.handover_to = None;
+            s.handover_asked.clear();
+            s.handed_to = None;
+            // A start on its way was for this call: it ends with it.
+            s.start = Start::No;
             s.mics.clear();
             for (_, task) in s.mic_streams.drain() {
                 task.abort();
@@ -692,22 +700,42 @@ impl Engine {
     /// Loading the model takes a few seconds. Everyone is told before any
     /// voice is heard; one transcriber per call.
     pub fn start_transcribing(&self, options: TranscribeOptions) {
-        {
+        // For this call, as it is now: leaving or joining another before it's
+        // through calls it off.
+        let reserved = {
             let mut s = self.state.lock();
-            if s.transcribing.is_some() || s.start != Start::No {
-                let failed = Event::TranscriptionFailed("you're already transcribing".into());
-                let _ = self.events.try_send(failed);
+            match s.room.clone() {
+                None => Err("not in a call"),
+                Some(room) => reserve_start(&mut s)
+                    .map(|id| (room, s.connection, id))
+                    .ok_or("you're already transcribing"),
+            }
+        };
+        let (room, connection, id) = match reserved {
+            Ok(reserved) => reserved,
+            Err(why) => {
+                let _ = self.events.try_send(Event::TranscriptionFailed(why.into()));
                 return;
             }
-            s.start = Start::Going;
-            s.handover_to = None;
-        }
+        };
         let state = self.state.clone();
         let events = self.events.clone();
         let handle = self.rt().handle().clone();
         self.rt().spawn(async move {
-            let started = start_transcribing(&state, &handle, &events, options).await;
-            state.lock().start = Start::No;
+            let started =
+                start_transcribing(&state, &handle, &events, options, room, connection, id).await;
+            let current = {
+                let mut s = state.lock();
+                finish_start(&mut s, id);
+                s.connection == connection
+            };
+            // A start for a call you've left tells the next one nothing.
+            if !current {
+                if let Err(e) = &started {
+                    tracing::info!("a transcript start for a call you left: {e:#}");
+                }
+                return;
+            }
             let event = match &started {
                 Ok(()) => Event::TranscriptionStarted,
                 Err(e) => match e.downcast_ref::<StoppedStarting>() {
@@ -745,8 +773,8 @@ impl Engine {
         let claim = {
             let mut s = self.state.lock();
             let claim = (handover && s.transcribing.is_some()).then_some(s.transcribing_since);
-            if claim.is_some() {
-                s.handover_to = Some((identity.to_owned(), None));
+            if claim.is_some() && !s.handover_asked.iter().any(|a| a == identity) {
+                s.handover_asked.push(identity.to_owned());
             }
             claim
         };
@@ -810,43 +838,43 @@ async fn stop_transcribing_for(
     let (room, transcribing, pass_on) = {
         let mut s = state.lock();
         let transcribing = s.transcribing.take();
-        let mut pass_on = None;
-        if handed_over {
-            // The Mac you asked took over: a Stop just after goes on to it.
-            if let Some((to, at)) = &mut s.handover_to
-                && by.as_deref() == Some(to.as_str())
-            {
-                *at = Some(Instant::now());
-            }
+        // Stopped means stopped: nothing more is heard, from now, before
+        // anything goes over the network.
+        if let Some(transcribing) = &transcribing {
+            transcribing.stop_listening();
+        }
+        let pass_on = if handed_over {
+            took_over(&mut s, by.as_deref());
+            Vec::new()
         } else {
             // Stop wins over a start on its way: it won't listen (see
             // `install_transcribing`).
-            if transcribing.is_none() && s.start == Start::Going {
-                s.start = Start::Stopped(by.clone());
+            if transcribing.is_none()
+                && let Start::Going(id) = s.start
+            {
+                s.start = Start::Stopped(id, by.clone());
             }
-            // And over a Mac taking over from yours.
-            pass_on = match s.handover_to.take() {
-                Some((to, None)) => Some(to),
-                Some((to, Some(at))) if at.elapsed() < LAST_WORDS => Some(to),
-                _ => None,
-            }
-            .filter(|to| by.as_ref() != Some(to));
-        }
+            // And over any Mac taking over from yours.
+            stop_passes_on(&mut s, by.as_deref())
+        };
         (s.room.clone(), transcribing, pass_on)
     };
-    if let (Some(room), Some(to)) = (&room, pass_on) {
-        tracing::info!(%to, "the transcript stopped: so does its handover");
-        if let Err(e) = send_transcript(room, &TranscriptMessage::Stop, Some(to)).await {
-            tracing::warn!("passing on Stop: {e}");
-        }
+    // Sending can wait on the connection: it holds nothing up.
+    if let Some(room) = room.clone().filter(|_| !pass_on.is_empty()) {
+        tokio::spawn(async move {
+            for to in pass_on {
+                tracing::info!(%to, "the transcript stopped: so does its handover");
+                if let Err(e) = send_transcript(&room, &TranscriptMessage::Stop, Some(to)).await {
+                    tracing::warn!("passing on Stop: {e}");
+                }
+            }
+        });
     }
     let Some(transcribing) = transcribing else {
         return;
     };
-    // Stopped means stopped: nothing more is heard, and the claim goes
-    // before the last words are out, so no Mac takes over meanwhile. The
-    // last words still count (see `LAST_WORDS`).
-    transcribing.stop_listening();
+    // The claim goes before the last words are out, so no Mac takes over
+    // meanwhile. The last words still count (see `LAST_WORDS`).
     if let Some(room) = &room
         && let Err(e) = set_attribute(room, TRANSCRIBING, "").await
     {
@@ -1011,16 +1039,16 @@ async fn on_transcript(
     }
 }
 
+/// Start `id` ([`reserve_start`]) in `room`, the call `connection`.
 async fn start_transcribing(
     state: &Arc<Mutex<State>>,
     handle: &tokio::runtime::Handle,
     events: &async_channel::Sender<Event>,
     options: TranscribeOptions,
+    room: Arc<Room>,
+    connection: u64,
+    id: u64,
 ) -> anyhow::Result<()> {
-    let (room, connection) = {
-        let s = state.lock();
-        (s.room.clone().context("not in a call")?, s.connection)
-    };
     // Taking over: their claim, the one they asked with, which must still
     // stand once the model has loaded. They may stop meanwhile, or someone
     // else start.
@@ -1091,7 +1119,7 @@ async fn start_transcribing(
         tokio::task::spawn_blocking(move || quipcall_stt::Transcriber::start(stt, on_line))
             .await??;
     // Loading takes seconds: is it still yours to start?
-    if let Err(e) = may_start(state, &room, taking_over.as_ref()) {
+    if let Err(e) = may_start(state, &room, connection, id, taking_over.as_ref()) {
         let _ = tokio::task::spawn_blocking(move || transcriber.stop()).await;
         return Err(e);
     }
@@ -1110,7 +1138,7 @@ async fn start_transcribing(
     // Only now does it listen: unless the call ended, or Stop came, while
     // everyone was told. Then nothing was heard, and the claim goes again.
     let mut transcriber = Some(transcriber);
-    let installed = install_transcribing(state, connection, handle, |listener| {
+    let installed = install_transcribing(state, connection, id, handle, |listener| {
         transcribe::Transcribing::start(listener, transcriber.take().expect("once"), you)
     });
     if let Err(e) = installed {
@@ -1125,6 +1153,62 @@ async fn start_transcribing(
     Ok(())
 }
 
+/// A start of your transcription: its number, unless one is on its way or
+/// yours already runs.
+fn reserve_start(s: &mut State) -> Option<u64> {
+    if s.transcribing.is_some() || s.start != Start::No {
+        return None;
+    }
+    s.starts += 1;
+    s.start = Start::Going(s.starts);
+    s.handover_asked.clear();
+    s.handed_to = None;
+    Some(s.starts)
+}
+
+/// Whether start `id` may go on: its call (`connection`) goes on, and Stop
+/// hasn't come.
+fn start_goes_on(s: &State, connection: u64, id: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(s.connection == connection, "call ended");
+    match &s.start {
+        Start::Going(own) if *own == id => Ok(()),
+        Start::Stopped(own, by) if *own == id => Err(StoppedStarting(by.clone()).into()),
+        _ => anyhow::bail!("call ended"),
+    }
+}
+
+/// Start `id` is over, one way or another; another start is left alone.
+fn finish_start(s: &mut State, id: u64) {
+    if matches!(s.start, Start::Going(own) | Start::Stopped(own, _) if own == id) {
+        s.start = Start::No;
+    }
+}
+
+/// `by` took over your transcript. If you asked it to, a Stop just after
+/// goes on to it; nobody else can take over now, your claim is gone.
+fn took_over(s: &mut State, by: Option<&str>) {
+    if let Some(by) = by
+        && s.handover_asked.iter().any(|a| a == by)
+    {
+        s.handed_to = Some((by.to_owned(), Instant::now()));
+        s.handover_asked.clear();
+    }
+}
+
+/// Who a Stop (from `by`) goes on to: every Mac you asked to take over, and
+/// the one that just did.
+fn stop_passes_on(s: &mut State, by: Option<&str>) -> Vec<String> {
+    let mut to = std::mem::take(&mut s.handover_asked);
+    if let Some((handed, at)) = s.handed_to.take()
+        && at.elapsed() < LAST_WORDS
+        && !to.contains(&handed)
+    {
+        to.push(handed);
+    }
+    to.retain(|t| Some(t.as_str()) != by);
+    to
+}
+
 /// Your transcription starts listening: everyone's voice goes to `make`'s
 /// transcriber from now. Not if the call ended, or Stop came while it got
 /// ready; then `make` isn't called, and nothing is heard. Under one lock
@@ -1132,15 +1216,13 @@ async fn start_transcribing(
 fn install_transcribing(
     state: &Arc<Mutex<State>>,
     connection: u64,
+    id: u64,
     handle: &tokio::runtime::Handle,
     make: impl FnOnce(Listener) -> transcribe::Transcribing,
 ) -> anyhow::Result<()> {
     let weak = Arc::downgrade(state);
     let mut s = state.lock();
-    anyhow::ensure!(s.connection == connection, "call ended");
-    if let Start::Stopped(by) = &s.start {
-        return Err(StoppedStarting(by.clone()).into());
-    }
+    start_goes_on(&s, connection, id)?;
     let listener = listen_to(&mut s, weak, handle);
     s.transcribing = Some(make(listener));
     Ok(())
@@ -1151,16 +1233,12 @@ fn install_transcribing(
 /// claim) still transcribes, with nobody newer; or nobody does.
 fn may_start(
     state: &Mutex<State>,
-    room: &Arc<Room>,
+    room: &Room,
+    connection: u64,
+    id: u64,
     taking_over: Option<&(u64, String)>,
 ) -> anyhow::Result<()> {
-    {
-        let s = state.lock();
-        anyhow::ensure!(is_current(&s, room), "call ended");
-        if let Start::Stopped(by) = &s.start {
-            return Err(StoppedStarting(by.clone()).into());
-        }
-    }
+    start_goes_on(&state.lock(), connection, id)?;
     match taking_over {
         Some(theirs) => anyhow::ensure!(
             newest_claim(room).as_ref() == Some(theirs),
@@ -2096,14 +2174,14 @@ mod tests {
         let (engine, _events) = Engine::new().unwrap();
         let state = &engine.state;
         let connection = state.lock().connection;
-        state.lock().start = Start::Going;
+        let id = reserve_start(&mut state.lock()).unwrap();
         engine.rt().block_on(stop_transcribing(
             state,
             &engine.events,
             Some("anna".into()),
         ));
-        assert_eq!(state.lock().start, Start::Stopped(Some("anna".into())));
-        let installed = install_transcribing(state, connection, engine.rt().handle(), |_| {
+        assert_eq!(state.lock().start, Start::Stopped(id, Some("anna".into())));
+        let installed = install_transcribing(state, connection, id, engine.rt().handle(), |_| {
             unreachable!("it listened")
         });
         let stopped = installed.expect_err("installed after Stop");
@@ -2113,6 +2191,54 @@ mod tests {
         ));
         assert!(state.lock().transcribing.is_none());
         assert!(!state.lock().hub.listening(), "it listened");
+    }
+
+    /// You asked Boris, then Carol, to take over; Boris did. A Stop that
+    /// still comes to you goes on to Boris. Before anyone does, to both.
+    #[test]
+    fn stop_goes_on_to_the_mac_that_took_over() {
+        let mut s = State {
+            handover_asked: vec!["boris".into(), "carol".into()],
+            ..State::default()
+        };
+        assert_eq!(stop_passes_on(&mut s, Some("anna")), ["boris", "carol"]);
+        s.handover_asked = vec!["boris".into(), "carol".into()];
+        took_over(&mut s, Some("boris"));
+        assert!(s.handover_asked.is_empty());
+        assert_eq!(stop_passes_on(&mut s, Some("anna")), ["boris"]);
+        // Once.
+        assert!(stop_passes_on(&mut s, Some("anna")).is_empty());
+        // Not back to whoever sent it, and not to a Mac you never asked.
+        s.handover_asked = vec!["boris".into()];
+        assert!(stop_passes_on(&mut s, Some("boris")).is_empty());
+        took_over(&mut s, Some("dmitri"));
+        assert!(s.handed_to.is_none());
+    }
+
+    /// Leaving while your model loads drops that start: the next call can
+    /// start its own, and the old one neither goes on nor clears it.
+    #[test]
+    fn a_start_is_for_its_own_call() {
+        let (engine, _events) = Engine::new().unwrap();
+        let state = &engine.state;
+        let (old_call, old) = {
+            let mut s = state.lock();
+            (s.connection, reserve_start(&mut s).unwrap())
+        };
+        assert!(reserve_start(&mut state.lock()).is_none(), "two at once");
+        engine.disconnect();
+        let (call, new) = {
+            let mut s = state.lock();
+            let new = reserve_start(&mut s).expect("the next call can't start");
+            (s.connection, new)
+        };
+        assert!(start_goes_on(&state.lock(), old_call, old).is_err());
+        assert!(start_goes_on(&state.lock(), call, old).is_err());
+        finish_start(&mut state.lock(), old);
+        assert_eq!(state.lock().start, Start::Going(new));
+        assert!(start_goes_on(&state.lock(), call, new).is_ok());
+        finish_start(&mut state.lock(), new);
+        assert_eq!(state.lock().start, Start::No);
     }
 
     /// History relayed by the Mac that took over adds the lines you missed,
