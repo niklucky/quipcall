@@ -21,11 +21,12 @@
   } from './call';
   import {
     TRANSCRIPT_TOPIC,
+    Transcribers,
     apply,
     askToStop,
     clock,
+    linesIn,
     type Line,
-    type TranscriptMessage,
   } from './transcript';
 
   // Test participants: `?room=spike&name=Bot&autojoin=1`, plus `codec=vp8`
@@ -52,6 +53,7 @@
   let lines = $state<Line[]>([]);
   let transcriptOpen = $state(false);
   let transcriptEl = $state<HTMLElement | undefined>();
+  let transcribers = new Transcribers();
 
   const refresh = () => {
     if (!room) return;
@@ -60,6 +62,7 @@
     camOn = room.localParticipant.isCameraEnabled;
     if (!room.localParticipant.isScreenShareEnabled) sharing = null;
     recordedBy = recorder(room);
+    transcribers.update(room);
     const before = transcribedBy;
     transcribedBy = transcriber(room);
     // The transcript opens for everyone when it starts.
@@ -87,6 +90,7 @@
         dynacast: true,
         publishDefaults: { videoCodec: codec },
       });
+      transcribers = new Transcribers();
       // Lets headless tests inspect the call over the DevTools protocol.
       if (import.meta.env.DEV) Object.assign(window, { qcRoom: r });
       r.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
@@ -106,12 +110,12 @@
         })
         .on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
           if (topic !== TRANSCRIPT_TOPIC || !participant) return;
-          try {
-            const message = JSON.parse(new TextDecoder().decode(payload)) as TranscriptMessage;
-            if (message.type === 'lines') lines = apply(lines, participant.identity, message.lines, r);
-          } catch (e) {
-            console.warn('transcript message', e);
+          if (!transcribers.trust(participant)) {
+            console.warn('transcript lines from someone who does not transcribe:', participant.identity);
+            return;
           }
+          const incoming = linesIn(payload);
+          if (incoming.length) lines = apply(lines, participant.identity, incoming, r);
         });
       for (const ev of [
         RoomEvent.ParticipantConnected,

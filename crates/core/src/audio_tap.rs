@@ -1,5 +1,5 @@
-//! Everyone's voice in a call, 10 ms at a time, for recording (and soon
-//! transcription).
+//! Everyone's voice in a call, 10 ms at a time, for recording and
+//! transcription.
 //!
 //! - Your microphone as the call sends it: after echo cancellation, noise
 //!   suppression and gain, before encoding. A hook in our webrtc-sys patch
@@ -8,10 +8,14 @@
 //! - Each remote microphone as it's decoded, through LiveKit's audio sinks
 //!   (one per track, see `Engine::listen`).
 //!
-//! Nothing is copied until something listens, and copying stops when the last
-//! [`Listener`] is dropped.
+//! Each call has its own [`Hub`]: a recording still being finished after you
+//! left hears nothing of the next call. Your microphone is one stream for the
+//! whole app (LiveKit has one audio device), so it goes to the call it's live
+//! in. Nothing is copied until something listens, and copying stops when the
+//! last [`Listener`] is dropped.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
@@ -37,78 +41,104 @@ pub struct VoiceFrame {
     pub samples: Vec<f32>,
 }
 
-/// Everyone's voice until dropped. Frames come in the order they're heard,
-/// people interleaved.
+/// One call's voices, to whoever listens in that call.
+#[derive(Default)]
+pub(crate) struct Hub {
+    listeners: Mutex<Vec<(u64, async_channel::Sender<VoiceFrame>)>>,
+}
+
+/// Everyone's voice in one call until dropped. Frames come in the order
+/// they're heard, people interleaved.
 pub struct Listener {
     pub frames: async_channel::Receiver<VoiceFrame>,
+    hub: Arc<Hub>,
     id: u64,
     on_last: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Drop for Listener {
     fn drop(&mut self) {
-        let mut hub = HUB.lock();
-        hub.retain(|(id, _)| *id != self.id);
-        // Switched under the lock, so a listener arriving meanwhile keeps it on.
-        let last = hub.is_empty();
-        if last {
-            set_hook(false);
-        }
-        drop(hub);
+        let mut listeners = self.hub.listeners.lock();
+        listeners.retain(|(id, _)| *id != self.id);
+        let last = listeners.is_empty();
+        drop(listeners);
+        unhook();
         if let Some(on_last) = self.on_last.take().filter(|_| last) {
             on_last();
         }
     }
 }
 
-static HUB: Mutex<Vec<(u64, async_channel::Sender<VoiceFrame>)>> = Mutex::new(Vec::new());
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-/// Your microphone is published and unmuted. WebRTC already skips the hook
-/// while muted; this makes sure a muted voice is never recorded.
-static MIC_LIVE: AtomicBool = AtomicBool::new(false);
+/// Listeners in every call: the hook is on while there are any. Switched
+/// under this lock, so a listener arriving meanwhile keeps it on.
+static LISTENERS: Mutex<usize> = Mutex::new(0);
+/// The call your microphone is published and unmuted in. WebRTC already
+/// skips the hook while muted; this makes sure a muted voice is never
+/// recorded, and that your voice goes to that call only.
+static MIC: Mutex<Option<Arc<Hub>>> = Mutex::new(None);
 
-/// A new listener. `on_last` runs when it's the last one to go (to stop
-/// decoding remote audio); it should check [`listening`], since another may
-/// have arrived meanwhile.
-pub(crate) fn listen(on_last: impl FnOnce() + Send + 'static) -> Listener {
-    let (tx, frames) = async_channel::bounded(QUEUE);
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let mut hub = HUB.lock();
-    hub.push((id, tx));
-    set_hook(true);
-    drop(hub);
-    Listener {
-        frames,
-        id,
-        on_last: Some(Box::new(on_last)),
+impl Hub {
+    /// A new listener. `on_last` runs when it's this call's last one to go
+    /// (to stop decoding remote audio); it should check [`Hub::listening`],
+    /// since another may have arrived meanwhile.
+    pub(crate) fn listen(self: &Arc<Self>, on_last: impl FnOnce() + Send + 'static) -> Listener {
+        let (tx, frames) = async_channel::bounded(QUEUE);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        self.listeners.lock().push((id, tx));
+        let mut count = LISTENERS.lock();
+        *count += 1;
+        set_hook(true);
+        drop(count);
+        Listener {
+            frames,
+            hub: self.clone(),
+            id,
+            on_last: Some(Box::new(on_last)),
+        }
+    }
+
+    pub(crate) fn listening(&self) -> bool {
+        !self.listeners.lock().is_empty()
+    }
+
+    /// To every listener in this call; a listener that has fallen behind
+    /// misses it. `wait` false on audio threads: a frame is skipped rather
+    /// than block.
+    pub(crate) fn send(&self, frame: VoiceFrame, wait: bool) {
+        let listeners = if wait {
+            self.listeners.lock()
+        } else {
+            match self.listeners.try_lock() {
+                Some(listeners) => listeners,
+                None => return,
+            }
+        };
+        if let Some(((_, last), rest)) = listeners.split_last() {
+            for (_, tx) in rest {
+                let _ = tx.try_send(frame.clone());
+            }
+            let _ = last.try_send(frame);
+        }
     }
 }
 
-pub(crate) fn listening() -> bool {
-    !HUB.lock().is_empty()
+fn unhook() {
+    let mut count = LISTENERS.lock();
+    *count = count.saturating_sub(1);
+    if *count == 0 {
+        set_hook(false);
+    }
 }
 
-/// Whether frames from your microphone should go out.
-pub(crate) fn set_mic_live(live: bool) {
-    MIC_LIVE.store(live, Ordering::Relaxed);
-}
-
-/// To every listener; a listener that has fallen behind misses it. `wait`
-/// false on audio threads: a frame is skipped rather than block.
-pub(crate) fn send(frame: VoiceFrame, wait: bool) {
-    let hub = if wait {
-        HUB.lock()
-    } else {
-        match HUB.try_lock() {
-            Some(hub) => hub,
-            None => return,
-        }
-    };
-    if let Some(((_, last), rest)) = hub.split_last() {
-        for (_, tx) in rest {
-            let _ = tx.try_send(frame.clone());
-        }
-        let _ = last.try_send(frame);
+/// Whether frames from your microphone go out to `hub`'s call. Turning it
+/// off for a call that no longer has it changes nothing.
+pub(crate) fn set_mic_live(hub: &Arc<Hub>, live: bool) {
+    let mut mic = MIC.lock();
+    if live {
+        *mic = Some(hub.clone());
+    } else if mic.as_ref().is_some_and(|m| Arc::ptr_eq(m, hub)) {
+        *mic = None;
     }
 }
 
@@ -126,14 +156,21 @@ fn set_hook(on: bool) {
 
 /// Called by WebRTC on its capture thread with each finished 10 ms frame.
 unsafe extern "C" fn capture_tap(samples: *const f32, num_frames: usize, sample_rate_hz: i32) {
-    if samples.is_null() || num_frames == 0 || !MIC_LIVE.load(Ordering::Relaxed) {
+    if samples.is_null() || num_frames == 0 {
+        return;
+    }
+    // Never wait on the capture thread.
+    let Some(Some(hub)) = MIC.try_lock().map(|mic| mic.clone()) else {
+        return;
+    };
+    if !hub.listeners.try_lock().is_some_and(|l| !l.is_empty()) {
         return;
     }
     // SAFETY: WebRTC passes `num_frames` valid floats, owned by its audio
     // buffer for the duration of this call.
     let input = unsafe { std::slice::from_raw_parts(samples, num_frames) };
     let samples = to_frame(input, sample_rate_hz);
-    send(
+    hub.send(
         VoiceFrame {
             speaker: Speaker::Local,
             samples,
@@ -164,11 +201,18 @@ fn to_frame(input: &[f32], sample_rate_hz: i32) -> Vec<f32> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use std::sync::atomic::AtomicBool;
+
     use super::*;
 
-    /// One test touches the process-wide hub, so they can't race.
-    static SERIAL: Mutex<()> = Mutex::new(());
+    /// Tests that touch your microphone (one for the whole app) can't race.
+    pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
+
+    pub(crate) fn speak() {
+        let input = [1000.0f32; FRAME];
+        unsafe { capture_tap(input.as_ptr(), input.len(), 48_000) };
+    }
 
     #[test]
     fn rescales_and_resamples() {
@@ -185,28 +229,59 @@ mod tests {
     #[test]
     fn microphone_frames_only_while_live() {
         let _serial = SERIAL.lock();
-        let last = std::sync::Arc::new(AtomicBool::new(false));
-        let listener = listen({
+        let hub = Arc::new(Hub::default());
+        let last = Arc::new(AtomicBool::new(false));
+        let listener = hub.listen({
             let last = last.clone();
             move || last.store(true, Ordering::Relaxed)
         });
-        let input = [1000.0f32; FRAME];
-        let tap = |input: &[f32]| unsafe { capture_tap(input.as_ptr(), input.len(), 48_000) };
 
-        set_mic_live(false);
-        tap(&input);
+        set_mic_live(&hub, false);
+        speak();
         assert!(listener.frames.try_recv().is_err(), "muted audio went out");
 
-        set_mic_live(true);
-        tap(&input);
+        set_mic_live(&hub, true);
+        speak();
         let frame = listener.frames.try_recv().expect("a frame");
         assert_eq!(frame.speaker, Speaker::Local);
         assert_eq!(frame.samples.len(), FRAME);
-        set_mic_live(false);
+        set_mic_live(&hub, false);
 
-        assert!(listening());
+        assert!(hub.listening());
         drop(listener);
-        assert!(!listening());
+        assert!(!hub.listening());
         assert!(last.load(Ordering::Relaxed), "the last listener's goodbye");
+    }
+
+    /// You left a call whose recording is still being finished, and joined
+    /// another: nothing of the new call reaches the old recording.
+    #[test]
+    fn a_call_hears_only_its_own_voices() {
+        let _serial = SERIAL.lock();
+        let (old, new) = (Arc::new(Hub::default()), Arc::new(Hub::default()));
+        let finishing = old.listen(|| {});
+        assert!(!new.listening(), "the new call's voices would be decoded");
+        set_mic_live(&old, true);
+        set_mic_live(&old, false);
+        set_mic_live(&new, true);
+        let listener = new.listen(|| {});
+        speak();
+        let boris = Speaker::Remote("boris".into());
+        new.send(
+            VoiceFrame {
+                speaker: boris.clone(),
+                samples: vec![0.1; FRAME],
+            },
+            true,
+        );
+        // The old call letting go of the microphone late changes nothing.
+        set_mic_live(&old, false);
+        speak();
+        assert!(finishing.frames.try_recv().is_err());
+        let heard: Vec<Speaker> = std::iter::from_fn(|| listener.frames.try_recv().ok())
+            .map(|f| f.speaker)
+            .collect();
+        assert_eq!(heard, [Speaker::Local, boris, Speaker::Local]);
+        set_mic_live(&new, false);
     }
 }

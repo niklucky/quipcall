@@ -29,7 +29,7 @@ pub mod video;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use futures_util::{FutureExt as _, StreamExt as _};
@@ -63,6 +63,9 @@ const TRANSCRIBING: &str = "quipcall.transcribing";
 /// The participant attribute that says a Mac could transcribe the call: the
 /// id of the model it has ready.
 const CAN_TRANSCRIBE: &str = "quipcall.can_transcribe";
+/// How long after a Mac stops transcribing its last lines are still taken:
+/// they're sent as it stops, and may arrive after the news.
+const LAST_WORDS: Duration = Duration::from_secs(10);
 
 /// Stable identifier of a remote track inside the UI.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -139,9 +142,9 @@ pub enum Event {
     /// Your Mac transcribes the call; everyone has been told.
     TranscriptionStarted,
     /// What someone said, or a draft of it while they talk (`done` false),
-    /// as transcribed on `by`'s Mac (an identity; yours, or the
-    /// transcriber's). A line replaces earlier ones with its id from the same
-    /// transcriber.
+    /// as transcribed on `by`'s Mac (an identity; yours, or a transcriber's,
+    /// now or before a handover). A line replaces earlier ones with its id
+    /// from the same transcriber.
     TranscriptLine {
         by: String,
         line: TranscriptLine,
@@ -187,9 +190,10 @@ pub struct TranscribeOptions {
     pub dir: PathBuf,
     /// ISO 639-1, or `None` to let the model tell.
     pub language: Option<String>,
-    /// Take over from whoever transcribes now (they asked): start even
-    /// though someone does.
-    pub handover: bool,
+    /// Take over from this Mac (an identity; they asked): start although it
+    /// transcribes. Only while it still does, and nobody else started
+    /// since, once the model has loaded.
+    pub handover: Option<String>,
 }
 
 pub struct Engine {
@@ -204,7 +208,12 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Default)]
 struct State {
+    /// The call. Leaving, or losing it, clears it: whatever was starting
+    /// for it (a recording, the transcript) sees that and stops.
     room: Option<Arc<Room>>,
+    /// Its voices, to whoever listens. A new one for every call: a
+    /// recording still being finished hears nothing of the next.
+    hub: Arc<audio_tap::Hub>,
     /// Keeps the platform audio device module alive for the duration of a call.
     /// Without it remote audio has nowhere to play.
     audio: Option<PlatformAudio>,
@@ -228,6 +237,9 @@ struct State {
     /// The call's final lines, from your Mac or whoever transcribed before
     /// (a handover keeps them), for whoever joins while yours transcribes.
     transcribed: Vec<TranscriptLine>,
+    /// Macs that stopped transcribing the call, and when: their last lines
+    /// may still be on the way. Anyone else's lines are dropped.
+    stopped_transcribing: HashMap<String, Instant>,
     /// When your transcription started, unix ms (see [`TRANSCRIBING`]).
     transcribing_since: u64,
     /// The model your Mac could transcribe with, told to everyone.
@@ -318,11 +330,13 @@ impl Engine {
     pub fn disconnect(&self) {
         // Everything of this call leaves the state now, the audio device too:
         // a call connected before the goodbye below finishes has its own.
-        audio_tap::set_mic_live(false);
         let (room, audio, screen, camera, recorder, transcribing) = {
             let mut s = self.state.lock();
+            audio_tap::set_mic_live(&s.hub, false);
+            s.hub = Default::default();
             s.mic = None;
             s.transcribed.clear();
+            s.stopped_transcribing.clear();
             s.mics.clear();
             for (_, task) in s.mic_streams.drain() {
                 task.abort();
@@ -400,7 +414,7 @@ impl Engine {
             } else {
                 mic.mute()
             }
-            audio_tap::set_mic_live(enabled);
+            audio_tap::set_mic_live(&s.hub, enabled);
             let _ = self.events.try_send(Event::MicChanged { enabled });
         }
     }
@@ -818,20 +832,30 @@ async fn on_transcript(
 ) {
     let by = from.identity().to_string();
     match serde_json::from_slice::<TranscriptMessage>(payload) {
-        Ok(TranscriptMessage::Lines { lines }) => {
+        Ok(TranscriptMessage::Lines { mut lines }) => {
+            // Only a Mac that transcribes the call speaks for it: anyone can
+            // send on the topic, and put words in anyone's mouth.
+            let trusted = transcribes(from)
+                || state
+                    .lock()
+                    .stopped_transcribing
+                    .get(&by)
+                    .is_some_and(|at| at.elapsed() < LAST_WORDS);
+            if !trusted {
+                tracing::warn!(%by, "transcript lines from a Mac that doesn't transcribe: dropped");
+                return;
+            }
             {
                 let mut s = state.lock();
-                for line in &lines {
+                for line in &mut lines {
+                    // Older apps leave it out: then it's the sender's.
+                    line.by.get_or_insert_with(|| by.clone());
                     remember(&mut s.transcribed, line);
                 }
             }
             for line in lines {
-                let _ = events
-                    .send(Event::TranscriptLine {
-                        by: by.clone(),
-                        line,
-                    })
-                    .await;
+                let by = line.by.clone().unwrap_or_default();
+                let _ = events.send(Event::TranscriptLine { by, line }).await;
             }
         }
         Ok(TranscriptMessage::Stop) => {
@@ -870,11 +894,20 @@ async fn start_transcribing(
         );
         s.transcribe_starting = true;
     }
-    if !options.handover
-        && let Some(p) = room.remote_participants().values().find(|p| transcribes(p))
-    {
-        anyhow::bail!("{} is already transcribing this call", p.name());
-    }
+    // Taking over: their claim, which must still stand once the model has
+    // loaded. They may stop meanwhile, or someone else start.
+    let taking_over = match &options.handover {
+        Some(from) => Some(
+            room.remote_participants()
+                .get(&ParticipantIdentity(from.clone()))
+                .and_then(claim)
+                .context("they stopped transcribing")?,
+        ),
+        None => {
+            nobody_transcribes(&room)?;
+            None
+        }
+    };
     let model = options.model;
     let stt = quipcall_stt::Options {
         model: models::path(model, &options.dir),
@@ -896,6 +929,7 @@ async fn start_transcribing(
                 .map_or(0, |d| d.as_millis() as u64),
             text: line.text,
             done: line.done,
+            by: Some(by.clone()),
         };
         let _ = outgoing.send(line.clone());
         let _ = lines.try_send(Event::TranscriptLine {
@@ -918,6 +952,11 @@ async fn start_transcribing(
     let transcriber =
         tokio::task::spawn_blocking(move || quipcall_stt::Transcriber::start(stt, on_line))
             .await??;
+    // Loading takes seconds: is it still yours to start?
+    if let Err(e) = may_start(state, &room, taking_over.as_ref()) {
+        let _ = tokio::task::spawn_blocking(move || transcriber.stop()).await;
+        return Err(e);
+    }
     // Everyone sees it before a single word is heard. Later than every
     // claim you know of, so taking over wins even if your clock is behind
     // theirs.
@@ -931,10 +970,10 @@ async fn start_transcribing(
         return Err(e.context("couldn't let the others know, so nothing is transcribed"));
     }
     let transcribing = transcribe::Transcribing::start(listen(state, handle), transcriber, you);
-    // The call may have ended while the model loaded.
+    // The call may have ended while everyone was told.
     let stale = {
         let mut s = state.lock();
-        if s.room.as_ref().is_some_and(|r| Arc::ptr_eq(r, &room)) {
+        if is_current(&s, &room) {
             s.transcribing = Some(transcribing);
             None
         } else {
@@ -948,33 +987,53 @@ async fn start_transcribing(
     Ok(())
 }
 
-/// A listener; remote microphones start decoding for it.
+/// Whether your Mac may still start transcribing, now its model has loaded:
+/// the call goes on, and whoever you take over from (`taking_over`, their
+/// claim) still transcribes, with nobody newer; or nobody does.
+fn may_start(
+    state: &Mutex<State>,
+    room: &Arc<Room>,
+    taking_over: Option<&(u64, String)>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(is_current(&state.lock(), room), "call ended");
+    match taking_over {
+        Some(theirs) => anyhow::ensure!(
+            newest_claim(room).as_ref() == Some(theirs),
+            "the transcript stopped or moved on while your Mac got ready"
+        ),
+        None => nobody_transcribes(room)?,
+    }
+    Ok(())
+}
+
+/// A listener to this call; remote microphones start decoding for it.
 fn listen(state: &Arc<Mutex<State>>, handle: &tokio::runtime::Handle) -> Listener {
     let weak = Arc::downgrade(state);
-    let listener = audio_tap::listen(move || {
+    let mut s = state.lock();
+    let s = &mut *s;
+    let listener = s.hub.listen(move || {
         if let Some(state) = weak.upgrade() {
             let mut s = state.lock();
             // Someone may have started listening again meanwhile.
-            if !audio_tap::listening() {
+            if !s.hub.listening() {
                 for (_, task) in s.mic_streams.drain() {
                     task.abort();
                 }
             }
         }
     });
-    let mut s = state.lock();
-    let s = &mut *s;
     for (key, track) in &s.mics {
         if !s.mic_streams.contains_key(key) {
-            let task = handle.spawn(pump_mic(key.participant.clone(), track.clone()));
-            s.mic_streams.insert(key.clone(), task);
+            let pump = pump_mic(key.participant.clone(), track.clone(), s.hub.clone());
+            s.mic_streams.insert(key.clone(), handle.spawn(pump));
         }
     }
     listener
 }
 
-/// One remote microphone, decoded at 48 kHz mono, to everyone listening.
-async fn pump_mic(identity: String, track: RemoteAudioTrack) {
+/// One remote microphone, decoded at 48 kHz mono, to everyone listening in
+/// its call.
+async fn pump_mic(identity: String, track: RemoteAudioTrack, hub: Arc<audio_tap::Hub>) {
     use livekit::webrtc::audio_stream::native::{NativeAudioStream, NativeAudioStreamOptions};
     // Two seconds of queue: the decoder never waits for us.
     let mut stream = NativeAudioStream::with_options(
@@ -988,7 +1047,7 @@ async fn pump_mic(identity: String, track: RemoteAudioTrack) {
     let speaker = Speaker::Remote(identity);
     while let Some(frame) = stream.next().await {
         let samples = frame.data.iter().map(|&s| s as f32 / 32768.0).collect();
-        audio_tap::send(
+        hub.send(
             VoiceFrame {
                 speaker: speaker.clone(),
                 samples,
@@ -1046,7 +1105,19 @@ async fn start_recording(
     set_attribute(&room, RECORDING, kind)
         .await
         .context("couldn't let the others know, so nothing is recorded")?;
-    let screen = match capture_for_recording(screen).await {
+    // Nothing is captured for a call that's over: nobody would see it.
+    let still = || -> anyhow::Result<()> {
+        anyhow::ensure!(is_current(&state.lock(), &room), "call ended");
+        Ok(())
+    };
+    let screen = match async {
+        still()?;
+        let screen = capture_for_recording(screen).await?;
+        still()?;
+        Ok(screen)
+    }
+    .await
+    {
         Ok(screen) => screen,
         Err(e) => {
             let _ = set_attribute(&room, RECORDING, "").await;
@@ -1097,7 +1168,7 @@ async fn start_recording(
     // The call may have ended while the file was being created.
     let stale = {
         let mut s = state.lock();
-        if s.room.as_ref().is_some_and(|r| Arc::ptr_eq(r, &room)) {
+        if is_current(&s, &room) {
             s.recorder = Some(recorder);
             None
         } else {
@@ -1120,6 +1191,11 @@ async fn set_attribute(room: &Room, key: &str, value: &str) -> anyhow::Result<()
     Ok(())
 }
 
+/// Whether `room` is still the call: not left, not lost.
+fn is_current(s: &State, room: &Arc<Room>) -> bool {
+    s.room.as_ref().is_some_and(|r| Arc::ptr_eq(r, room))
+}
+
 /// Whether `participant`'s Mac transcribes the call.
 fn transcribes(participant: &RemoteParticipant) -> bool {
     participant
@@ -1136,23 +1212,35 @@ fn parse_transcribing(value: &str) -> (&str, u64) {
     }
 }
 
-/// The newest [`TRANSCRIBING`] claim among the others: when, and whose.
-fn newest_claim(room: &Room) -> Option<(u64, String)> {
-    room.remote_participants()
-        .values()
-        .filter_map(|p| {
-            let attributes = p.attributes();
-            let value = attributes.get(TRANSCRIBING).filter(|v| !v.is_empty())?;
-            Some((parse_transcribing(value).1, p.identity().to_string()))
-        })
-        .max()
+/// `participant`'s [`TRANSCRIBING`] claim, if their Mac transcribes: when,
+/// and whose.
+fn claim(participant: &RemoteParticipant) -> Option<(u64, String)> {
+    let attributes = participant.attributes();
+    let value = attributes.get(TRANSCRIBING).filter(|v| !v.is_empty())?;
+    Some((
+        parse_transcribing(value).1,
+        participant.identity().to_string(),
+    ))
 }
 
-/// A final line, kept for whoever joins later: once, however it came.
+/// The newest [`TRANSCRIBING`] claim among the others.
+fn newest_claim(room: &Room) -> Option<(u64, String)> {
+    room.remote_participants().values().filter_map(claim).max()
+}
+
+/// One transcriber per call, unless it hands over.
+fn nobody_transcribes(room: &Room) -> anyhow::Result<()> {
+    match room.remote_participants().values().find(|p| transcribes(p)) {
+        Some(p) => anyhow::bail!("{} is already transcribing this call", p.name()),
+        None => Ok(()),
+    }
+}
+
+/// A final line, kept for whoever joins later: once, however it came (from
+/// the Mac that transcribed it, or relayed by the next one).
 fn remember(lines: &mut Vec<TranscriptLine>, line: &TranscriptLine) {
-    let same =
-        |l: &&TranscriptLine| l.id == line.id && l.speaker == line.speaker && l.at_ms == line.at_ms;
-    if line.done && !line.text.is_empty() && !lines.iter().rev().any(|l| same(&l)) {
+    let same = |l: &TranscriptLine| l.by == line.by && l.id == line.id;
+    if line.done && !line.text.is_empty() && !lines.iter().rev().any(same) {
         lines.push(line.clone());
     }
 }
@@ -1412,9 +1500,18 @@ async fn connect(
                 .await
             {
                 Ok(_) => {
-                    state.lock().mic = Some(mic);
-                    audio_tap::set_mic_live(true);
-                    let _ = events.send(Event::MicChanged { enabled: true }).await;
+                    let live = {
+                        let mut s = state.lock();
+                        let live = is_current(&s, &room);
+                        if live {
+                            s.mic = Some(mic);
+                            audio_tap::set_mic_live(&s.hub, true);
+                        }
+                        live
+                    };
+                    if live {
+                        let _ = events.send(Event::MicChanged { enabled: true }).await;
+                    }
                 }
                 Err(e) => {
                     let _ = events.send(Event::Error(format!("microphone: {e}"))).await;
@@ -1490,6 +1587,18 @@ async fn connect(
                     });
                 }
             }
+            // Their last lines may still come.
+            RoomEvent::ParticipantAttributesChanged {
+                participant: Participant::Remote(p),
+                changed_attributes,
+            } if changed_attributes
+                .get(TRANSCRIBING)
+                .is_some_and(String::is_empty) =>
+            {
+                let mut s = state.lock();
+                s.stopped_transcribing
+                    .insert(p.identity().to_string(), Instant::now());
+            }
             // Someone joining while your Mac transcribes gets what was said.
             RoomEvent::ParticipantConnected(p) => {
                 let history = {
@@ -1518,10 +1627,14 @@ async fn connect(
     }
     // The call ended without you leaving (the server let you go, or the
     // connection gave up): nobody sees you record any more, so stop, and
-    // keep what was recorded, as leaving would.
+    // keep what was recorded, as leaving would. Whatever was still starting
+    // sees the call is gone, and stops too.
     let (recorder, transcribing) = {
         let mut s = state.lock();
-        if s.room.as_ref().is_some_and(|r| Arc::ptr_eq(r, &room)) {
+        if is_current(&s, &room) {
+            s.room = None;
+            s.mic = None;
+            audio_tap::set_mic_live(&s.hub, false);
             (s.recorder.take(), s.transcribing.take())
         } else {
             (None, None)
@@ -1581,9 +1694,9 @@ fn track_publications(state: &Mutex<State>, event: &RoomEvent) {
                 sid: track.sid().to_string(),
             };
             let mut s = state.lock();
-            if audio_tap::listening() && !s.mic_streams.contains_key(&key) {
-                let task = tokio::spawn(pump_mic(key.participant.clone(), track.clone()));
-                s.mic_streams.insert(key.clone(), task);
+            if s.hub.listening() && !s.mic_streams.contains_key(&key) {
+                let pump = pump_mic(key.participant.clone(), track.clone(), s.hub.clone());
+                s.mic_streams.insert(key.clone(), tokio::spawn(pump));
             }
             s.mics.insert(key, track.clone());
         }
@@ -1707,24 +1820,50 @@ mod tests {
     }
 
     /// The history someone joining gets: final lines, each once, however
-    /// they came (yours, a transcriber's before a handover, its history).
+    /// they came (yours, a transcriber's before a handover, its history
+    /// relayed by the next), and known by the Mac that transcribed them.
     #[test]
     fn history_keeps_each_final_line_once() {
-        let line = |id, text: &str, done| TranscriptLine {
+        let line = |by: &str, id, text: &str, done| TranscriptLine {
             id,
             speaker: "anna".into(),
             at_ms: 1000 + id,
             text: text.into(),
             done,
+            by: Some(by.into()),
         };
         let mut kept = Vec::new();
-        remember(&mut kept, &line(1, "Hel", false));
-        remember(&mut kept, &line(1, "Hello", true));
-        remember(&mut kept, &line(1, "Hello", true));
-        remember(&mut kept, &line(2, "", true));
-        remember(&mut kept, &line(3, "Bye", true));
+        remember(&mut kept, &line("a", 1, "Hel", false));
+        remember(&mut kept, &line("a", 1, "Hello", true));
+        // Again, in history from the Mac that took over.
+        remember(&mut kept, &line("a", 1, "Hello", true));
+        remember(&mut kept, &line("a", 2, "", true));
+        // That Mac's own line, with the same number.
+        remember(&mut kept, &line("b", 1, "Bye", true));
         let texts: Vec<&str> = kept.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(texts, ["Hello", "Bye"]);
+    }
+
+    /// You left a call whose recording is still being finished, and joined
+    /// another: the old recording hears nothing of the new call, and the
+    /// new call's voices aren't decoded for it.
+    #[test]
+    fn a_call_still_finishing_hears_nothing_of_the_next() {
+        let _serial = audio_tap::tests::SERIAL.lock();
+        let (old, _events) = Engine::new().unwrap();
+        let (new, _events) = Engine::new().unwrap();
+        let finishing = old.listen();
+        assert!(!new.state.lock().hub.listening());
+        audio_tap::set_mic_live(&new.state.lock().hub, true);
+        let listening = new.listen();
+        audio_tap::tests::speak();
+        assert!(finishing.frames.try_recv().is_err());
+        assert_eq!(listening.frames.try_recv().unwrap().speaker, Speaker::Local);
+        // Joining again on the same engine starts afresh too.
+        new.disconnect();
+        assert!(!new.state.lock().hub.listening());
+        audio_tap::tests::speak();
+        assert!(listening.frames.try_recv().is_err());
     }
 
     /// Goodbyes already said don't pile up, even if nothing awaited them.

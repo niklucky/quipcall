@@ -63,8 +63,8 @@ pub enum TranscriptMessage {
 /// What someone said in a call, or a draft of it while they talk.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptLine {
-    /// The utterance, per transcriber. A later line with the same id
-    /// replaces this one; a final one with no text takes a draft back.
+    /// The utterance, per transcriber (see `by`). A later line with the same
+    /// id replaces this one; a final one with no text takes a draft back.
     pub id: u64,
     /// The speaker's identity.
     pub speaker: String,
@@ -73,6 +73,11 @@ pub struct TranscriptLine {
     pub text: String,
     /// Final; a draft until then.
     pub done: bool,
+    /// The Mac that transcribed it (an identity): with `id`, what a line is
+    /// known by, whoever relays it (history after a handover). Older apps
+    /// leave it out; then it's the sender's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
 }
 
 #[cfg(test)]
@@ -88,6 +93,7 @@ mod tests {
                 at_ms: 1_762_700_000_000,
                 text: "Привет".into(),
                 done: true,
+                by: Some("boris-9a0b".into()),
             }],
         };
         let json = serde_json::to_string(&message).unwrap();
@@ -99,6 +105,12 @@ mod tests {
             serde_json::from_str::<TranscriptMessage>(&json).unwrap(),
             message
         );
+        // From an app that doesn't say who transcribed it.
+        let older = r#"{"type":"lines","lines":[{"id":7,"speaker":"anna","at_ms":1,"text":"Hi","done":true}]}"#;
+        let TranscriptMessage::Lines { lines } = serde_json::from_str(older).unwrap() else {
+            panic!("lines");
+        };
+        assert_eq!(lines[0].by, None);
         assert_eq!(
             serde_json::from_str::<TranscriptMessage>(r#"{"type":"stop"}"#).unwrap(),
             TranscriptMessage::Stop

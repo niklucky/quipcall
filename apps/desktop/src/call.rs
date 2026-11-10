@@ -187,8 +187,9 @@ pub enum Preparing {
     Loading,
 }
 
-/// Someone is recording the call. There's one recording per call, and only
-/// whoever started it can stop it.
+/// Someone is recording the call. There's one recording per call (two only
+/// if two people press Record at once), and only whoever started it can
+/// stop it.
 #[derive(Clone, Debug)]
 pub struct Recording {
     /// The recorder's identity; yours when `file` is set.
@@ -262,8 +263,12 @@ pub struct Call {
     picker: Option<WindowHandle<SharePicker>>,
     /// When the call link was last copied (for the "copied" tick).
     pub copied_at: Option<Instant>,
-    /// Whoever records the call, you or someone else.
+    /// The recording the widget shows: yours, or the first of the others'.
     pub recording: Option<Recording>,
+    /// Everyone else recording the call, in the order they started. Two
+    /// Macs that press Record at once both record: the notice stays while
+    /// any of them does.
+    others_recording: Vec<Recording>,
     /// Asked to record; the engine hasn't answered yet.
     record_starting: bool,
     /// Your recordings in this call, saved or still going.
@@ -277,8 +282,8 @@ pub struct Call {
     pub transcript_open: bool,
     /// Asked to transcribe, or to take over: waits for your answer.
     pub prompt: Option<Prompt>,
-    /// The next start takes over from whoever transcribes (they asked).
-    handover: bool,
+    /// The next start takes over from this Mac (an identity; they asked).
+    handover: Option<String>,
     /// Left while your Mac transcribed: the call goes into history once its
     /// last words are in. How long it lasted, and a timeout in case they
     /// never come.
@@ -397,6 +402,7 @@ impl Call {
             picker: None,
             copied_at: None,
             recording: None,
+            others_recording: Vec::new(),
             record_starting: false,
             recordings: Vec::new(),
             transcription: None,
@@ -404,7 +410,7 @@ impl Call {
             transcript,
             transcript_open: false,
             prompt: None,
-            handover: false,
+            handover: None,
             ending: None,
             flash: None,
             mode: if args.regular {
@@ -801,7 +807,7 @@ impl Call {
         match prompt.kind {
             PromptKind::Asked { handover } => {
                 self.engine.answer_transcript_ask(&prompt.identity, true);
-                self.handover = handover;
+                self.handover = handover.then_some(prompt.identity);
                 self.start_transcribing(cx);
             }
             PromptKind::TakeOver => self.start_transcribing(cx),
@@ -835,7 +841,7 @@ impl Call {
 
     pub fn start_transcribing(&mut self, cx: &mut Context<Self>) {
         // Taking over from someone who asked: they transcribe until you do.
-        let taking_over = self.handover
+        let taking_over = self.handover.is_some()
             && self.preparing.is_none()
             && self.status == Status::Connected
             && self.transcription.as_ref().is_some_and(|t| !t.mine);
@@ -1006,6 +1012,14 @@ impl Call {
         }
     }
 
+    /// The widget shows your recording while you record, otherwise the
+    /// first of the others' still going.
+    fn show_recording(&mut self) {
+        if self.recording.as_ref().is_none_or(|r| !r.is_mine()) {
+            self.recording = self.others_recording.first().cloned();
+        }
+    }
+
     /// Remember your recording for the call's history.
     fn keep_recording(
         &mut self,
@@ -1108,7 +1122,13 @@ impl Call {
                     self.log(name, Happened::Left, cx);
                 }
                 // Their recording stops with them; it stays on their Mac.
-                if let Some(r) = self.recording.take_if(|r| r.identity == identity) {
+                if let Some(ix) = self
+                    .others_recording
+                    .iter()
+                    .position(|r| r.identity == identity)
+                {
+                    let r = self.others_recording.remove(ix);
+                    self.show_recording();
                     let first = first_name(&r.name).to_owned();
                     self.log(r.name, Happened::StoppedRecording, cx);
                     self.flash(
@@ -1290,6 +1310,7 @@ impl Call {
                 if let Some(recording) = self.recording.take_if(|r| r.is_mine()) {
                     self.keep_recording(&recording, saved.duration, cx);
                 }
+                self.show_recording();
                 // Short: the widget is narrow. Length and size are in Home.
                 tracing::info!(
                     duration = %crate::capsule::clock(saved.duration),
@@ -1312,6 +1333,7 @@ impl Call {
                     let duration = recording.since.elapsed();
                     self.keep_recording(&recording, duration, cx);
                 }
+                self.show_recording();
                 self.fail(format!("recording: {message}"), cx);
             }
             Event::ParticipantRecording {
@@ -1323,36 +1345,38 @@ impl Call {
                     .member(&identity, cx)
                     .map(|m| m.read(cx).name.clone())
                     .unwrap_or_else(|| identity.clone());
-                if recording {
-                    // Two people pressing Record at once both record; you keep
-                    // seeing your own.
-                    if self.recording.as_ref().is_none_or(|r| !r.is_mine()) {
-                        self.recording = Some(Recording {
-                            identity,
-                            name: name.clone(),
-                            since: Instant::now(),
-                            file: None,
-                            screen,
-                            at: self.elapsed().unwrap_or_default(),
-                        });
-                        self.log(name.clone(), Happened::StartedRecording, cx);
-                        let what = if screen {
-                            "the call and their screen"
-                        } else {
-                            "this call"
-                        };
-                        self.flash(
-                            Notice {
-                                text: format!("{} started recording {what}", first_name(&name)),
-                                error: false,
-                                action: None,
-                            },
-                            cx,
-                        );
-                    }
-                } else if self.recording.take_if(|r| r.identity == identity).is_some() {
+                let known = self
+                    .others_recording
+                    .iter()
+                    .position(|r| r.identity == identity);
+                if recording && known.is_none() {
+                    self.others_recording.push(Recording {
+                        identity,
+                        name: name.clone(),
+                        since: Instant::now(),
+                        file: None,
+                        screen,
+                        at: self.elapsed().unwrap_or_default(),
+                    });
+                    self.log(name.clone(), Happened::StartedRecording, cx);
+                    let what = if screen {
+                        "the call and their screen"
+                    } else {
+                        "this call"
+                    };
+                    self.flash(
+                        Notice {
+                            text: format!("{} started recording {what}", first_name(&name)),
+                            error: false,
+                            action: None,
+                        },
+                        cx,
+                    );
+                } else if !recording && let Some(ix) = known {
+                    self.others_recording.remove(ix);
                     self.log(name, Happened::StoppedRecording, cx);
                 }
+                self.show_recording();
             }
             Event::TranscriptionStarted => {
                 self.preparing = None;
@@ -1502,7 +1526,7 @@ impl Call {
             }
             Event::TranscriptionFailed(message) => {
                 self.preparing = None;
-                self.handover = false;
+                self.handover = None;
                 self.fail_with(
                     format!("transcript: {message}"),
                     Some(NoticeAction::Settings),

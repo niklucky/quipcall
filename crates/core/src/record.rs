@@ -296,10 +296,12 @@ fn run(
         writer.write(&chunk)?;
     }
     drop(listener);
+    // The mix first: the voices' files may still be catching up.
+    let bytes = writer.finish();
     if let Some(files) = files {
         files.finish();
     }
-    let bytes = writer.finish()?;
+    let bytes = bytes?;
     Ok(Saved {
         voices: voices_dir.filter(|d| d.exists()),
         path,
@@ -384,17 +386,29 @@ impl Mixer {
     }
 }
 
-/// A file per voice, made when the voice is first heard.
+/// Mixed frames the voices' files may fall behind by: 10 s. A voice first
+/// heard late starts with silence, about 3 s to encode per hour in; frames
+/// that would wait longer are dropped for the voices' files (silence in
+/// their place) rather than pile up in memory or hold up saving the mix.
+const VOICES_QUEUE: usize = 1000;
+
+/// A second of silence.
+static SILENCE: [f32; SAMPLE_RATE as usize] = [0.0; SAMPLE_RATE as usize];
+
 /// [`VoiceFiles`] on a thread of their own: a voice first heard an hour in
 /// starts with an hour of silence, and encoding that mustn't hold up the mix.
 struct VoiceThread {
-    frames: std::sync::mpsc::Sender<(HashMap<Speaker, [f32; FRAME]>, u64)>,
+    frames: std::sync::mpsc::SyncSender<(HashMap<Speaker, [f32; FRAME]>, u64)>,
+    /// Frames the files missed since it was last said.
+    dropped: u64,
+    /// The last frame, if the files missed it: they're made as long.
+    missed_last: Option<u64>,
     thread: JoinHandle<()>,
 }
 
 impl VoiceThread {
     fn start(voices: Voices) -> anyhow::Result<Self> {
-        let (frames, from_mix) = std::sync::mpsc::channel();
+        let (frames, from_mix) = std::sync::mpsc::sync_channel(VOICES_QUEUE);
         let thread = std::thread::Builder::new()
             .name("quipcall-voices".into())
             .spawn(move || {
@@ -405,16 +419,45 @@ impl VoiceThread {
                 }
                 files.finish();
             })?;
-        Ok(Self { frames, thread })
+        Ok(Self {
+            frames,
+            dropped: 0,
+            missed_last: None,
+            thread,
+        })
     }
 
-    /// Frame `at` of the mix, for every voice; `each` is emptied.
+    /// Frame `at` of the mix, for every voice; `each` is emptied. Never
+    /// waits: if the files are [`VOICES_QUEUE`] behind, they miss it.
     fn add(&mut self, each: &mut HashMap<Speaker, [f32; FRAME]>, at: u64) {
-        let _ = self.frames.send((std::mem::take(each), at));
+        if self.frames.try_send((std::mem::take(each), at)).is_err() {
+            self.dropped += 1;
+            self.missed_last = Some(at);
+        } else {
+            self.missed_last = None;
+            if self.dropped > 0 {
+                self.say_dropped();
+            }
+        }
+    }
+
+    fn say_dropped(&mut self) {
+        tracing::warn!(
+            frames = self.dropped,
+            "the voices' files fell behind the mix: silence in their place"
+        );
+        self.dropped = 0;
     }
 
     /// Once everything sent is written.
-    fn finish(self) {
+    fn finish(mut self) {
+        if self.dropped > 0 {
+            self.say_dropped();
+        }
+        // Every file as long as the mix, even if it missed the end.
+        if let Some(at) = self.missed_last {
+            let _ = self.frames.send((HashMap::new(), at));
+        }
         drop(self.frames);
         if self.thread.join().is_err() {
             tracing::warn!("the voices' files: their thread panicked");
@@ -422,12 +465,14 @@ impl VoiceThread {
     }
 }
 
+/// A file per voice, made when the voice is first heard.
 struct VoiceFiles {
     voices: Voices,
-    files: HashMap<Speaker, (Writer, Vec<f32>)>,
-    /// Voices whose file couldn't be made: not tried again.
+    files: HashMap<Speaker, VoiceFile>,
+    /// Voices whose file couldn't be made, or broke: not tried again.
     failed: std::collections::HashSet<Speaker>,
-    names: Vec<String>,
+    /// Names given, lowercased: Mac volumes usually ignore case.
+    names: std::collections::HashSet<String>,
 }
 
 impl VoiceFiles {
@@ -436,7 +481,7 @@ impl VoiceFiles {
             voices,
             files: HashMap::new(),
             failed: Default::default(),
-            names: Vec::new(),
+            names: Default::default(),
         }
     }
 
@@ -449,7 +494,7 @@ impl VoiceFiles {
             .cloned()
             .collect();
         for speaker in new {
-            match self.create(&speaker, at) {
+            match self.create(&speaker) {
                 Some(file) => {
                     self.files.insert(speaker, file);
                 }
@@ -458,23 +503,25 @@ impl VoiceFiles {
                 }
             }
         }
-        for (speaker, (writer, chunk)) in &mut self.files {
-            match each.get(speaker) {
-                Some(frame) => chunk.extend_from_slice(frame),
-                None => chunk.extend(std::iter::repeat_n(0.0, FRAME)),
+        let mut broken = Vec::new();
+        for (speaker, file) in &mut self.files {
+            if let Err(e) = file.add(at, each.get(speaker)) {
+                tracing::warn!("a voice's file: {e:#}");
+                broken.push(speaker.clone());
             }
-            if chunk.len() >= CHUNK {
-                if let Err(e) = writer.write(chunk) {
-                    tracing::warn!("a voice's file: {e:#}");
-                }
-                chunk.clear();
+        }
+        for speaker in broken {
+            if let Some(file) = self.files.remove(&speaker) {
+                let _ = file.finish();
             }
+            self.failed.insert(speaker);
         }
         each.clear();
     }
 
-    /// A file named after the voice, starting with `at` frames of silence.
-    fn create(&mut self, speaker: &Speaker, at: u64) -> Option<(Writer, Vec<f32>)> {
+    /// A file named after the voice, under a name nothing else in the folder
+    /// has, whatever the case ("Anna" and "anna" are one file on most Macs).
+    fn create(&mut self, speaker: &Speaker) -> Option<VoiceFile> {
         let name: String = (self.voices.name_of)(speaker)
             .chars()
             .map(|c| {
@@ -485,34 +532,30 @@ impl VoiceFiles {
                 }
             })
             .collect();
-        let name = (1..)
+        if let Err(e) = std::fs::create_dir_all(&self.voices.dir) {
+            tracing::warn!("the voices' folder: {e}");
+            return None;
+        }
+        // The disk has the last word: it knows how its names compare.
+        let (name, path) = (1..)
             .map(|n| {
-                if n == 1 {
+                let name = if n == 1 {
                     name.clone()
                 } else {
                     format!("{name} {n}")
-                }
+                };
+                let path = self.voices.dir.join(format!("{name}.m4a"));
+                (name, path)
             })
-            .find(|n| !self.names.contains(n))
+            .find(|(name, path)| !self.names.contains(&name.to_lowercase()) && !path.exists())
             .expect("unbounded");
-        self.names.push(name.clone());
-        let result = std::fs::create_dir_all(&self.voices.dir)
-            .map_err(anyhow::Error::from)
-            .and_then(|_| Writer::create(&self.voices.dir.join(format!("{name}.m4a")), None));
-        match result {
-            Ok(mut writer) => {
-                let silence = vec![0.0f32; CHUNK];
-                let mut left = at as usize * FRAME;
-                while left > 0 {
-                    let n = left.min(CHUNK);
-                    if let Err(e) = writer.write(&silence[..n]) {
-                        tracing::warn!("a voice's file: {e:#}");
-                        break;
-                    }
-                    left -= n;
-                }
-                Some((writer, Vec::with_capacity(CHUNK)))
-            }
+        self.names.insert(name.to_lowercase());
+        match Writer::create(&path, None) {
+            Ok(writer) => Some(VoiceFile {
+                writer,
+                chunk: Vec::with_capacity(CHUNK),
+                next: 0,
+            }),
             Err(e) => {
                 tracing::warn!("a voice's file for {name}: {e:#}");
                 None
@@ -521,14 +564,65 @@ impl VoiceFiles {
     }
 
     fn finish(self) {
-        for (_, (mut writer, chunk)) in self.files {
-            if !chunk.is_empty() {
-                let _ = writer.write(&chunk);
-            }
-            if let Err(e) = writer.finish() {
+        for (_, file) in self.files {
+            if let Err(e) = file.finish() {
                 tracing::warn!("a voice's file: {e:#}");
             }
         }
+    }
+}
+
+/// One voice's file. It lines up with the mix: silence wherever the voice
+/// was quiet, or wasn't heard yet.
+struct VoiceFile {
+    writer: Writer,
+    chunk: Vec<f32>,
+    /// The frame of the mix that comes next.
+    next: u64,
+}
+
+impl VoiceFile {
+    /// Frame `at` of the mix: theirs, or silence. Frames missed before it
+    /// (the voice is new, or the files fell behind) are silence too.
+    fn add(&mut self, at: u64, frame: Option<&[f32; FRAME]>) -> anyhow::Result<()> {
+        if at < self.next {
+            return Ok(());
+        }
+        if at > self.next {
+            self.silence(at - self.next)?;
+        }
+        self.chunk
+            .extend_from_slice(frame.map_or(&SILENCE[..FRAME], |f| &f[..]));
+        self.next = at + 1;
+        if self.chunk.len() >= CHUNK {
+            self.writer.write(&self.chunk)?;
+            self.chunk.clear();
+        }
+        Ok(())
+    }
+
+    /// `frames` of silence, a second at a time: four times quicker to
+    /// encode than in chunks.
+    fn silence(&mut self, frames: u64) -> anyhow::Result<()> {
+        if !self.chunk.is_empty() {
+            self.writer.write(&self.chunk)?;
+            self.chunk.clear();
+        }
+        let mut left = frames as usize * FRAME;
+        while left > 0 {
+            let n = left.min(SILENCE.len());
+            self.writer.write(&SILENCE[..n])?;
+            left -= n;
+        }
+        self.next += frames;
+        Ok(())
+    }
+
+    fn finish(mut self) -> anyhow::Result<()> {
+        if !self.chunk.is_empty() {
+            self.writer.write(&self.chunk)?;
+        }
+        self.writer.finish().map(|_| ())
     }
 }
 
@@ -576,23 +670,45 @@ mod tests {
         assert!((each[&anna][0] - 0.5).abs() < 1e-6);
     }
 
+    /// How long a file is, by `afinfo`.
+    #[cfg(target_os = "macos")]
+    fn seconds(path: &Path) -> f32 {
+        let info = std::process::Command::new("afinfo")
+            .arg(path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&info.stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix("estimated duration: "))
+            .and_then(|l| l.split_whitespace().next()?.parse().ok())
+            .unwrap_or_else(|| panic!("afinfo reads {}", path.display()))
+    }
+
+    fn voices_in(
+        dir: &Path,
+        name_of: impl Fn(&Speaker) -> String + Send + Sync + 'static,
+    ) -> Voices {
+        let _ = std::fs::remove_dir_all(dir);
+        Voices {
+            dir: dir.to_owned(),
+            name_of: Arc::new(name_of),
+        }
+    }
+
     /// Someone first heard 30 s in: their file starts with 30 s of silence,
     /// written off the mixer's thread, so handing their frames over is
-    /// instant however long the silence.
+    /// instant however long the silence. More frames than the files may fall
+    /// behind by still never wait; any they miss are silence, in place.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_late_voice_lines_up_without_holding_up_the_mix() {
         let dir = std::env::temp_dir().join(format!("quipcall-voices-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
         let anna = Speaker::Remote("anna".into());
-        let voices = Voices {
-            dir: dir.clone(),
-            name_of: Arc::new(|_| "Anna".to_owned()),
-        };
-        let mut thread = VoiceThread::start(voices).unwrap();
+        let mut thread = VoiceThread::start(voices_in(&dir, |_| "Anna".to_owned())).unwrap();
         let begun = Instant::now();
         let late = 3_000; // frames: 30 s
-        for at in late..late + 100 {
+        let count = VOICES_QUEUE as u64 + 100;
+        for at in late..late + count {
             let mut each = HashMap::from([(anna.clone(), [0.25f32; FRAME])]);
             thread.add(&mut each, at);
             assert!(each.is_empty());
@@ -603,16 +719,39 @@ mod tests {
             begun.elapsed()
         );
         thread.finish();
-        let info = std::process::Command::new("afinfo")
-            .arg(dir.join("Anna.m4a"))
-            .output()
-            .unwrap();
-        let secs: f32 = String::from_utf8_lossy(&info.stdout)
-            .lines()
-            .find_map(|l| l.strip_prefix("estimated duration: "))
-            .and_then(|l| l.split_whitespace().next()?.parse().ok())
-            .expect("afinfo reads it");
-        assert!((secs - 31.0).abs() < 0.1, "{secs} s");
+        let secs = seconds(&dir.join("Anna.m4a"));
+        let expected = (late + count) as f32 / 100.0;
+        assert!((secs - expected).abs() < 0.1, "{secs} s, not {expected}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// "Anna" and "anna" would be one file on a Mac volume: each gets one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn voices_whose_names_differ_only_in_case_get_a_file_each() {
+        let dir = std::env::temp_dir().join(format!("quipcall-names-{}", std::process::id()));
+        let mut files = VoiceFiles::new(voices_in(&dir, |speaker| match speaker {
+            Speaker::Local => "Anna".to_owned(),
+            Speaker::Remote(_) => "anna".to_owned(),
+        }));
+        for at in 0..100 {
+            let mut each = HashMap::from([
+                (Speaker::Local, [0.25f32; FRAME]),
+                (Speaker::Remote("anna-2".into()), [0.5f32; FRAME]),
+            ]);
+            files.add(&mut each, at);
+        }
+        assert!(files.failed.is_empty());
+        files.finish();
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 2, "{names:?}");
+        for name in &names {
+            assert!((seconds(&dir.join(name)) - 1.0).abs() < 0.1, "{name}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
