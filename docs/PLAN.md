@@ -181,7 +181,7 @@ Started early (2026-11-03), ahead of Stages 3–6: there are no accounts yet, so
 
 **Done when:** a 1-hour mixed-language test call produces a transcript with correct speakers, handing off the transcriber role works, and a recording of the same call plays under its transcript in Home.
 
-*Status 2026-11-10: everything above is built and out (web deployed, Mac build 46). Checked on quipcall.com: a Mac transcribing a web participant in English and Russian, a late joiner getting the history, the web panel. Still to do with people: the 1-hour call with several real voices. Known: a line cut off by the transcriber leaving reaches everyone but the transcriber's own history.*
+*Status 2026-11-10: everything above is built and out (web deployed, Mac build 46). Checked on quipcall.com: a Mac transcribing a web participant in English and Russian, a late joiner getting the history, the web panel. Still to do with people: the 1-hour call with several real voices. A code review (Codex) then found and we fixed: a dropped connection leaving the recording running; two Macs starting at once both carrying on, or a handover losing to a clock that runs ahead; the history after a handover missing what came before it; the transcriber's own history missing the line cut off by leaving (verified: it's kept now); a stopped voice trial still opening the microphone; a whole `.part` download never finishing, and two models fetching the VAD at once; a failed encoder going on "recording"; an unmuted voice's first line dated before the mute.*
 
 ## Stage 10 — LLM summaries
 

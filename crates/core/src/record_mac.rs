@@ -184,6 +184,9 @@ impl MediaWriter {
             // SAFETY: a valid pixel buffer, appended to our own input.
             unsafe {
                 if !video.input.isReadyForMoreMediaData() {
+                    // Not ready because the writer failed: say so, or the
+                    // recording would go on "recording" nothing.
+                    anyhow::ensure!(!has_failed(&self.writer), failure(&self.writer));
                     video.skipped += 1;
                     return Ok(());
                 }
@@ -259,6 +262,8 @@ impl MediaWriter {
         // A real-time input is nearly always ready; give it a moment if not.
         let waited = std::time::Instant::now();
         while !unsafe { self.input.isReadyForMoreMediaData() } {
+            // A writer that failed is never ready again.
+            anyhow::ensure!(!unsafe { has_failed(&self.writer) }, failure(&self.writer));
             if waited.elapsed() > BACKPRESSURE {
                 tracing::warn!("recording: the encoder fell behind, skipping a chunk");
                 self.written += samples.len() as i64;
@@ -384,6 +389,12 @@ unsafe fn add_video(writer: &AVAssetWriter, format: VideoFormat) -> anyhow::Resu
         last: None,
         skipped: 0,
     })
+}
+
+/// The writer gave up (asynchronously, e.g. the disk filled up).
+unsafe fn has_failed(writer: &AVAssetWriter) -> bool {
+    let status = unsafe { writer.status() };
+    status == AVAssetWriterStatus::Failed || status == AVAssetWriterStatus::Cancelled
 }
 
 /// What AVAssetWriter says went wrong.

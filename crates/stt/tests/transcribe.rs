@@ -121,3 +121,49 @@ fn two_voices_in_order() {
         );
     }
 }
+
+#[test]
+#[ignore = "needs models: QUIPCALL_STT_MODELS=<dir>"]
+fn a_voice_back_from_mute_starts_afresh() {
+    let dir = PathBuf::from(std::env::var("QUIPCALL_STT_MODELS").expect("QUIPCALL_STT_MODELS"));
+    let tmp = std::env::temp_dir().join(format!("qc-stt-mute-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let first = say("Samantha", "Let's look at the numbers first.", &tmp);
+    let second = say("Samantha", "Sorry, I was muted. Can you hear me now?", &tmp);
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let lines: Arc<Mutex<Vec<Line>>> = Arc::default();
+    let transcriber = Transcriber::start(
+        Options {
+            model: dir.join(catalog::PARAKEET_V3.file),
+            vad: dir.join(catalog::VAD.file),
+            language: Some("en".into()),
+        },
+        {
+            let lines = lines.clone();
+            move |line| lines.lock().unwrap().push(line)
+        },
+    )
+    .expect("start");
+    let feed = |samples: &[f32]| {
+        for chunk in samples.chunks(480) {
+            transcriber.feed("alice", chunk.to_vec());
+            std::thread::sleep(Duration::from_micros(500));
+        }
+    };
+    // She talks, goes quiet, then mutes: nothing comes for a while.
+    feed(&[&first[..], &vec![0.0; 48_000]].concat());
+    std::thread::sleep(Duration::from_millis(1500));
+    // Unmuted, she talks straight away.
+    feed(&[&second[..], &vec![0.0; 48_000]].concat());
+    transcriber.stop();
+
+    let lines = lines.lock().unwrap();
+    let done: Vec<&Line> = lines.iter().filter(|l| l.done).collect();
+    assert_eq!(done.len(), 2, "{done:?}");
+    // Begun after the mute, not back when she went quiet.
+    // (Fed faster than real time: the first took ~0.1 s, the mute 1.5 s.)
+    let gap = done[1].start.saturating_sub(done[0].start);
+    assert!(gap >= Duration::from_millis(1400), "{gap:?}: {done:?}");
+    assert!(done[1].text.to_lowercase().contains("muted"), "{done:?}");
+}

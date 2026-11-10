@@ -277,7 +277,7 @@ impl Shell {
         self.quitting = true;
         let call = self.call()?;
         Some(call.update(cx, |call, cx| {
-            call.leave(cx);
+            call.leave_now(cx);
             call.closed()
         }))
     }

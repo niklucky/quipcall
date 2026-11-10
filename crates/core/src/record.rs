@@ -249,7 +249,7 @@ fn run(
     let start = Instant::now();
     let mut mixed: u64 = 0;
     let voices_dir = voices.as_ref().map(|v| v.dir.clone());
-    let mut files = voices.map(VoiceFiles::new);
+    let mut files = voices.map(VoiceThread::start).transpose()?;
     let mut each: HashMap<Speaker, [f32; FRAME]> = HashMap::new();
     loop {
         let stopping = stop.load(Ordering::Relaxed);
@@ -385,6 +385,43 @@ impl Mixer {
 }
 
 /// A file per voice, made when the voice is first heard.
+/// [`VoiceFiles`] on a thread of their own: a voice first heard an hour in
+/// starts with an hour of silence, and encoding that mustn't hold up the mix.
+struct VoiceThread {
+    frames: std::sync::mpsc::Sender<(HashMap<Speaker, [f32; FRAME]>, u64)>,
+    thread: JoinHandle<()>,
+}
+
+impl VoiceThread {
+    fn start(voices: Voices) -> anyhow::Result<Self> {
+        let (frames, from_mix) = std::sync::mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("quipcall-voices".into())
+            .spawn(move || {
+                // The writers stay on this thread (they aren't Send).
+                let mut files = VoiceFiles::new(voices);
+                while let Ok((mut each, at)) = from_mix.recv() {
+                    files.add(&mut each, at);
+                }
+                files.finish();
+            })?;
+        Ok(Self { frames, thread })
+    }
+
+    /// Frame `at` of the mix, for every voice; `each` is emptied.
+    fn add(&mut self, each: &mut HashMap<Speaker, [f32; FRAME]>, at: u64) {
+        let _ = self.frames.send((std::mem::take(each), at));
+    }
+
+    /// Once everything sent is written.
+    fn finish(self) {
+        drop(self.frames);
+        if self.thread.join().is_err() {
+            tracing::warn!("the voices' files: their thread panicked");
+        }
+    }
+}
+
 struct VoiceFiles {
     voices: Voices,
     files: HashMap<Speaker, (Writer, Vec<f32>)>,
@@ -537,6 +574,46 @@ mod tests {
         assert!((mix[0] - 0.75).abs() < 1e-6);
         assert!((each[&Speaker::Local][0] - 0.25).abs() < 1e-6);
         assert!((each[&anna][0] - 0.5).abs() < 1e-6);
+    }
+
+    /// Someone first heard 30 s in: their file starts with 30 s of silence,
+    /// written off the mixer's thread, so handing their frames over is
+    /// instant however long the silence.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_late_voice_lines_up_without_holding_up_the_mix() {
+        let dir = std::env::temp_dir().join(format!("quipcall-voices-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let anna = Speaker::Remote("anna".into());
+        let voices = Voices {
+            dir: dir.clone(),
+            name_of: Arc::new(|_| "Anna".to_owned()),
+        };
+        let mut thread = VoiceThread::start(voices).unwrap();
+        let begun = Instant::now();
+        let late = 3_000; // frames: 30 s
+        for at in late..late + 100 {
+            let mut each = HashMap::from([(anna.clone(), [0.25f32; FRAME])]);
+            thread.add(&mut each, at);
+            assert!(each.is_empty());
+        }
+        assert!(
+            begun.elapsed() < Duration::from_millis(100),
+            "{:?}",
+            begun.elapsed()
+        );
+        thread.finish();
+        let info = std::process::Command::new("afinfo")
+            .arg(dir.join("Anna.m4a"))
+            .output()
+            .unwrap();
+        let secs: f32 = String::from_utf8_lossy(&info.stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix("estimated duration: "))
+            .and_then(|l| l.split_whitespace().next()?.parse().ok())
+            .expect("afinfo reads it");
+        assert!((secs - 31.0).abs() < 0.1, "{secs} s");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

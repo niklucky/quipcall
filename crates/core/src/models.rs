@@ -69,11 +69,14 @@ pub fn download(info: &'static ModelInfo, dir: PathBuf) -> Download {
     std::thread::Builder::new()
         .name("model-download".into())
         .spawn(move || {
-            let result = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .context("runtime")
-                .and_then(|rt| rt.block_on(fetch_retrying(info, &dir, &stop, &tx)));
+            let result = match claim(info.file, &stop) {
+                Some(_claim) => tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .context("runtime")
+                    .and_then(|rt| rt.block_on(fetch_retrying(info, &dir, &stop, &tx))),
+                None => Err(anyhow::anyhow!("cancelled")),
+            };
             let last = match result {
                 Ok(path) => Progress::Done(path),
                 Err(_) if stop.load(Ordering::Relaxed) => Progress::Cancelled,
@@ -91,6 +94,35 @@ pub fn download(info: &'static ModelInfo, dir: PathBuf) -> Download {
         })
         .expect("download thread");
     Download { progress, cancel }
+}
+
+/// Files being fetched. One writer per `.part`: a second download of the
+/// same file (the VAD, which every model needs, or a restart right after a
+/// cancel, while the old thread winds down) waits for the first, then finds
+/// the file here or resumes it.
+static BUSY: parking_lot::Mutex<Vec<&'static str>> = parking_lot::Mutex::new(Vec::new());
+static FREED: parking_lot::Condvar = parking_lot::Condvar::new();
+
+struct Claim(&'static str);
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        BUSY.lock().retain(|f| *f != self.0);
+        FREED.notify_all();
+    }
+}
+
+/// Wait until nobody else fetches `file`; `None` if cancelled meanwhile.
+fn claim(file: &'static str, stop: &AtomicBool) -> Option<Claim> {
+    let mut busy = BUSY.lock();
+    while busy.contains(&file) {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        FREED.wait_for(&mut busy, Duration::from_millis(100));
+    }
+    busy.push(file);
+    Some(Claim(file))
 }
 
 /// Attempts at a download that keeps dropping.
@@ -158,6 +190,11 @@ async fn fetch(
         hash = Sha256::new();
         have = 0;
     }
+    // All of it came before (the app quit before checking it): asking for
+    // the bytes after the end would only get a 416.
+    if have == info.bytes {
+        return install(hash, info, &part, &done);
+    }
 
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
@@ -206,23 +243,74 @@ async fn fetch(
         "the download stopped at {have} of {} bytes",
         info.bytes
     );
+    let _ = tx.try_send(Progress::Bytes(have));
+    install(hash, info, &part, &done)
+}
+
+/// A whole `.part`, renamed into place if its checksum is the catalog's.
+fn install(hash: Sha256, info: &ModelInfo, part: &Path, done: &Path) -> anyhow::Result<PathBuf> {
     let sha = hash
         .finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     if sha != info.sha256 {
-        let _ = std::fs::remove_file(&part);
+        let _ = std::fs::remove_file(part);
         anyhow::bail!("the file is damaged (checksum {sha}); try again");
     }
-    std::fs::rename(&part, &done)?;
-    let _ = tx.try_send(Progress::Bytes(have));
-    Ok(done)
+    std::fs::rename(part, done)?;
+    Ok(done.to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A test file "hello", from a server that isn't there: a whole `.part`
+    /// must never need it.
+    static HELLO: ModelInfo = ModelInfo {
+        id: "hello",
+        name: "Hello",
+        by: "",
+        license: "",
+        about: "",
+        languages: &[],
+        file: "hello.bin",
+        url: "http://127.0.0.1:9/hello.bin",
+        bytes: 5,
+        sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    };
+
+    fn last(d: Download) -> Progress {
+        loop {
+            match d.progress.recv_blocking().unwrap() {
+                Progress::Bytes(_) => {}
+                last => return last,
+            }
+        }
+    }
+
+    #[test]
+    fn a_whole_part_is_installed_without_the_network() {
+        let dir = std::env::temp_dir().join(format!("qc-models-whole-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(part(&HELLO, &dir), b"hello").unwrap();
+        // Two at once (two models wanting the VAD): one writer, both done.
+        let (a, b) = (download(&HELLO, dir.clone()), download(&HELLO, dir.clone()));
+        assert_eq!(last(a), Progress::Done(path(&HELLO, &dir)));
+        assert_eq!(last(b), Progress::Done(path(&HELLO, &dir)));
+        assert!(installed(&HELLO, &dir));
+        // A whole but damaged one is thrown away.
+        std::fs::remove_file(path(&HELLO, &dir)).unwrap();
+        std::fs::write(part(&HELLO, &dir), b"jello").unwrap();
+        assert!(matches!(
+            last(download(&HELLO, dir.clone())),
+            Progress::Failed(_)
+        ));
+        assert!(!part(&HELLO, &dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The real VAD (1.2 MB), resumed from half of it. Needs the network.
     #[test]

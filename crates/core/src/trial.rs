@@ -72,13 +72,21 @@ fn run(
     stop: Arc<AtomicBool>,
     tx: &async_channel::Sender<TrialEvent>,
 ) -> anyhow::Result<()> {
+    // Stopped while asking or loading: the microphone never opens.
+    let stopped = || stop.load(Ordering::Relaxed);
     let fake = std::env::var_os("QUIPCALL_NO_MIC").is_some();
+    if stopped() {
+        return Ok(());
+    }
     if !fake {
         let rt = tokio::runtime::Builder::new_current_thread().build()?;
         anyhow::ensure!(
             rt.block_on(permissions::request(MediaDevice::Microphone)),
             "microphone access is off. Allow it in System Settings → Privacy & Security → Microphone"
         );
+    }
+    if stopped() {
+        return Ok(());
     }
     let lines = tx.clone();
     let transcriber = Transcriber::start(
@@ -92,6 +100,10 @@ fn run(
         },
     )?;
     let (frames, from_mic) = std::sync::mpsc::sync_channel::<Vec<f32>>(64);
+    if stopped() {
+        transcriber.stop();
+        return Ok(());
+    }
     let source: Box<dyn Send> = if fake {
         Box::new(fake_mic(frames, stop.clone())?)
     } else {
@@ -99,7 +111,7 @@ fn run(
     };
     let _ = tx.try_send(TrialEvent::Listening);
     let begun = Instant::now();
-    while !stop.load(Ordering::Relaxed) && begun.elapsed() < MAX {
+    while !stopped() && begun.elapsed() < MAX {
         match from_mic.recv_timeout(Duration::from_millis(100)) {
             Ok(samples) => transcriber.feed("you", samples),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}

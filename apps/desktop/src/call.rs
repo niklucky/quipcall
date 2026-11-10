@@ -279,6 +279,10 @@ pub struct Call {
     pub prompt: Option<Prompt>,
     /// The next start takes over from whoever transcribes (they asked).
     handover: bool,
+    /// Left while your Mac transcribed: the call goes into history once its
+    /// last words are in. How long it lasted, and a timeout in case they
+    /// never come.
+    ending: Option<(Duration, Task<()>)>,
     flash: Option<Flash>,
     pub mode: Mode,
     pub waiting_for: Option<MediaDevice>,
@@ -401,6 +405,7 @@ impl Call {
             transcript_open: false,
             prompt: None,
             handover: false,
+            ending: None,
             flash: None,
             mode: if args.regular {
                 Mode::Regular
@@ -903,7 +908,20 @@ impl Call {
     }
 
     pub fn leave(&mut self, cx: &mut Context<Self>) {
+        self.end(true, cx);
+    }
+
+    /// Leave without waiting for your Mac's last words: the app quits.
+    pub fn leave_now(&mut self, cx: &mut Context<Self>) {
+        self.end(false, cx);
+    }
+
+    fn end(&mut self, wait_for_words: bool, cx: &mut Context<Self>) {
         if self.status == Status::Ended {
+            // Quitting while the last words come: keep the call as it is.
+            if !wait_for_words && let Some((duration, _)) = self.ending.take() {
+                self.ended(duration, cx);
+            }
             return;
         }
         // Leaving finishes your recording too (the engine closes the file).
@@ -915,21 +933,43 @@ impl Call {
         if let Some(picker) = self.picker.take() {
             close(&picker, cx);
         }
-        let (started, duration) = match self.connected_at {
-            Some((wall, mono)) => (Some(wall), mono.elapsed()),
-            None => (None, Duration::ZERO),
-        };
+        let duration = self
+            .connected_at
+            .map_or(Duration::ZERO, |(_, mono)| mono.elapsed());
+        // Your Mac transcribes: what was being said is still on its way
+        // (TranscriptionStopped follows it). The windows close now.
+        if wait_for_words && self.transcription.as_ref().is_some_and(|t| t.mine) {
+            let timeout = cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_secs(10))
+                    .await;
+                let _ = this.update(cx, |this, cx| this.words_are_in(cx));
+            });
+            self.ending = Some((duration, timeout));
+        } else {
+            self.ended(duration, cx);
+        }
+        cx.notify();
+        schedule_sync(&cx.entity(), cx);
+    }
+
+    /// After leaving, your Mac's last words are in: keep the call.
+    fn words_are_in(&mut self, cx: &mut Context<Self>) {
+        if let Some((duration, _)) = self.ending.take() {
+            self.ended(duration, cx);
+        }
+    }
+
+    fn ended(&mut self, duration: Duration, cx: &mut Context<Self>) {
         cx.emit(Ended {
             room: self.room.clone(),
-            started,
+            started: self.connected_at.map(|(wall, _)| wall),
             duration,
             people: self.people.iter().cloned().collect(),
             events: self.events.clone(),
             recordings: self.recordings.clone(),
             transcript: self.transcript.read(cx).saved(),
         });
-        cx.notify();
-        schedule_sync(&cx.entity(), cx);
     }
 
     /// Ask for the simulcast layer that fits a view `pixel_height` device
@@ -1387,6 +1427,7 @@ impl Call {
                         mine: false,
                     });
                 }
+                self.words_are_in(cx);
             }
             Event::TranscriptionStopped { by, .. } => {
                 if let Some(t) = self.transcription.take_if(|t| t.mine) {
@@ -1410,6 +1451,7 @@ impl Call {
                         None => self.log(t.name, Happened::StoppedTranscribing, cx),
                     }
                 }
+                self.words_are_in(cx);
             }
             Event::ParticipantCanTranscribe { identity, model } => {
                 if let Some(member) = self.member(&identity, cx) {

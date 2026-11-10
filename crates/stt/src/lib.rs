@@ -253,13 +253,18 @@ fn listen(
 
         if disconnected || checked.elapsed() >= GONE / 4 {
             checked = Instant::now();
-            for (speaker, voice) in &mut voices {
-                if (disconnected || voice.heard.elapsed() >= GONE)
-                    && let Some(cut) = voice.seg.finish()
-                {
+            voices.retain(|speaker, voice| {
+                if !disconnected && voice.heard.elapsed() < GONE {
+                    return true;
+                }
+                if let Some(cut) = voice.seg.finish() {
                     push(speaker, cut);
                 }
-            }
+                // Heard again later (unmuted, say), a voice starts afresh:
+                // nothing from before (the preroll, with its old time; the
+                // filter; the VAD's state) leaks into what they say next.
+                false
+            });
         }
         if disconnected {
             queue.close();
