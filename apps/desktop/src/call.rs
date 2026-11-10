@@ -14,7 +14,7 @@ use gpui::{
     Task, WindowHandle, point, px, size,
 };
 use quipcall_core::{
-    Engine, Event, MediaDevice, ModelInfo, ScreenSharePreset, SourceId, TrackKey,
+    Engine, Event, Handover, MediaDevice, ModelInfo, ScreenSharePreset, SourceId, TrackKey,
     TranscribeOptions, VideoKind, VideoQuality, VideoSubscription,
 };
 
@@ -168,6 +168,8 @@ pub struct Prompt {
     pub identity: String,
     pub name: String,
     pub kind: PromptKind,
+    /// Asked to take over: their claim when they asked.
+    claim: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -282,8 +284,8 @@ pub struct Call {
     pub transcript_open: bool,
     /// Asked to transcribe, or to take over: waits for your answer.
     pub prompt: Option<Prompt>,
-    /// The next start takes over from this Mac (an identity; they asked).
-    handover: Option<String>,
+    /// The next start takes over from the Mac that asked.
+    handover: Option<Handover>,
     /// Left while your Mac transcribed: the call goes into history once its
     /// last words are in. How long it lasted, and a timeout in case they
     /// never come.
@@ -807,7 +809,10 @@ impl Call {
         match prompt.kind {
             PromptKind::Asked { handover } => {
                 self.engine.answer_transcript_ask(&prompt.identity, true);
-                self.handover = handover.then_some(prompt.identity);
+                self.handover = handover.then_some(Handover {
+                    from: prompt.identity,
+                    claim: prompt.claim,
+                });
                 self.start_transcribing(cx);
             }
             PromptKind::TakeOver => self.start_transcribing(cx),
@@ -870,7 +875,7 @@ impl Call {
             model,
             dir: store::models_dir(),
             language,
-            handover: std::mem::take(&mut self.handover),
+            handover: self.handover.take(),
         });
         self.preparing = Some(Preparing::Loading);
         cx.notify();
@@ -1150,6 +1155,7 @@ impl Call {
                             identity: t.identity.clone(),
                             name: t.name.clone(),
                             kind: PromptKind::TakeOver,
+                            claim: None,
                         });
                     } else if self.flash.is_none() {
                         self.flash(
@@ -1486,7 +1492,11 @@ impl Call {
                     });
                 }
             }
-            Event::TranscriptAsked { from, handover } => {
+            Event::TranscriptAsked {
+                from,
+                handover,
+                claim,
+            } => {
                 let name = self
                     .member(&from, cx)
                     .map(|m| m.read(cx).name.clone())
@@ -1501,6 +1511,7 @@ impl Call {
                         identity: from,
                         name,
                         kind: PromptKind::Asked { handover },
+                        claim,
                     });
                     // Settings can say yes for you.
                     if accept_asks {

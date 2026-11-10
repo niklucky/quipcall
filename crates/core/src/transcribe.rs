@@ -41,6 +41,12 @@ impl Transcribing {
         }
     }
 
+    /// Stops listening at once; [`Transcribing::stop`] then waits for the
+    /// last words.
+    pub(crate) fn stop_listening(&self) {
+        self.frames.close();
+    }
+
     /// Stops listening, transcribes what was being said, and returns once
     /// the last line is out. Blocks for a moment.
     pub(crate) fn stop(mut self) {

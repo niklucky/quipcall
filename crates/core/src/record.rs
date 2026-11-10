@@ -165,6 +165,12 @@ impl Recorder {
         &self.path
     }
 
+    /// Take nothing more in, now: the call is over. [`Recorder::stop`]
+    /// then finishes the file.
+    pub(crate) fn end(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
     /// Finish the file. Blocks for as long as the encoder needs (well under
     /// a second): call it off the UI thread.
     pub fn stop(mut self) -> anyhow::Result<Saved> {
@@ -752,6 +758,29 @@ mod tests {
         for name in &names {
             assert!((seconds(&dir.join(name)) - 1.0).abs() < 0.1, "{name}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The call is over: the recording stops taking anything in at once,
+    /// however long finishing (or the transcript's last words) then takes.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_recording_ends_with_the_call_not_when_it_is_finished() {
+        let dir = std::env::temp_dir().join(format!("quipcall-end-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let hub = Arc::new(crate::audio_tap::Hub::default());
+        let path = dir.join("call.m4a");
+        let recorder = Recorder::start(hub.listen(|| {}), path, None, None, || {}).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        recorder.end();
+        // The transcript's last words, say.
+        std::thread::sleep(Duration::from_millis(1000));
+        let saved = recorder.stop().unwrap();
+        assert!(
+            saved.duration < Duration::from_millis(800),
+            "{:?}",
+            saved.duration
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

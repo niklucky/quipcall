@@ -53,6 +53,12 @@ pub enum TranscriptMessage {
     /// now, and stops once you've started.
     Ask {
         handover: bool,
+        /// With `handover`: the asker's claim when they asked (the "when" in
+        /// its `quipcall.transcribing`). The other Mac takes over only while
+        /// that claim stands, so an ask outlives neither a Stop nor a
+        /// restart. Older apps leave it out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claim: Option<u64>,
     },
     /// The answer to an [`TranscriptMessage::Ask`].
     Answer {
@@ -116,8 +122,20 @@ mod tests {
             TranscriptMessage::Stop
         );
         assert_eq!(
-            serde_json::to_string(&TranscriptMessage::Ask { handover: true }).unwrap(),
-            r#"{"type":"ask","handover":true}"#
+            serde_json::to_string(&TranscriptMessage::Ask {
+                handover: true,
+                claim: Some(1700)
+            })
+            .unwrap(),
+            r#"{"type":"ask","handover":true,"claim":1700}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<TranscriptMessage>(r#"{"type":"ask","handover":false}"#)
+                .unwrap(),
+            TranscriptMessage::Ask {
+                handover: false,
+                claim: None
+            }
         );
     }
 }

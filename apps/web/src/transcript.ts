@@ -12,7 +12,7 @@ const LAST_WORDS_MS = 10_000;
 export type TranscriptMessage =
   | { type: 'lines'; lines: WireLine[] }
   | { type: 'stop' }
-  | { type: 'ask'; handover: boolean }
+  | { type: 'ask'; handover: boolean; claim?: number }
   | { type: 'answer'; accepted: boolean };
 
 type WireLine = {
@@ -102,6 +102,10 @@ export function apply(
   for (const l of incoming) {
     const key = `${l.by ?? by}/${l.id}`;
     const at = next.findIndex((x) => x.key === key);
+    // Another Mac's line, relayed (history after a handover), only adds what
+    // isn't here: it never changes or takes back a line.
+    const relayed = (l.by ?? by) !== by;
+    if (relayed && (at >= 0 || !l.done || !l.text)) continue;
     if (!l.text) {
       // A final line with no text takes its draft back.
       if (at >= 0) next.splice(at, 1);

@@ -64,8 +64,9 @@ const TRANSCRIBING: &str = "quipcall.transcribing";
 /// id of the model it has ready.
 const CAN_TRANSCRIBE: &str = "quipcall.can_transcribe";
 /// How long after a Mac stops transcribing its last lines are still taken:
-/// they're sent as it stops, and may arrive after the news.
-const LAST_WORDS: Duration = Duration::from_secs(10);
+/// its claim goes first, then what was still being said is transcribed and
+/// sent.
+const LAST_WORDS: Duration = Duration::from_secs(15);
 
 /// Stable identifier of a remote track inside the UI.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -169,10 +170,12 @@ pub enum Event {
         model: Option<String>,
     },
     /// `from` asks your Mac to transcribe the call; `handover`: their Mac
-    /// does now, and stops once yours has started.
+    /// does now, and stops once yours has started. `claim`: theirs when they
+    /// asked, for [`Handover`].
     TranscriptAsked {
         from: String,
         handover: bool,
+        claim: Option<u64>,
     },
     /// `from` answered your ask.
     TranscriptAnswered {
@@ -190,10 +193,20 @@ pub struct TranscribeOptions {
     pub dir: PathBuf,
     /// ISO 639-1, or `None` to let the model tell.
     pub language: Option<String>,
-    /// Take over from this Mac (an identity; they asked): start although it
-    /// transcribes. Only while it still does, and nobody else started
-    /// since, once the model has loaded.
-    pub handover: Option<String>,
+    /// Take over from the Mac that asked: start although it transcribes.
+    pub handover: Option<Handover>,
+}
+
+/// Taking over the transcript from the Mac that asked. Only while its claim
+/// is the one it asked with, and nobody else started since, once the model
+/// has loaded: a Stop or a restart in between calls it off.
+#[derive(Debug, Clone)]
+pub struct Handover {
+    /// Its identity.
+    pub from: String,
+    /// Its claim when it asked ([`Event::TranscriptAsked`]); older apps
+    /// don't say, and then it's whatever it is when you start.
+    pub claim: Option<u64>,
 }
 
 pub struct Engine {
@@ -214,6 +227,10 @@ struct State {
     /// Its voices, to whoever listens. A new one for every call: a
     /// recording still being finished hears nothing of the next.
     hub: Arc<audio_tap::Hub>,
+    /// Which connection the state is for, counted: every connect and
+    /// leave moves it on, so a room still closing can't touch the next
+    /// one's state with its last events.
+    connection: u64,
     /// Keeps the platform audio device module alive for the duration of a call.
     /// Without it remote audio has nowhere to play.
     audio: Option<PlatformAudio>,
@@ -344,6 +361,7 @@ impl Engine {
             // Forget goodbyes already said. `peek` would only see ones
             // something awaited, so poll them.
             s.closing.retain(|c| c.clone().now_or_never().is_none());
+            s.connection += 1;
             (
                 s.room.take(),
                 s.audio.take(),
@@ -354,28 +372,13 @@ impl Engine {
             )
         };
         drop(screen);
+        stop_taking_in(transcribing.as_ref(), recorder.as_ref());
         let events = self.events.clone();
         let closing = self.rt().spawn(async move {
-            // What was being said when you left is still transcribed; the
-            // call's history waits for it.
-            if let Some(transcribing) = transcribing {
-                let _ = tokio::task::spawn_blocking(move || transcribing.stop()).await;
-                let _ = events
-                    .send(Event::TranscriptionStopped {
-                        by: None,
-                        handed_over: false,
-                    })
-                    .await;
-            }
-            // Leaving finishes your recording: everything up to now is kept.
-            if let Some(recorder) = recorder {
-                let _ = tokio::task::spawn_blocking(move || {
-                    if let Err(e) = recorder.stop() {
-                        tracing::warn!("recording: {e:#}");
-                    }
-                })
-                .await;
-            }
+            // Leaving finishes your recording, keeping everything up to now,
+            // while what was being said is still transcribed: the call's
+            // history waits for it.
+            wind_down(transcribing, recorder, &events, false).await;
             // Say goodbye first: until the server hears it, everyone else
             // (and you, if you rejoin) sees you in the room for another 20 s.
             if let Some(room) = room {
@@ -689,7 +692,11 @@ impl Engine {
     /// Ask `identity`'s Mac to transcribe the call; `handover` if yours does
     /// now. [`Event::TranscriptAnswered`] follows, unless they just start.
     pub fn ask_to_transcribe(&self, identity: &str, handover: bool) {
-        self.send_transcript_to(identity, TranscriptMessage::Ask { handover });
+        let claim = {
+            let s = self.state.lock();
+            (handover && s.transcribing.is_some()).then_some(s.transcribing_since)
+        };
+        self.send_transcript_to(identity, TranscriptMessage::Ask { handover, claim });
     }
 
     /// Answer `identity`'s ask.
@@ -753,12 +760,16 @@ async fn stop_transcribing_for(
     let Some(transcribing) = transcribing else {
         return;
     };
-    let _ = tokio::task::spawn_blocking(move || transcribing.stop()).await;
+    // Stopped means stopped: nothing more is heard, and the claim goes
+    // before the last words are out, so no Mac takes over meanwhile. The
+    // last words still count (see `LAST_WORDS`).
+    transcribing.stop_listening();
     if let Some(room) = &room
         && let Err(e) = set_attribute(room, TRANSCRIBING, "").await
     {
         tracing::warn!("transcribing attribute: {e}");
     }
+    let _ = tokio::task::spawn_blocking(move || transcribing.stop()).await;
     // They may have stopped while your last words went out: then nobody
     // carries on.
     let handed_over = handed_over
@@ -792,15 +803,23 @@ async fn settle_transcriber(state: &Arc<Mutex<State>>, events: &async_channel::S
     }
 }
 
+/// The most a transcript message may take: LiveKit's limit for a reliable
+/// data packet is 15 KiB, and the packet's own fields need some of it.
+const MESSAGE_BYTES: usize = 14_000;
+
 /// A transcript message to everyone, or to one person.
 async fn send_transcript(
     room: &Room,
     message: &TranscriptMessage,
     to: Option<String>,
 ) -> anyhow::Result<()> {
+    send_encoded(room, serde_json::to_vec(message)?, to).await
+}
+
+async fn send_encoded(room: &Room, payload: Vec<u8>, to: Option<String>) -> anyhow::Result<()> {
     room.local_participant()
         .publish_data(DataPacket {
-            payload: serde_json::to_vec(message)?,
+            payload,
             topic: Some(TRANSCRIPT_TOPIC.to_owned()),
             reliable: true,
             destination_identities: to.into_iter().map(ParticipantIdentity).collect(),
@@ -809,18 +828,42 @@ async fn send_transcript(
     Ok(())
 }
 
-/// The lines so far, to someone who just joined, a few at a time: data
-/// packets should stay under 15 KB.
+/// The lines so far, to someone who just joined. One message that doesn't
+/// go through doesn't hold back the rest.
 async fn send_history(room: &Room, lines: Vec<TranscriptLine>, to: String) {
-    for chunk in lines.chunks(40) {
-        let message = TranscriptMessage::Lines {
-            lines: chunk.to_vec(),
-        };
-        if let Err(e) = send_transcript(room, &message, Some(to.clone())).await {
+    for payload in history_messages(&lines) {
+        if let Err(e) = send_encoded(room, payload, Some(to.clone())).await {
             tracing::warn!("transcript history to {to}: {e}");
-            return;
         }
     }
+}
+
+/// `lines` as encoded messages of as many lines as fit in
+/// [`MESSAGE_BYTES`], measured as sent: a line of Cyrillic or Chinese takes
+/// two or three times its length in characters.
+fn history_messages(lines: &[TranscriptLine]) -> Vec<Vec<u8>> {
+    let encode = |lines: &[TranscriptLine]| {
+        let message = TranscriptMessage::Lines {
+            lines: lines.to_vec(),
+        };
+        serde_json::to_vec(&message).unwrap_or_default()
+    };
+    let empty = encode(&[]).len();
+    let mut messages = Vec::new();
+    let (mut first, mut bytes) = (0, empty);
+    for (i, line) in lines.iter().enumerate() {
+        // Each line, and a comma before it.
+        let size = serde_json::to_vec(line).map_or(0, |l| l.len()) + 1;
+        if i > first && bytes + size > MESSAGE_BYTES {
+            messages.push(encode(&lines[first..i]));
+            (first, bytes) = (i, empty);
+        }
+        bytes += size;
+    }
+    if first < lines.len() {
+        messages.push(encode(&lines[first..]));
+    }
+    messages
 }
 
 /// A transcript message from someone in the call.
@@ -834,7 +877,9 @@ async fn on_transcript(
     match serde_json::from_slice::<TranscriptMessage>(payload) {
         Ok(TranscriptMessage::Lines { mut lines }) => {
             // Only a Mac that transcribes the call speaks for it: anyone can
-            // send on the topic, and put words in anyone's mouth.
+            // send on the topic, and put words in anyone's mouth. Which Mac
+            // that is, everyone sees. It's an attribute anyone may set, so
+            // a lease from the server will make it exclusive.
             let trusted = transcribes(from)
                 || state
                     .lock()
@@ -845,14 +890,7 @@ async fn on_transcript(
                 tracing::warn!(%by, "transcript lines from a Mac that doesn't transcribe: dropped");
                 return;
             }
-            {
-                let mut s = state.lock();
-                for line in &mut lines {
-                    // Older apps leave it out: then it's the sender's.
-                    line.by.get_or_insert_with(|| by.clone());
-                    remember(&mut s.transcribed, line);
-                }
-            }
+            take_lines(&mut state.lock().transcribed, &by, &mut lines);
             for line in lines {
                 let by = line.by.clone().unwrap_or_default();
                 let _ = events.send(Event::TranscriptLine { by, line }).await;
@@ -864,10 +902,14 @@ async fn on_transcript(
             let (state, events) = (state.clone(), events.clone());
             tokio::spawn(async move { stop_transcribing(&state, &events, Some(by)).await });
         }
-        Ok(TranscriptMessage::Ask { handover }) => {
-            tracing::info!(%by, handover, "asked to transcribe");
+        Ok(TranscriptMessage::Ask { handover, claim }) => {
+            tracing::info!(%by, handover, ?claim, "asked to transcribe");
             let _ = events
-                .send(Event::TranscriptAsked { from: by, handover })
+                .send(Event::TranscriptAsked {
+                    from: by,
+                    handover,
+                    claim,
+                })
                 .await;
         }
         Ok(TranscriptMessage::Answer { accepted }) => {
@@ -885,7 +927,10 @@ async fn start_transcribing(
     events: &async_channel::Sender<Event>,
     options: TranscribeOptions,
 ) -> anyhow::Result<()> {
-    let room = state.lock().room.clone().context("not in a call")?;
+    let (room, connection) = {
+        let s = state.lock();
+        (s.room.clone().context("not in a call")?, s.connection)
+    };
     {
         let mut s = state.lock();
         anyhow::ensure!(
@@ -894,15 +939,19 @@ async fn start_transcribing(
         );
         s.transcribe_starting = true;
     }
-    // Taking over: their claim, which must still stand once the model has
-    // loaded. They may stop meanwhile, or someone else start.
+    // Taking over: their claim, the one they asked with, which must still
+    // stand once the model has loaded. They may stop meanwhile, or someone
+    // else start.
     let taking_over = match &options.handover {
-        Some(from) => Some(
-            room.remote_participants()
+        Some(Handover { from, claim }) => {
+            let theirs = room
+                .remote_participants()
                 .get(&ParticipantIdentity(from.clone()))
-                .and_then(claim)
-                .context("they stopped transcribing")?,
-        ),
+                .and_then(claim_of)
+                .filter(|(since, _)| claim.is_none_or(|asked| asked == *since))
+                .context("they stopped transcribing since they asked")?;
+            Some(theirs)
+        }
         None => {
             nobody_transcribes(&room)?;
             None
@@ -941,7 +990,14 @@ async fn start_transcribing(
         let (room, state) = (room.clone(), state.clone());
         handle.spawn(async move {
             while let Some(line) = to_send.recv().await {
-                remember(&mut state.lock().transcribed, &line);
+                // The last words after you left still go to that call, but
+                // into no other's history.
+                {
+                    let mut s = state.lock();
+                    if s.connection == connection {
+                        remember(&mut s.transcribed, &line);
+                    }
+                }
                 let message = TranscriptMessage::Lines { lines: vec![line] };
                 if let Err(e) = send_transcript(&room, &message, None).await {
                     tracing::warn!("sending a transcript line: {e}");
@@ -1214,7 +1270,7 @@ fn parse_transcribing(value: &str) -> (&str, u64) {
 
 /// `participant`'s [`TRANSCRIBING`] claim, if their Mac transcribes: when,
 /// and whose.
-fn claim(participant: &RemoteParticipant) -> Option<(u64, String)> {
+fn claim_of(participant: &RemoteParticipant) -> Option<(u64, String)> {
     let attributes = participant.attributes();
     let value = attributes.get(TRANSCRIBING).filter(|v| !v.is_empty())?;
     Some((
@@ -1225,7 +1281,10 @@ fn claim(participant: &RemoteParticipant) -> Option<(u64, String)> {
 
 /// The newest [`TRANSCRIBING`] claim among the others.
 fn newest_claim(room: &Room) -> Option<(u64, String)> {
-    room.remote_participants().values().filter_map(claim).max()
+    room.remote_participants()
+        .values()
+        .filter_map(claim_of)
+        .max()
 }
 
 /// One transcriber per call, unless it hands over.
@@ -1236,13 +1295,27 @@ fn nobody_transcribes(room: &Room) -> anyhow::Result<()> {
     }
 }
 
+/// Lines `by` sent, as they're shown: each says which Mac transcribed it
+/// (older apps leave it out: then it's the sender's). Another Mac's line,
+/// relayed (history after a handover), only adds what you don't have: it
+/// never changes or takes back a line.
+fn take_lines(kept: &mut Vec<TranscriptLine>, by: &str, lines: &mut Vec<TranscriptLine>) {
+    lines.retain_mut(|line| {
+        let relayed = line.by.get_or_insert_with(|| by.to_owned()) != by;
+        remember(kept, line) || !relayed
+    });
+}
+
 /// A final line, kept for whoever joins later: once, however it came (from
-/// the Mac that transcribed it, or relayed by the next one).
-fn remember(lines: &mut Vec<TranscriptLine>, line: &TranscriptLine) {
+/// the Mac that transcribed it, or relayed by the next one). Whether it's
+/// new.
+fn remember(lines: &mut Vec<TranscriptLine>, line: &TranscriptLine) -> bool {
     let same = |l: &TranscriptLine| l.by == line.by && l.id == line.id;
-    if line.done && !line.text.is_empty() && !lines.iter().rev().any(same) {
+    let new = line.done && !line.text.is_empty() && !lines.iter().rev().any(same);
+    if new {
         lines.push(line.clone());
     }
+    new
 }
 
 /// Someone else started transcribing while your Mac does. The one who
@@ -1444,11 +1517,12 @@ async fn connect(
         "connected"
     );
 
-    let can_transcribe = {
+    let (connection, can_transcribe) = {
         let mut s = state.lock();
         s.room = Some(room.clone());
+        s.connection += 1;
         s.audio = audio.clone();
-        s.can_transcribe.clone()
+        (s.connection, s.can_transcribe.clone())
     };
     // Others can ask this Mac to transcribe.
     if let Some(model) = can_transcribe {
@@ -1521,6 +1595,11 @@ async fn connect(
     }
 
     while let Some(event) = room_events.recv().await {
+        // You left (or joined another call on this engine): the rest of
+        // this room's events are no one's business.
+        if state.lock().connection != connection {
+            break;
+        }
         if let RoomEvent::TrackMuted {
             participant,
             publication,
@@ -1537,7 +1616,7 @@ async fn connect(
                 "track mute changed"
             );
         }
-        track_publications(&state, &event);
+        track_publications(&state, connection, &event);
         // Someone joining mid-recording, or starting or stopping.
         let attributes = match &event {
             RoomEvent::ParticipantConnected(p) => {
@@ -1633,6 +1712,7 @@ async fn connect(
         let mut s = state.lock();
         if is_current(&s, &room) {
             s.room = None;
+            s.connection += 1;
             s.mic = None;
             audio_tap::set_mic_live(&s.hub, false);
             (s.recorder.take(), s.transcribing.take())
@@ -1640,27 +1720,70 @@ async fn connect(
             (None, None)
         }
     };
+    stop_taking_in(transcribing.as_ref(), recorder.as_ref());
+    wind_down(transcribing, recorder, &events, true).await;
+    Ok(())
+}
+
+/// The call is over for your transcript and recording: neither takes in
+/// anything more, from now (the screen capture stops too).
+fn stop_taking_in(
+    transcribing: Option<&transcribe::Transcribing>,
+    recorder: Option<&record::Recorder>,
+) {
     if let Some(transcribing) = transcribing {
-        let _ = tokio::task::spawn_blocking(move || transcribing.stop()).await;
-        let _ = events
-            .send(Event::TranscriptionStopped {
-                by: None,
-                handed_over: false,
-            })
-            .await;
+        transcribing.stop_listening();
     }
     if let Some(recorder) = recorder {
+        recorder.end();
+    }
+}
+
+/// Then the last words are transcribed while the file is finished, each in
+/// its own time. `say_saved`: tell how the recording went (leaving keeps it
+/// in the call's history without).
+async fn wind_down(
+    transcribing: Option<transcribe::Transcribing>,
+    recorder: Option<record::Recorder>,
+    events: &async_channel::Sender<Event>,
+    say_saved: bool,
+) {
+    let words = async {
+        if let Some(transcribing) = transcribing {
+            let _ = tokio::task::spawn_blocking(move || transcribing.stop()).await;
+            let _ = events
+                .send(Event::TranscriptionStopped {
+                    by: None,
+                    handed_over: false,
+                })
+                .await;
+        }
+    };
+    let file = async {
+        let Some(recorder) = recorder else { return };
         let event = match tokio::task::spawn_blocking(move || recorder.stop()).await {
             Ok(Ok(saved)) => Event::RecordingSaved(saved),
             Ok(Err(e)) => Event::RecordingFailed(format!("{e:#}")),
             Err(e) => Event::RecordingFailed(format!("{e}")),
         };
-        let _ = events.send(event).await;
-    }
-    Ok(())
+        match event {
+            _ if say_saved => {
+                let _ = events.send(event).await;
+            }
+            Event::RecordingFailed(e) => tracing::warn!("recording: {e}"),
+            _ => {}
+        }
+    };
+    futures_util::future::join(words, file).await;
 }
 
-fn track_publications(state: &Mutex<State>, event: &RoomEvent) {
+/// Keeps track of remote videos and microphones, for `connection` only: a
+/// room still closing after you left touches nothing.
+fn track_publications(state: &Mutex<State>, connection: u64, event: &RoomEvent) {
+    let mut s = state.lock();
+    if s.connection != connection {
+        return;
+    }
     match event {
         RoomEvent::TrackSubscribed {
             track: RemoteTrack::Video(track),
@@ -1671,7 +1794,7 @@ fn track_publications(state: &Mutex<State>, event: &RoomEvent) {
                 participant: participant.identity().to_string(),
                 sid: track.sid().to_string(),
             };
-            state.lock().videos.insert(key, publication.clone());
+            s.videos.insert(key, publication.clone());
         }
         RoomEvent::TrackUnsubscribed {
             track: RemoteTrack::Video(track),
@@ -1682,7 +1805,7 @@ fn track_publications(state: &Mutex<State>, event: &RoomEvent) {
                 participant: participant.identity().to_string(),
                 sid: track.sid().to_string(),
             };
-            state.lock().videos.remove(&key);
+            s.videos.remove(&key);
         }
         RoomEvent::TrackSubscribed {
             track: RemoteTrack::Audio(track),
@@ -1693,7 +1816,6 @@ fn track_publications(state: &Mutex<State>, event: &RoomEvent) {
                 participant: participant.identity().to_string(),
                 sid: track.sid().to_string(),
             };
-            let mut s = state.lock();
             if s.hub.listening() && !s.mic_streams.contains_key(&key) {
                 let pump = pump_mic(key.participant.clone(), track.clone(), s.hub.clone());
                 s.mic_streams.insert(key.clone(), tokio::spawn(pump));
@@ -1709,14 +1831,12 @@ fn track_publications(state: &Mutex<State>, event: &RoomEvent) {
                 participant: participant.identity().to_string(),
                 sid: track.sid().to_string(),
             };
-            let mut s = state.lock();
             s.mics.remove(&key);
             if let Some(task) = s.mic_streams.remove(&key) {
                 task.abort();
             }
         }
         RoomEvent::Disconnected { .. } => {
-            let mut s = state.lock();
             s.videos.clear();
             s.mics.clear();
             for (_, task) in s.mic_streams.drain() {
@@ -1842,6 +1962,100 @@ mod tests {
         remember(&mut kept, &line("b", 1, "Bye", true));
         let texts: Vec<&str> = kept.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(texts, ["Hello", "Bye"]);
+    }
+
+    /// History relayed by the Mac that took over adds the lines you missed,
+    /// but can't rewrite or take back a line from the Mac that said it.
+    #[test]
+    fn relayed_lines_only_add() {
+        let line = |by: Option<&str>, id, text: &str| TranscriptLine {
+            id,
+            speaker: "anna".into(),
+            at_ms: 1000 + id,
+            text: text.into(),
+            done: true,
+            by: by.map(Into::into),
+        };
+        let mut kept = Vec::new();
+        let mut live = vec![line(None, 1, "Hello"), line(None, 2, "Bye")];
+        take_lines(&mut kept, "a", &mut live);
+        assert_eq!(live.len(), 2);
+        assert!(live.iter().all(|l| l.by.as_deref() == Some("a")));
+        let mut relayed = vec![
+            line(Some("a"), 1, "Forged"),
+            line(Some("a"), 2, ""),
+            line(Some("a"), 3, "Missed"),
+            line(Some("b"), 1, "Theirs"),
+        ];
+        take_lines(&mut kept, "b", &mut relayed);
+        let texts = |lines: &[TranscriptLine]| -> Vec<String> {
+            lines.iter().map(|l| l.text.clone()).collect()
+        };
+        assert_eq!(texts(&relayed), ["Missed", "Theirs"]);
+        assert_eq!(texts(&kept), ["Hello", "Bye", "Missed", "Theirs"]);
+        // A Mac's own line may still be taken back by it.
+        let mut back = vec![line(Some("b"), 1, "")];
+        take_lines(&mut kept, "b", &mut back);
+        assert_eq!(back.len(), 1);
+    }
+
+    /// History to a late joiner fits LiveKit's packets however long the
+    /// call, in any script: 40 lines of Russian are over 15 KiB.
+    #[test]
+    fn history_fits_in_packets() {
+        let text = "Я посмотрел отчет, все выглядит хорошо, ".repeat(5);
+        let lines: Vec<TranscriptLine> = (0..300)
+            .map(|id| TranscriptLine {
+                id: 1_794_313_778_560 + id,
+                speaker: "anna-petrova-0cdd".into(),
+                at_ms: 1_794_313_867_444 + id,
+                text: text.clone(),
+                done: true,
+                by: Some("mac-tester-5368".into()),
+            })
+            .collect();
+        let forty = serde_json::to_vec(&TranscriptMessage::Lines {
+            lines: lines[..40].to_vec(),
+        })
+        .unwrap();
+        assert!(forty.len() > 15 * 1024, "{} bytes", forty.len());
+        let messages = history_messages(&lines);
+        assert!(messages.len() > 1);
+        let mut back = Vec::new();
+        for m in &messages {
+            assert!(m.len() <= MESSAGE_BYTES, "{} bytes", m.len());
+            let Ok(TranscriptMessage::Lines { lines }) = serde_json::from_slice(m) else {
+                panic!("lines");
+            };
+            back.extend(lines);
+        }
+        assert_eq!(back, lines);
+        assert!(history_messages(&[]).is_empty());
+    }
+
+    /// Joining again on the same engine while the old room still closes:
+    /// its last events (here, its Disconnected) leave the new call alone.
+    #[test]
+    fn a_closing_room_leaves_the_next_call_alone() {
+        let (engine, _events) = Engine::new().unwrap();
+        let (old, new) = {
+            let mut s = engine.state.lock();
+            s.connection += 2;
+            (s.connection - 1, s.connection)
+        };
+        let key = TrackKey {
+            participant: "boris".into(),
+            sid: "TR_new".into(),
+        };
+        let pump = engine.rt().spawn(std::future::pending::<()>());
+        engine.state.lock().mic_streams.insert(key, pump);
+        let gone = RoomEvent::Disconnected {
+            reason: livekit::DisconnectReason::ClientInitiated,
+        };
+        track_publications(&engine.state, old, &gone);
+        assert_eq!(engine.state.lock().mic_streams.len(), 1);
+        track_publications(&engine.state, new, &gone);
+        assert!(engine.state.lock().mic_streams.is_empty());
     }
 
     /// You left a call whose recording is still being finished, and joined
