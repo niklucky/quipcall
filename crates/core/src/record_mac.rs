@@ -389,8 +389,23 @@ unsafe fn add_video(writer: &AVAssetWriter, format: VideoFormat) -> anyhow::Resu
 /// What AVAssetWriter says went wrong.
 fn failure(writer: &AVAssetWriter) -> String {
     match unsafe { writer.error() } {
-        Some(e) => format!("recording: {}", e.localizedDescription()),
-        None => "recording failed".into(),
+        Some(e) => {
+            // The whole error, underlying OSStatus and all, for the log.
+            let underlying = e
+                .userInfo()
+                .objectForKey(&NSString::from_str("NSUnderlyingError"))
+                .and_then(|u| u.downcast::<objc2_foundation::NSError>().ok())
+                .map(|u| format!("{} {} ({})", u.domain(), u.code(), u.localizedDescription()));
+            tracing::warn!(
+                underlying = underlying.as_deref().unwrap_or("none"),
+                reason = ?e.localizedFailureReason(),
+                "AVAssetWriter failed: {} {}",
+                e.domain(),
+                e.code()
+            );
+            format!("the encoder failed ({} {})", e.domain(), e.code())
+        }
+        None => "the encoder failed".into(),
     }
 }
 

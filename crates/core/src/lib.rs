@@ -592,13 +592,14 @@ impl Engine {
         let handle = self.rt().handle().clone();
         let with_screen = screen.is_some();
         self.rt().spawn(async move {
-            let event = match start_recording(&state, &handle, path, screen, each_voice).await {
-                Ok(path) => Event::RecordingStarted {
-                    path,
-                    screen: with_screen,
-                },
-                Err(e) => Event::RecordingFailed(format!("{e:#}")),
-            };
+            let event =
+                match start_recording(&state, &handle, &events, path, screen, each_voice).await {
+                    Ok(path) => Event::RecordingStarted {
+                        path,
+                        screen: with_screen,
+                    },
+                    Err(e) => Event::RecordingFailed(format!("{e:#}")),
+                };
             let _ = events.send(event).await;
         });
     }
@@ -953,6 +954,7 @@ async fn pump_mic(identity: String, track: RemoteAudioTrack) {
 async fn start_recording(
     state: &Arc<Mutex<State>>,
     handle: &tokio::runtime::Handle,
+    events: &async_channel::Sender<Event>,
     path: PathBuf,
     screen: Option<(SourceId, ScreenSharePreset)>,
     each_voice: bool,
@@ -1005,8 +1007,32 @@ async fn start_recording(
         }
     };
     let listener = listen(state, handle);
+    // Writing can fail later (the encoder gave up): say so at once, and
+    // stop telling everyone that you record.
+    let on_failed = {
+        let (state, events, handle) = (Arc::downgrade(state), events.clone(), handle.clone());
+        move || {
+            handle.spawn(async move {
+                let Some(state) = state.upgrade() else { return };
+                let (room, recorder) = {
+                    let mut s = state.lock();
+                    (s.room.clone(), s.recorder.take())
+                };
+                let Some(recorder) = recorder else { return };
+                let result = tokio::task::spawn_blocking(move || recorder.stop()).await;
+                if let Some(room) = room {
+                    let _ = set_attribute(&room, RECORDING, "").await;
+                }
+                let message = match result {
+                    Ok(Err(e)) => format!("{e:#}"),
+                    _ => "the recording stopped".into(),
+                };
+                let _ = events.send(Event::RecordingFailed(message)).await;
+            });
+        }
+    };
     let started = tokio::task::spawn_blocking(move || {
-        record::Recorder::start(listener, path, screen, voices)
+        record::Recorder::start(listener, path, screen, voices, on_failed)
     })
     .await;
     let recorder = match started {

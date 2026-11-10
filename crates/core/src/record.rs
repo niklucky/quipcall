@@ -105,11 +105,15 @@ pub struct Recorder {
 impl Recorder {
     /// Start writing everything `listener` hears to `path`: an .m4a, or with
     /// `screen`, an .mp4. Fails right away if the file can't be created.
+    /// `on_failed` runs (on the recording thread) if writing fails later:
+    /// [`Recorder::stop`] then returns the error, and the file keeps what
+    /// was written up to its last fragment.
     pub(crate) fn start(
         listener: Listener,
         path: PathBuf,
         screen: Option<ScreenInput>,
         voices: Option<Voices>,
+        on_failed: impl FnOnce() + Send + 'static,
     ) -> anyhow::Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -134,7 +138,14 @@ impl Recorder {
                             anyhow::bail!(message);
                         }
                     };
-                    run(listener, screen, writer, voices, &stop, path)
+                    let result = run(listener, screen, writer, voices, &stop, path);
+                    if let Err(e) = &result
+                        && !stop.load(Ordering::Relaxed)
+                    {
+                        tracing::warn!("recording failed: {e:#}");
+                        on_failed();
+                    }
+                    result
                 }
             })?;
         match ready_rx.recv() {
@@ -207,7 +218,14 @@ fn write_frames(
 ) -> anyhow::Result<()> {
     let Some(screen) = screen else { return Ok(()) };
     let slack = Duration::from_micros(PRIME as u64 * 1_000_000 / SAMPLE_RATE as u64);
-    while let Ok(ScreenFrame(pixels, at)) = screen.frames.try_recv() {
+    // After a stall several frames wait. Only the newest goes in: the
+    // others are stale, and a burst of big frames can break the encoder
+    // (AVAssetWriter fails with -16341 at 1920x1200).
+    let mut newest = None;
+    while let Ok(frame) = screen.frames.try_recv() {
+        newest = Some(frame);
+    }
+    if let Some(ScreenFrame(pixels, at)) = newest {
         writer.write_frame(&pixels, at.saturating_duration_since(start) + slack)?;
     }
     Ok(())
