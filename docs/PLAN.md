@@ -181,6 +181,8 @@ Started early (2026-11-03), ahead of Stages 3–6: there are no accounts yet, so
 
 **Done when:** a 1-hour mixed-language test call produces a transcript with correct speakers, handing off the transcriber role works, and a recording of the same call plays under its transcript in Home.
 
+*Status 2026-11-10: everything above is built and out (web deployed, Mac build 46). Checked on quipcall.com: a Mac transcribing a web participant in English and Russian, a late joiner getting the history, the web panel. Still to do with people: the 1-hour call with several real voices. Known: a line cut off by the transcriber leaving reaches everyone but the transcriber's own history.*
+
 ## Stage 10 — LLM summaries
 
 - [ ] `Summarizer` trait: Claude API (`claude-haiku-5-5` / `claude-sonnet-5-5`), plus a local backend (llama.cpp-compatible)
