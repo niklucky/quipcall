@@ -6,8 +6,11 @@ import type { Participant, Room } from 'livekit-client';
 import { TRANSCRIBING_ATTRIBUTE } from './call';
 
 export const TRANSCRIPT_TOPIC = 'quipcall.transcript';
-/** How long after a Mac stops transcribing its last lines are still taken. */
-const LAST_WORDS_MS = 10_000;
+/**
+ * How long after a Mac stops transcribing its last lines are still taken:
+ * its claim goes first, then the last words. `LAST_WORDS_MS` in crates/protocol.
+ */
+const LAST_WORDS_MS = 15_000;
 
 export type TranscriptMessage =
   | { type: 'lines'; lines: WireLine[] }
@@ -103,9 +106,10 @@ export function apply(
     const key = `${l.by ?? by}/${l.id}`;
     const at = next.findIndex((x) => x.key === key);
     // Another Mac's line, relayed (history after a handover), only adds what
-    // isn't here: it never changes or takes back a line.
+    // isn't here, or finishes a draft: it never changes or takes back a
+    // final line.
     const relayed = (l.by ?? by) !== by;
-    if (relayed && (at >= 0 || !l.done || !l.text)) continue;
+    if (relayed && (!l.done || !l.text || (at >= 0 && next[at].done))) continue;
     if (!l.text) {
       // A final line with no text takes its draft back.
       if (at >= 0) next.splice(at, 1);

@@ -1460,14 +1460,22 @@ impl Call {
                 self.words_are_in(cx);
             }
             Event::TranscriptionStopped { by, .. } => {
-                if let Some(t) = self.transcription.take_if(|t| t.mine) {
+                // Or it was stopped while it got ready (taking over, say),
+                // and never listened.
+                let overtaken = self
+                    .preparing
+                    .take_if(|p| *p == Preparing::Loading)
+                    .is_some();
+                self.handover = None;
+                let mine = self.transcription.take_if(|t| t.mine);
+                if mine.is_some() || overtaken {
                     // Someone else stopped it: say who.
                     let name = by
                         .as_deref()
                         .and_then(|id| self.member(id, cx))
                         .map(|m| m.read(cx).name.clone());
-                    match name {
-                        Some(name) => {
+                    match (name, mine) {
+                        (Some(name), mine) => {
                             self.flash(
                                 Notice {
                                     text: format!("{} stopped the transcript", first_name(&name)),
@@ -1476,9 +1484,12 @@ impl Call {
                                 },
                                 cx,
                             );
-                            self.log(name, Happened::StoppedTranscribing, cx);
+                            if mine.is_some() {
+                                self.log(name, Happened::StoppedTranscribing, cx);
+                            }
                         }
-                        None => self.log(t.name, Happened::StoppedTranscribing, cx),
+                        (None, Some(t)) => self.log(t.name, Happened::StoppedTranscribing, cx),
+                        (None, None) => {}
                     }
                 }
                 self.words_are_in(cx);

@@ -36,6 +36,10 @@ pub fn is_valid_room_id(id: &str) -> bool {
 
 /// The LiveKit data topic for transcripts, between apps in a call.
 pub const TRANSCRIPT_TOPIC: &str = "quipcall.transcript";
+/// How long after a Mac stops transcribing (its `quipcall.transcribing`
+/// claim goes) apps still take its lines: the last words, transcribed after
+/// the claim goes. The web app mirrors it.
+pub const LAST_WORDS_MS: u64 = 15_000;
 
 /// A message on [`TRANSCRIPT_TOPIC`]. The Mac that transcribes a call sends
 /// each line to everyone as it comes (drafts too), and the lines so far to
