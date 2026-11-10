@@ -92,6 +92,12 @@ export type Line = {
   atMs: number;
   text: string;
   done: boolean;
+  /**
+   * From another Mac than the one that transcribed it (history after a
+   * handover). Anyone claiming the transcript can relay, so that Mac's own
+   * final replaces it.
+   */
+  relayed: boolean;
 };
 
 /** Lines in the order they were begun, drafts replaced by what follows them. */
@@ -105,12 +111,13 @@ export function apply(
   for (const l of incoming) {
     const key = `${l.by ?? by}/${l.id}`;
     const at = next.findIndex((x) => x.key === key);
-    // A final line stays as it is, whoever sends: a draft that comes late
-    // (another Mac relayed the final first) doesn't undo it.
-    if (at >= 0 && next[at].done) continue;
+    const relayed = (l.by ?? by) !== by;
+    // A final line stays as it is: a draft that comes late (another Mac
+    // relayed the final first) doesn't undo it. Only a relayed one gives way,
+    // to the final of the Mac that transcribed it.
+    if (at >= 0 && next[at].done && !(next[at].relayed && !relayed && l.done)) continue;
     // Another Mac's line, relayed (history after a handover), only adds what
     // isn't here, or finishes a draft.
-    const relayed = (l.by ?? by) !== by;
     if (relayed && (!l.done || !l.text)) continue;
     if (!l.text) {
       // A final line with no text takes its draft back.
@@ -127,6 +134,7 @@ export function apply(
       atMs: l.at_ms,
       text: l.text,
       done: l.done,
+      relayed,
     };
     if (at >= 0) next[at] = line;
     else {

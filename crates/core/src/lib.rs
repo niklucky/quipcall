@@ -145,10 +145,12 @@ pub enum Event {
     /// What someone said, or a draft of it while they talk (`done` false),
     /// as transcribed on `by`'s Mac (an identity; yours, or a transcriber's,
     /// now or before a handover). A line replaces earlier ones with its id
-    /// from the same transcriber.
+    /// from the same transcriber. `relayed`: it came from another Mac (the
+    /// next transcriber's history), so it stands only until `by`'s own final.
     TranscriptLine {
         by: String,
         line: TranscriptLine,
+        relayed: bool,
     },
     /// Your transcription stopped, and every line is out. `by` asked for it,
     /// if it wasn't you; `handed_over`: their Mac carries on.
@@ -255,14 +257,16 @@ struct State {
     /// Starts so far, counted: each knows which is its own.
     starts: u64,
     /// The Macs you asked to take over your transcript, with the claim you
-    /// have now: any of them may. A Stop that comes to you meanwhile goes on
-    /// to each, so none carries on a transcript that was stopped.
+    /// have now: any of them may. A Stop that comes to you goes on to each,
+    /// so none carries on a transcript that was stopped: even after one took
+    /// over, as another's start may still be on its way and pass it by.
+    /// Until the Stop, or you start again, or leave.
     handover_asked: Vec<String>,
-    /// The one that took over, and when: a Stop just after goes on to it.
+    /// The Mac that took over, and when: a Stop just after goes on to it.
     handed_to: Option<(String, Instant)>,
     /// The call's final lines, from your Mac or whoever transcribed before
     /// (a handover keeps them), for whoever joins while yours transcribes.
-    transcribed: Vec<TranscriptLine>,
+    transcribed: Vec<Kept>,
     /// Macs that stopped transcribing the call, and when: their last lines
     /// may still be on the way. Anyone else's lines are dropped.
     stopped_transcribing: HashMap<String, Instant>,
@@ -387,23 +391,10 @@ impl Engine {
         // a call connected before the goodbye below finishes has its own.
         let (room, audio, screen, camera, recorder, transcribing) = {
             let mut s = self.state.lock();
-            audio_tap::set_mic_live(&s.hub, false);
-            s.hub = Default::default();
-            s.mic = None;
-            s.transcribed.clear();
-            s.stopped_transcribing.clear();
-            s.handover_asked.clear();
-            s.handed_to = None;
-            // A start on its way was for this call: it ends with it.
-            s.start = Start::No;
-            s.mics.clear();
-            for (_, task) in s.mic_streams.drain() {
-                task.abort();
-            }
+            forget_call(&mut s);
             // Forget goodbyes already said. `peek` would only see ones
             // something awaited, so poll them.
             s.closing.retain(|c| c.clone().now_or_never().is_none());
-            s.connection += 1;
             (
                 s.room.take(),
                 s.audio.take(),
@@ -986,7 +977,7 @@ async fn on_transcript(
 ) {
     let by = from.identity().to_string();
     match serde_json::from_slice::<TranscriptMessage>(payload) {
-        Ok(TranscriptMessage::Lines { mut lines }) => {
+        Ok(TranscriptMessage::Lines { lines }) => {
             // Only a Mac that transcribes the call speaks for it: anyone can
             // send on the topic, and put words in anyone's mouth. Which Mac
             // that is, everyone sees. It's an attribute anyone may set, so
@@ -1001,10 +992,12 @@ async fn on_transcript(
                 tracing::warn!(%by, "transcript lines from a Mac that doesn't transcribe: dropped");
                 return;
             }
-            take_lines(&mut state.lock().transcribed, &by, &mut lines);
-            for line in lines {
+            let lines = take_lines(&mut state.lock().transcribed, &by, lines);
+            for (line, relayed) in lines {
                 let by = line.by.clone().unwrap_or_default();
-                let _ = events.send(Event::TranscriptLine { by, line }).await;
+                let _ = events
+                    .send(Event::TranscriptLine { by, line, relayed })
+                    .await;
             }
         }
         Ok(TranscriptMessage::Stop) => {
@@ -1094,6 +1087,7 @@ async fn start_transcribing(
         let _ = lines.try_send(Event::TranscriptLine {
             by: by.clone(),
             line,
+            relayed: false,
         });
     };
     {
@@ -1105,7 +1099,7 @@ async fn start_transcribing(
                 {
                     let mut s = state.lock();
                     if s.connection == connection {
-                        remember(&mut s.transcribed, &line);
+                        remember(&mut s.transcribed, &line, false);
                     }
                 }
                 let message = TranscriptMessage::Lines { lines: vec![line] };
@@ -1184,14 +1178,11 @@ fn finish_start(s: &mut State, id: u64) {
     }
 }
 
-/// `by` took over your transcript. If you asked it to, a Stop just after
-/// goes on to it; nobody else can take over now, your claim is gone.
+/// `by` took over your transcript: a Stop just after goes on to it. The
+/// others you asked still get it too (see [`State::handover_asked`]).
 fn took_over(s: &mut State, by: Option<&str>) {
-    if let Some(by) = by
-        && s.handover_asked.iter().any(|a| a == by)
-    {
+    if let Some(by) = by {
         s.handed_to = Some((by.to_owned(), Instant::now()));
-        s.handover_asked.clear();
     }
 }
 
@@ -1488,27 +1479,67 @@ fn nobody_transcribes(room: &Room) -> anyhow::Result<()> {
     }
 }
 
-/// Lines `by` sent, as they're shown: each says which Mac transcribed it
-/// (older apps leave it out: then it's the sender's). Another Mac's line,
-/// relayed (history after a handover), only adds what you don't have: it
-/// never changes or takes back a line.
-fn take_lines(kept: &mut Vec<TranscriptLine>, by: &str, lines: &mut Vec<TranscriptLine>) {
-    lines.retain_mut(|line| {
-        let relayed = line.by.get_or_insert_with(|| by.to_owned()) != by;
-        remember(kept, line) || !relayed
-    });
+/// Lines `by` sent, as they're shown, and whether each was relayed: each
+/// says which Mac transcribed it (older apps leave it out: then it's the
+/// sender's). Another Mac's line, relayed (history after a handover), only
+/// adds what you don't have: it never changes or takes back a line.
+fn take_lines(
+    kept: &mut Vec<Kept>,
+    by: &str,
+    lines: Vec<TranscriptLine>,
+) -> Vec<(TranscriptLine, bool)> {
+    lines
+        .into_iter()
+        .filter_map(|mut line| {
+            let relayed = line.by.get_or_insert_with(|| by.to_owned()) != by;
+            (remember(kept, &line, relayed) || !relayed).then_some((line, relayed))
+        })
+        .collect()
 }
 
-/// A final line, kept for whoever joins later: once, however it came (from
-/// the Mac that transcribed it, or relayed by the next one). Whether it's
-/// new.
-fn remember(lines: &mut Vec<TranscriptLine>, line: &TranscriptLine) -> bool {
-    let same = |l: &TranscriptLine| l.by == line.by && l.id == line.id;
-    let new = line.done && !line.text.is_empty() && !lines.iter().rev().any(same);
-    if new {
-        lines.push(line.clone());
+/// A final line, kept for whoever joins later.
+#[derive(Clone, Debug)]
+struct Kept {
+    line: TranscriptLine,
+    /// It came from another Mac than the one that transcribed it, which
+    /// anyone claiming the transcript can be: it stands only until that
+    /// Mac's own final.
+    relayed: bool,
+}
+
+/// A final line, kept once however it came (from the Mac that transcribed
+/// it, or `relayed` by the next one). That Mac's own final replaces a
+/// relayed one, or takes it back; nothing else changes a kept line. Whether
+/// anything changed.
+fn remember(kept: &mut Vec<Kept>, line: &TranscriptLine, relayed: bool) -> bool {
+    if !line.done {
+        return false;
     }
-    new
+    let same = kept
+        .iter()
+        .rposition(|k| k.line.by == line.by && k.line.id == line.id);
+    match same {
+        Some(at) if kept[at].relayed && !relayed => {
+            if line.text.is_empty() {
+                kept.remove(at);
+            } else {
+                kept[at] = Kept {
+                    line: line.clone(),
+                    relayed,
+                };
+            }
+            true
+        }
+        Some(_) => false,
+        None if line.text.is_empty() => false,
+        None => {
+            kept.push(Kept {
+                line: line.clone(),
+                relayed,
+            });
+            true
+        }
+    }
 }
 
 /// Someone else started transcribing while your Mac does. The one who
@@ -1885,7 +1916,10 @@ async fn connect(
             RoomEvent::ParticipantConnected(p) => {
                 let history = {
                     let s = state.lock();
-                    s.transcribing.as_ref().map(|_| s.transcribed.clone())
+                    s.transcribing
+                        .as_ref()
+                        .map(|_| s.transcribed.iter().map(|k| k.line.clone()))
+                        .map(Vec::from_iter)
                 };
                 if let Some(lines) = history.filter(|l| !l.is_empty()) {
                     let to = p.identity().to_string();
@@ -1915,9 +1949,7 @@ async fn connect(
         let mut s = state.lock();
         if is_current(&s, &room) {
             s.room = None;
-            s.connection += 1;
-            s.mic = None;
-            audio_tap::set_mic_live(&s.hub, false);
+            forget_call(&mut s);
             (s.recorder.take(), s.transcribing.take())
         } else {
             (None, None)
@@ -1926,6 +1958,27 @@ async fn connect(
     stop_taking_in(transcribing.as_ref(), recorder.as_ref());
     wind_down(transcribing, recorder, &events, true).await;
     Ok(())
+}
+
+/// What the call that ends leaves behind, gone, however it ends: the next
+/// call on this engine starts with nothing of it (its lines, a start on its
+/// way, its microphones). Its own transcript and recording, once taken out,
+/// still finish.
+fn forget_call(s: &mut State) {
+    audio_tap::set_mic_live(&s.hub, false);
+    s.hub = Default::default();
+    s.mic = None;
+    s.transcribed.clear();
+    s.stopped_transcribing.clear();
+    s.handover_asked.clear();
+    s.handed_to = None;
+    s.start = Start::No;
+    s.videos.clear();
+    s.mics.clear();
+    for (_, task) in s.mic_streams.drain() {
+        task.abort();
+    }
+    s.connection += 1;
 }
 
 /// The call is over for your transcript and recording: neither takes in
@@ -2156,14 +2209,14 @@ mod tests {
             by: Some(by.into()),
         };
         let mut kept = Vec::new();
-        remember(&mut kept, &line("a", 1, "Hel", false));
-        remember(&mut kept, &line("a", 1, "Hello", true));
+        remember(&mut kept, &line("a", 1, "Hel", false), false);
+        remember(&mut kept, &line("a", 1, "Hello", true), false);
         // Again, in history from the Mac that took over.
-        remember(&mut kept, &line("a", 1, "Hello", true));
-        remember(&mut kept, &line("a", 2, "", true));
+        remember(&mut kept, &line("a", 1, "Hello", true), true);
+        remember(&mut kept, &line("a", 2, "", true), false);
         // That Mac's own line, with the same number.
-        remember(&mut kept, &line("b", 1, "Bye", true));
-        let texts: Vec<&str> = kept.iter().map(|l| l.text.as_str()).collect();
+        remember(&mut kept, &line("b", 1, "Bye", true), false);
+        let texts: Vec<&str> = kept.iter().map(|k| k.line.text.as_str()).collect();
         assert_eq!(texts, ["Hello", "Bye"]);
     }
 
@@ -2194,9 +2247,10 @@ mod tests {
     }
 
     /// You asked Boris, then Carol, to take over; Boris did. A Stop that
-    /// still comes to you goes on to Boris. Before anyone does, to both.
+    /// still comes to you goes on to both: Carol's start may still be on its
+    /// way, and pass Boris by. Before anyone took over, to both too.
     #[test]
-    fn stop_goes_on_to_the_mac_that_took_over() {
+    fn stop_goes_on_to_every_mac_that_may_take_over() {
         let mut s = State {
             handover_asked: vec!["boris".into(), "carol".into()],
             ..State::default()
@@ -2204,15 +2258,52 @@ mod tests {
         assert_eq!(stop_passes_on(&mut s, Some("anna")), ["boris", "carol"]);
         s.handover_asked = vec!["boris".into(), "carol".into()];
         took_over(&mut s, Some("boris"));
-        assert!(s.handover_asked.is_empty());
-        assert_eq!(stop_passes_on(&mut s, Some("anna")), ["boris"]);
+        assert_eq!(stop_passes_on(&mut s, Some("anna")), ["boris", "carol"]);
         // Once.
         assert!(stop_passes_on(&mut s, Some("anna")).is_empty());
-        // Not back to whoever sent it, and not to a Mac you never asked.
+        // Not back to whoever sent it.
         s.handover_asked = vec!["boris".into()];
         assert!(stop_passes_on(&mut s, Some("boris")).is_empty());
+        // To a Mac that started at the same time as yours, and carries on.
         took_over(&mut s, Some("dmitri"));
-        assert!(s.handed_to.is_none());
+        assert_eq!(stop_passes_on(&mut s, None), ["dmitri"]);
+        // Starting again, yours is a new transcript.
+        s.handover_asked = vec!["boris".into()];
+        took_over(&mut s, Some("boris"));
+        reserve_start(&mut s).unwrap();
+        assert!(stop_passes_on(&mut s, None).is_empty());
+    }
+
+    /// However a call ends (you leave, or the connection gives up), the next
+    /// one on this engine has nothing of it: no lines for its late joiners,
+    /// no start in the way of its own, nobody to pass a Stop on to.
+    #[test]
+    fn an_ended_call_leaves_nothing_behind() {
+        let mut s = State::default();
+        let line = TranscriptLine {
+            id: 1,
+            speaker: "anna".into(),
+            at_ms: 1000,
+            text: "Hello".into(),
+            done: true,
+            by: Some("anna-mac".into()),
+        };
+        remember(&mut s.transcribed, &line, false);
+        reserve_start(&mut s).unwrap();
+        s.handover_asked.push("boris".into());
+        took_over(&mut s, Some("carol"));
+        s.stopped_transcribing
+            .insert("dmitri".into(), Instant::now());
+        let call = s.connection;
+        forget_call(&mut s);
+        assert!(s.transcribed.is_empty());
+        assert!(s.stopped_transcribing.is_empty());
+        assert!(stop_passes_on(&mut s, None).is_empty());
+        assert_ne!(s.connection, call);
+        assert!(
+            reserve_start(&mut s).is_some(),
+            "the old start is in the way"
+        );
     }
 
     /// Leaving while your model loads drops that start: the next call can
@@ -2254,26 +2345,72 @@ mod tests {
             by: by.map(Into::into),
         };
         let mut kept = Vec::new();
-        let mut live = vec![line(None, 1, "Hello"), line(None, 2, "Bye")];
-        take_lines(&mut kept, "a", &mut live);
+        let live = take_lines(
+            &mut kept,
+            "a",
+            vec![line(None, 1, "Hello"), line(None, 2, "Bye")],
+        );
         assert_eq!(live.len(), 2);
-        assert!(live.iter().all(|l| l.by.as_deref() == Some("a")));
-        let mut relayed = vec![
-            line(Some("a"), 1, "Forged"),
-            line(Some("a"), 2, ""),
-            line(Some("a"), 3, "Missed"),
-            line(Some("b"), 1, "Theirs"),
-        ];
-        take_lines(&mut kept, "b", &mut relayed);
-        let texts = |lines: &[TranscriptLine]| -> Vec<String> {
-            lines.iter().map(|l| l.text.clone()).collect()
+        assert!(
+            live.iter()
+                .all(|(l, relayed)| l.by.as_deref() == Some("a") && !relayed)
+        );
+        let relayed = take_lines(
+            &mut kept,
+            "b",
+            vec![
+                line(Some("a"), 1, "Forged"),
+                line(Some("a"), 2, ""),
+                line(Some("a"), 3, "Missed"),
+                line(Some("b"), 1, "Theirs"),
+            ],
+        );
+        let texts = |lines: &[(TranscriptLine, bool)]| -> Vec<(String, bool)> {
+            lines.iter().map(|(l, r)| (l.text.clone(), *r)).collect()
         };
-        assert_eq!(texts(&relayed), ["Missed", "Theirs"]);
-        assert_eq!(texts(&kept), ["Hello", "Bye", "Missed", "Theirs"]);
+        assert_eq!(
+            texts(&relayed),
+            [("Missed".into(), true), ("Theirs".into(), false)]
+        );
+        let kept_texts =
+            |kept: &[Kept]| -> Vec<String> { kept.iter().map(|k| k.line.text.clone()).collect() };
+        assert_eq!(kept_texts(&kept), ["Hello", "Bye", "Missed", "Theirs"]);
         // A Mac's own line may still be taken back by it.
-        let mut back = vec![line(Some("b"), 1, "")];
-        take_lines(&mut kept, "b", &mut back);
+        let back = take_lines(&mut kept, "b", vec![line(Some("b"), 1, "")]);
         assert_eq!(back.len(), 1);
+    }
+
+    /// Anyone can claim the transcript, so a relayed final stands only until
+    /// the Mac that said it sends its own: a final forged from a draft it
+    /// saw doesn't keep the real one out.
+    #[test]
+    fn the_own_final_beats_a_relayed_one() {
+        let line = |by: Option<&str>, id, text: &str| TranscriptLine {
+            id,
+            speaker: "anna".into(),
+            at_ms: 1000 + id,
+            text: text.into(),
+            done: true,
+            by: by.map(Into::into),
+        };
+        let kept_texts =
+            |kept: &[Kept]| -> Vec<String> { kept.iter().map(|k| k.line.text.clone()).collect() };
+        let mut kept = Vec::new();
+        let forged = take_lines(&mut kept, "mallory", vec![line(Some("a"), 5, "Forged")]);
+        assert_eq!(forged.len(), 1);
+        assert!(forged[0].1, "relayed");
+        let real = take_lines(&mut kept, "a", vec![line(None, 5, "Real")]);
+        assert_eq!(real.len(), 1);
+        assert!(!real[0].1);
+        assert_eq!(kept_texts(&kept), ["Real"]);
+        // Then it stays: relayed again, or changed.
+        assert!(take_lines(&mut kept, "mallory", vec![line(Some("a"), 5, "Forged")]).is_empty());
+        take_lines(&mut kept, "a", vec![line(None, 5, "Changed")]);
+        assert_eq!(kept_texts(&kept), ["Real"]);
+        // A relayed line the Mac takes back (it was nothing) goes.
+        take_lines(&mut kept, "mallory", vec![line(Some("a"), 6, "Forged")]);
+        take_lines(&mut kept, "a", vec![line(None, 6, "")]);
+        assert_eq!(kept_texts(&kept), ["Real"]);
     }
 
     /// History to a late joiner fits LiveKit's packets however long the

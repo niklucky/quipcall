@@ -42,6 +42,10 @@ pub struct Said {
     pub text: String,
     /// Final; a draft until then.
     pub done: bool,
+    /// From another Mac than the one that transcribed it (history after a
+    /// handover). Anyone claiming the transcript can relay, so that Mac's
+    /// own final replaces it.
+    pub relayed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -99,14 +103,16 @@ impl Transcript {
 
     /// What [`Transcript::said`] changes, if anything. A final line stays as
     /// it is: a draft that comes late (another Mac relayed the final first)
-    /// doesn't undo it.
+    /// doesn't undo it. Only a relayed one gives way, to the final of the
+    /// Mac that transcribed it.
     fn take(&mut self, said: Said) -> Option<Splice> {
         let existing = self
             .items
             .iter()
             .position(|i| matches!(i, Item::Said(s) if s.id == said.id));
+        let stays = |s: &Said| s.done && !(s.relayed && !said.relayed && said.done);
         Some(match existing {
-            Some(ix) if matches!(&self.items[ix], Item::Said(s) if s.done) => return None,
+            Some(ix) if matches!(&self.items[ix], Item::Said(s) if stays(s)) => return None,
             Some(ix) if said.text.is_empty() => {
                 self.items.remove(ix);
                 Splice {
@@ -584,11 +590,8 @@ impl Render for TranscriptWindow {
 mod tests {
     use super::*;
 
-    /// Another Mac relayed the final line before its draft came: the late
-    /// draft doesn't undo it, nor does anything else.
-    #[test]
-    fn a_final_line_stays() {
-        let line = |text: &str, done| Said {
+    fn line(text: &str, done: bool, relayed: bool) -> Said {
+        Said {
             id: "anna-mac/7".into(),
             identity: "anna".into(),
             name: "Anna".into(),
@@ -596,18 +599,53 @@ mod tests {
             at_ms: 1000,
             text: text.into(),
             done,
-        };
+            relayed,
+        }
+    }
+
+    fn texts(t: &Transcript) -> Vec<&str> {
+        t.lines().map(|s| s.text.as_str()).collect()
+    }
+
+    /// A final line stays: a draft that comes late doesn't undo it, nor does
+    /// anything else.
+    #[test]
+    fn a_final_line_stays() {
+        let line = |text: &str, done| line(text, done, false);
         let mut t = Transcript::new("Me".into());
         assert!(t.take(line("Hello", true)).is_some());
         assert!(t.take(line("Hel", false)).is_none());
         assert!(t.take(line("", true)).is_none());
         assert!(t.take(line("Changed", true)).is_none());
-        let texts: Vec<&str> = t.lines().map(|s| s.text.as_str()).collect();
-        assert_eq!(texts, ["Hello"]);
+        assert_eq!(texts(&t), ["Hello"]);
         // A draft is still replaced, and taken back.
         let mut d = Transcript::new("Me".into());
         d.take(line("Hel", false));
         d.take(line("", true));
         assert_eq!(d.lines().count(), 0);
+    }
+
+    /// Another Mac relayed a final (anyone claiming the transcript can, and
+    /// forge it from a draft it saw): the transcribing Mac's own final still
+    /// replaces it, or takes it back. Nothing else does.
+    #[test]
+    fn the_own_final_beats_a_relayed_one() {
+        let mut t = Transcript::new("Me".into());
+        t.take(line("Hel", false, false));
+        t.take(line("Forged", true, true));
+        assert!(
+            t.take(line("Hello", false, false)).is_none(),
+            "a late draft"
+        );
+        assert!(t.take(line("Again", true, true)).is_none(), "relayed again");
+        assert!(t.take(line("Hello", true, false)).is_some());
+        assert_eq!(texts(&t), ["Hello"]);
+        assert!(t.take(line("Forged", true, true)).is_none());
+        assert!(t.take(line("Changed", true, false)).is_none());
+        assert_eq!(texts(&t), ["Hello"]);
+        let mut back = Transcript::new("Me".into());
+        back.take(line("Forged", true, true));
+        back.take(line("", true, false));
+        assert_eq!(back.lines().count(), 0);
     }
 }

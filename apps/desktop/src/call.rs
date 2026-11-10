@@ -1400,7 +1400,7 @@ impl Call {
                 self.log(name, Happened::StartedTranscribing, cx);
                 self.open_transcript_by_itself(cx);
             }
-            Event::TranscriptLine { by, line } => {
+            Event::TranscriptLine { by, line, relayed } => {
                 // On the wall clock, relative to when you connected.
                 let connected_ms = self
                     .connected_since()
@@ -1424,6 +1424,7 @@ impl Call {
                     at_ms: line.at_ms as i64 - connected_ms,
                     text: line.text,
                     done: line.done,
+                    relayed,
                 };
                 self.transcript.update(cx, |t, cx| t.said(said, cx));
                 // Lines don't change anything else on screen.
