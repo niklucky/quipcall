@@ -3,7 +3,9 @@
 //! The main row holds up to three people who were active last (spoke,
 //! unmuted or joined; a newcomer takes the place of whoever has been quiet
 //! longest), then you (muted or not, so muting moves nothing), then a stack
-//! with everyone muted or quiet for two minutes, then Share, Mic and Leave. People with their camera on show as
+//! with everyone muted or quiet for two minutes, then a red record button
+//! while anyone records, a captions button while anyone transcribes, then
+//! Share, Mic and Leave. People with their camera on show as
 //! video tiles above the row; while you share, your screen's preview sits on
 //! top. Hovering the buttons, the stack or a face opens a row underneath
 //! (above the main row instead when the screen ends first) and closes once
@@ -22,13 +24,13 @@ use gpui::{
 };
 
 use crate::assets::Icon;
-use crate::call::{Call, Camera, Member, Mode};
+use crate::call::{Call, Camera, Member, Mode, NoticeAction, Preparing, PromptKind};
 use crate::mac;
 use crate::theme::{
-    ACCENT, DANGER, SPEAKING, TEXT, TEXT_DIM, avatar_background, black, first_name, glass_tint,
-    white,
+    ACCENT, DANGER, RECORDING, SPEAKING, TEXT, TEXT_DIM, avatar_background, black, first_name,
+    glass_tint, white,
 };
-use crate::ui::{Tone, avatar, icon, icon_button, ring, round_button, rounded_video};
+use crate::ui::{Kind, Tone, avatar, button, icon, icon_button, ring, round_button, rounded_video};
 
 /// People in the row besides you.
 const ROW_MAX: usize = 3;
@@ -57,14 +59,14 @@ const COUNT: f32 = 26.0;
 /// A person in the stack's row: avatar and first name.
 const PERSON: f32 = 54.0;
 const CONTROLS_H: f32 = 73.0;
-/// The hover row's Camera, Copy link and Call window.
+/// The hover row's Camera, Copy link, Call window, Record and Transcribe.
 const CONTROL_W: f32 = 60.0;
 const CONTROL_GAP: f32 = 4.0;
-/// The hover row of controls, right-aligned under the buttons. The widget is
-/// never narrower, and its width changes on the left, so turning your camera
-/// on from that row (your face becomes a tile) moves nothing in it.
-const NARROWEST: f32 = 3.0 * CONTROL_W + 2.0 * CONTROL_GAP + PAD;
 const LINE_H: f32 = 37.0;
+/// A line with a button in it (Stop, Show in Finder).
+const BUTTON_LINE_H: f32 = LINE_H + 6.0;
+/// A line of text over a line of buttons (what to record).
+const CHOICE_H: f32 = 1.0 + 8.0 + 18.0 + 6.0 + 24.0 + 10.0;
 /// Rows open and close after the cursor settles this long.
 const HOVER_DELAY: Duration = Duration::from_millis(250);
 /// While a row is open, where the cursor is gets checked this often: GPUI
@@ -108,6 +110,16 @@ enum Drawer {
     People,
     /// The name of the face under the cursor (an identity).
     Name(String),
+    /// Who records the call, for how long; Stop if it's you.
+    Recording,
+    /// What to record: audio, or audio and a screen.
+    RecordChoice,
+    /// Transcribe on this Mac (with a download first, maybe).
+    TranscribeChoice,
+    /// Whose Mac transcribes, with which model; Stop if it's yours.
+    Transcript,
+    /// A question until you answer it: transcribe on this Mac?
+    Prompt,
     /// "Joining…", a permission prompt or an error.
     Notice,
 }
@@ -124,6 +136,15 @@ struct Plan {
     sharers: Vec<String>,
     /// The shape of what you share, while you share.
     preview: Option<f32>,
+    /// Someone records the call: the record button shows.
+    recording: bool,
+    /// Someone transcribes the call, or your Mac gets ready to: the
+    /// captions button shows.
+    captions: bool,
+    /// Tiles in the hover row of controls.
+    controls: usize,
+    /// The notice has a button (Show in Finder, Settings).
+    notice_button: bool,
 }
 
 pub struct Capsule {
@@ -171,7 +192,8 @@ impl Capsule {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let alive = this.update(cx, |this, cx| {
-                    if this.update_slots(cx) || matches!(this.open, Some(Drawer::Name(_))) {
+                    let ticking = matches!(this.open, Some(Drawer::Name(_) | Drawer::Recording));
+                    if this.update_slots(cx) || ticking {
                         cx.notify();
                     }
                 });
@@ -301,18 +323,23 @@ impl Capsule {
             stack,
             sharers: call.sharers(cx),
             preview: preview_aspect(me.read(cx)),
+            recording: call.recording.is_some(),
+            captions: call.transcription.is_some() || call.preparing.is_some(),
+            controls: 3
+                + usize::from(call.recording.is_none())
+                + usize::from(call.can_transcribe()),
+            notice_button: call.notice().is_some_and(|n| n.action.is_some()),
         }
     }
 
-    /// The drawer showing: the one opened by hovering, else a notice.
+    /// The drawer showing: the one opened by hovering, else a question,
+    /// else a notice.
     fn drawer(&self, cx: &App) -> Option<Drawer> {
-        self.open.clone().or_else(|| {
-            self.call
-                .read(cx)
-                .notice()
-                .is_some()
-                .then_some(Drawer::Notice)
-        })
+        let c = self.call.read(cx);
+        self.open
+            .clone()
+            .or_else(|| c.prompt.is_some().then_some(Drawer::Prompt))
+            .or_else(|| c.notice().is_some().then_some(Drawer::Notice))
     }
 
     /// Size the window for what's on show, keeping the main row in place.
@@ -320,10 +347,12 @@ impl Capsule {
         let plan = self.plan(cx);
         // As wide as the row and the tiles. The rows that open on hover fit
         // in that, so hovering never changes the width.
-        let wide = plan.preview.is_some() || self.call.read(cx).notice().is_some();
+        let wide = plan.preview.is_some()
+            || self.call.read(cx).notice().is_some()
+            || self.call.read(cx).prompt.is_some();
         let width = row_width(&plan)
             .max(strip_width(&plan))
-            .max(NARROWEST)
+            .max(controls_width(plan.controls))
             .max(if wide { WIDE } else { 0.0 });
         let tops = preview_height(&plan, width) + strip_height(&plan);
         let drawer_h = self
@@ -418,6 +447,11 @@ impl Capsule {
         // Not through set_open: the cursor is elsewhere in tests.
         self.open = match which {
             "people" => Some(Drawer::People),
+            "recording" => Some(Drawer::Recording),
+            "record-choice" => Some(Drawer::RecordChoice),
+            "transcribe-choice" => Some(Drawer::TranscribeChoice),
+            "transcript" => Some(Drawer::Transcript),
+            "prompt" => Some(Drawer::Prompt),
             "none" => None,
             _ => Some(Drawer::Controls),
         };
@@ -439,6 +473,13 @@ fn stack_width(n: usize) -> f32 {
     2.0 + FACE + behind * GHOST + count + 9.0
 }
 
+/// The hover row of controls, right-aligned under the buttons. The widget is
+/// never narrower, and its width changes on the left, so turning your camera
+/// on from that row (your face becomes a tile) moves nothing in it.
+fn controls_width(n: usize) -> f32 {
+    n as f32 * CONTROL_W + (n - 1) as f32 * CONTROL_GAP + PAD
+}
+
 fn row_width(plan: &Plan) -> f32 {
     let mut items: Vec<f32> = plan.faces.iter().map(|_| FACE).collect();
     let mut extra = 0.0;
@@ -450,6 +491,12 @@ fn row_width(plan: &Plan) -> f32 {
     }
     if !items.is_empty() {
         items.push(5.0); // the separator
+    }
+    if plan.recording {
+        items.push(BUTTON);
+    }
+    if plan.captions {
+        items.push(BUTTON);
     }
     items.push(3.0 * BUTTON + 2.0 * GAP);
     2.0 * PAD + items.iter().sum::<f32>() + GAP * (items.len() - 1) as f32 + extra
@@ -492,6 +539,10 @@ fn per_line(width: f32) -> usize {
 fn drawer_height(drawer: &Drawer, plan: &Plan, width: f32) -> f32 {
     match drawer {
         Drawer::Controls => CONTROLS_H,
+        Drawer::Recording => BUTTON_LINE_H,
+        Drawer::RecordChoice | Drawer::TranscribeChoice | Drawer::Prompt => CHOICE_H,
+        Drawer::Transcript => BUTTON_LINE_H,
+        Drawer::Notice if plan.notice_button => BUTTON_LINE_H,
         Drawer::Name(_) | Drawer::Notice => LINE_H,
         Drawer::People => {
             let lines = plan.stack.len().div_ceil(per_line(width)).max(1) as f32;
@@ -842,6 +893,62 @@ impl Capsule {
             );
         let separator = (has_faces || stack.is_some())
             .then(|| div().w(px(1.0)).h(px(24.0)).mx(px(2.0)).bg(white(0.14)));
+        // Everyone sees that the call is recorded; hovering says by whom.
+        let record = plan.recording.then(|| {
+            round_button("recording", Icon::CircleDot, BUTTON, Tone::Recording)
+                .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
+                    if *hovered {
+                        this.set_open(Some(Drawer::Recording), window, cx);
+                    }
+                }))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.set_open(Some(Drawer::Recording), window, cx)
+                }))
+        });
+        // Nobody is transcribed without seeing it either; click for the
+        // transcript, hover for who does it.
+        let captions = plan.captions.then(|| {
+            let live = c.transcription.is_some();
+            div()
+                .relative()
+                .flex_none()
+                .child(
+                    round_button(
+                        "captions",
+                        Icon::Captions,
+                        BUTTON,
+                        if c.transcript_open {
+                            Tone::Selected
+                        } else {
+                            Tone::Plain
+                        },
+                    )
+                    .on_hover(cx.listener(|this, hovered: &bool, window, cx| {
+                        if *hovered {
+                            this.set_open(Some(Drawer::Transcript), window, cx);
+                        }
+                    }))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.call.update(cx, |c, cx| {
+                            let open = !c.transcript_open;
+                            c.set_transcript_open(open, cx)
+                        })
+                    })),
+                )
+                .when(live, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .top(px(1.0))
+                            .right(px(1.0))
+                            .size(px(9.0))
+                            .rounded_full()
+                            .bg(rgb(RECORDING))
+                            .border_2()
+                            .border_color(rgb(EDGE)),
+                    )
+                })
+        });
         div()
             .flex_none()
             .h(px(MAIN))
@@ -853,6 +960,8 @@ impl Capsule {
             .children(faces)
             .children(stack)
             .children(separator)
+            .children(record)
+            .children(captions)
             .child(controls)
     }
 
@@ -976,6 +1085,11 @@ impl Capsule {
             Drawer::Controls => self.controls_row(cx).into_any_element(),
             Drawer::People => self.people_row(plan, cx).into_any_element(),
             Drawer::Name(identity) => self.name_line(identity, plan, cx),
+            Drawer::Recording => self.recording_line(cx),
+            Drawer::RecordChoice => self.record_choice(cx).into_any_element(),
+            Drawer::TranscribeChoice => self.transcribe_choice(cx).into_any_element(),
+            Drawer::Transcript => self.transcript_line(cx),
+            Drawer::Prompt => self.prompt_view(cx).into_any_element(),
             Drawer::Notice => self.notice_line(cx),
         };
         let line = || div().flex_none().h(px(1.0)).mx(px(12.0)).bg(white(0.08));
@@ -1088,25 +1202,44 @@ impl Capsule {
     }
 
     fn notice_line(&self, cx: &App) -> AnyElement {
-        let Some((text, is_error)) = self.call.read(cx).notice() else {
+        let Some(notice) = self.call.read(cx).notice() else {
             return div().into_any_element();
         };
         let call = self.call.clone();
+        let action = notice.action.clone();
         div()
-            .h(px(18.0))
+            .h(px(if action.is_some() { 24.0 } else { 18.0 }))
             .px(px(12.0))
             .flex()
             .items_center()
             .justify_center()
-            .gap(px(4.0))
+            .gap(px(8.0))
             .text_size(px(12.0))
-            .text_color(if is_error {
+            .text_color(if notice.error {
                 rgb(0xff8a80)
             } else {
                 rgb(TEXT_DIM)
             })
-            .child(div().min_w_0().truncate().child(text))
-            .when(is_error, |el| {
+            .child(div().min_w_0().truncate().child(notice.text))
+            .when_some(action, |el, action| {
+                let button = match action {
+                    NoticeAction::ShowInFinder(file) => {
+                        button("show-file", "Show in Finder", None, Kind::Secondary, true)
+                            .on_click(move |_, _, _| crate::home::show_in_finder(&file))
+                    }
+                    // A failed download: try it again there.
+                    NoticeAction::Settings => button(
+                        "notice-settings",
+                        "Settings",
+                        Some(Icon::Settings),
+                        Kind::Secondary,
+                        true,
+                    )
+                    .on_click(|_, _, cx| crate::settings::open(cx)),
+                };
+                el.child(button.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
+            })
+            .when(notice.error, |el| {
                 el.child(
                     icon_button("dismiss", Icon::X, 20.0)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1114,6 +1247,65 @@ impl Capsule {
                 )
             })
             .into_any_element()
+    }
+
+    /// "● Recording · 4:12 [Stop]", or who else records.
+    fn recording_line(&self, cx: &App) -> AnyElement {
+        let c = self.call.read(cx);
+        let Some(r) = &c.recording else {
+            return div().into_any_element();
+        };
+        let line = div()
+            .h(px(24.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(8.0))
+            .text_size(px(12.0))
+            .text_color(rgb(TEXT_DIM))
+            .child(
+                div()
+                    .size(px(8.0))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(rgb(RECORDING)),
+            );
+        if r.is_mine() {
+            let call = self.call.clone();
+            line.child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .flex()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(TEXT))
+                            .child("Recording"),
+                    )
+                    .child(format!(
+                        "{} · {}",
+                        if r.screen { "screen" } else { "audio" },
+                        clock(r.since.elapsed())
+                    )),
+            )
+            .child(
+                button("stop-recording", "Stop", None, Kind::Secondary, true)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(move |_, _, cx| call.update(cx, |c, cx| c.toggle_record(cx))),
+            )
+            .into_any_element()
+        } else {
+            let first = first_name(&r.name);
+            line.child(div().min_w_0().truncate().child(if r.screen {
+                format!("{first} is recording their screen. Only {first} can stop it.")
+            } else {
+                format!("{first} is recording. Only {first} can stop it.")
+            }))
+            .into_any_element()
+        }
     }
 
     fn controls_row(&self, cx: &mut Context<Self>) -> Div {
@@ -1141,7 +1333,11 @@ impl Capsule {
                         .child(label),
                 )
         };
+        let can_record = c.recording.is_none();
+        let can_transcribe = c.can_transcribe();
         let (call, call2, call3) = (self.call.clone(), self.call.clone(), self.call.clone());
+        let this = cx.entity().downgrade();
+        let this2 = this.clone();
         div()
             .flex()
             .justify_end()
@@ -1176,6 +1372,313 @@ impl Capsule {
                 "Call window",
                 Box::new(move |cx| call3.update(cx, |c, cx| c.set_mode(Mode::Regular, cx))),
             ))
+            // One recording per call: gone while anyone records.
+            .when(can_record, |row| {
+                row.child(item(
+                    "record",
+                    Icon::CircleDot,
+                    Tone::Plain,
+                    "Record",
+                    // What to record comes next, in the same place.
+                    Box::new(move |cx| {
+                        let _ = this.update(cx, |capsule, cx| {
+                            capsule.open = Some(Drawer::RecordChoice);
+                            cx.notify();
+                        });
+                    }),
+                ))
+            })
+            // One transcript per call too.
+            .when(can_transcribe, |row| {
+                row.child(item(
+                    "transcribe",
+                    Icon::Captions,
+                    Tone::Plain,
+                    "Transcribe",
+                    Box::new(move |cx| {
+                        let _ = this2.update(cx, |capsule, cx| {
+                            capsule.open = Some(Drawer::TranscribeChoice);
+                            cx.notify();
+                        });
+                    }),
+                ))
+            })
+    }
+
+    /// "Parakeet v3 on this Mac. Everyone sees it." [Start], or [Download
+    /// and start] when the model isn't here yet. With others whose Macs can
+    /// transcribe: whose Mac? [This Mac] [Anna] …
+    fn transcribe_choice(&self, cx: &mut Context<Self>) -> Div {
+        let model = crate::Shell::global(cx)
+            .read(cx)
+            .store
+            .transcription
+            .model();
+        let ready = crate::models::Models::global(cx).read(cx).is_ready(model);
+        let others = self.call.read(cx).capable(cx);
+        let start_label = match (ready, others.is_empty()) {
+            (true, true) => "Start".to_owned(),
+            (true, false) => "This Mac".to_owned(),
+            (false, true) => format!(
+                "Download {} and start",
+                crate::store::file_size(model.bytes)
+            ),
+            (false, false) => format!("This Mac · {}", crate::store::file_size(model.bytes)),
+        };
+        let question = if others.is_empty() {
+            format!("{} on this Mac. Everyone sees it.", model.name)
+        } else {
+            "Transcribe on whose Mac? Everyone sees it.".to_owned()
+        };
+        let start = button(
+            "transcribe-start",
+            start_label,
+            Some(if ready {
+                Icon::Captions
+            } else {
+                Icon::Download
+            }),
+            Kind::Primary,
+            true,
+        )
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.set_open(None, window, cx);
+            this.call.update(cx, |c, cx| c.start_transcribing(cx));
+        }));
+        // Two at most: the widget is narrow. The call window lists everyone.
+        let people: Vec<_> = others
+            .into_iter()
+            .take(2)
+            .enumerate()
+            .map(|(ix, (identity, name, _))| {
+                button(
+                    ("ask", ix),
+                    first_name(&name).to_owned(),
+                    None,
+                    Kind::Secondary,
+                    true,
+                )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.set_open(None, window, cx);
+                    this.call
+                        .update(cx, |c, cx| c.ask_to_transcribe(&identity, cx));
+                }))
+            })
+            .collect();
+        let settings = if people.is_empty() {
+            button(
+                "transcribe-settings",
+                "Settings",
+                Some(Icon::Settings),
+                Kind::Secondary,
+                true,
+            )
+        } else {
+            icon_button("transcribe-settings", Icon::Settings, 24.0)
+        }
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(|_, _, cx| crate::settings::open(cx));
+        div()
+            .px(px(12.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .h(px(18.0))
+                    .max_w_full()
+                    .truncate()
+                    .text_size(px(12.0))
+                    .text_color(rgb(TEXT_DIM))
+                    .child(question),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(start)
+                    .children(people)
+                    .child(settings),
+            )
+    }
+
+    /// "Anna asks your Mac to transcribe the call" [Accept] [Not now], or
+    /// whether to carry on after the transcriber left.
+    fn prompt_view(&self, cx: &mut Context<Self>) -> Div {
+        let Some(prompt) = self.call.read(cx).prompt.clone() else {
+            return div();
+        };
+        let first = first_name(&prompt.name).to_owned();
+        let (question, yes) = match prompt.kind {
+            PromptKind::Asked { handover: false } => {
+                (format!("{first} asks your Mac to transcribe"), "Accept")
+            }
+            PromptKind::Asked { handover: true } => {
+                (format!("{first} asks your Mac to take over"), "Accept")
+            }
+            PromptKind::TakeOver => (format!("{first} left. Transcribe here?"), "Transcribe"),
+        };
+        div()
+            .px(px(12.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .h(px(18.0))
+                    .max_w_full()
+                    .truncate()
+                    .text_size(px(12.0))
+                    .text_color(rgb(TEXT))
+                    .child(question),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(6.0))
+                    .child(
+                        button("prompt-yes", yes, Some(Icon::Captions), Kind::Primary, true)
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.call.update(cx, |c, cx| c.accept_prompt(cx))
+                            })),
+                    )
+                    .child(
+                        button("prompt-no", "Not now", None, Kind::Secondary, true)
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.call.update(cx, |c, cx| c.decline_prompt(cx))
+                            })),
+                    ),
+            )
+    }
+
+    /// "● Transcribing on your Mac · Parakeet v3 [Stop]", someone else's, or
+    /// the download on its way.
+    fn transcript_line(&self, cx: &App) -> AnyElement {
+        let c = self.call.read(cx);
+        let line = div()
+            .h(px(24.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(8.0))
+            .text_size(px(12.0))
+            .text_color(rgb(TEXT_DIM));
+        let call = self.call.clone();
+        let action = |id: &'static str, label: &'static str| {
+            let call = call.clone();
+            button(id, label, None, Kind::Secondary, true)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, _, cx| call.update(cx, |c, cx| c.toggle_transcribe(cx)))
+        };
+        let dot = || {
+            div()
+                .size(px(8.0))
+                .flex_none()
+                .rounded_full()
+                .bg(rgb(RECORDING))
+        };
+        match (&c.transcription, c.preparing) {
+            (Some(t), _) if t.mine => line
+                .child(dot())
+                .child(div().min_w_0().truncate().child(c.transcript_status(cx)))
+                .child(action("stop-transcript", "Stop"))
+                .into_any_element(),
+            (Some(t), _) => {
+                let model = t.model.map_or(String::new(), |m| format!(" · {}", m.name));
+                line.child(dot())
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("On {}'s Mac{model}", first_name(&t.name))),
+                    )
+                    .child(action("stop-transcript", "Stop"))
+                    .into_any_element()
+            }
+            (None, Some(Preparing::Download(model))) => {
+                let percent =
+                    match crate::models::Models::global_ref(cx).map(|m| m.read(cx).state(model)) {
+                        Some(crate::models::State::Downloading { done, total }) if total > 0 => {
+                            format!(" · {}%", done * 100 / total)
+                        }
+                        _ => String::new(),
+                    };
+                line.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(format!("Downloading {}{percent}", model.name)),
+                )
+                .child(action("cancel-download", "Cancel"))
+                .into_any_element()
+            }
+            (None, _) => line
+                .child(div().min_w_0().truncate().child("Starting the transcript…"))
+                .into_any_element(),
+        }
+    }
+
+    /// "Record on this Mac", then Audio or Audio and screen (the share
+    /// picker chooses which screen).
+    fn record_choice(&self, cx: &mut Context<Self>) -> Div {
+        // What Settings says to offer first.
+        let screen_first = crate::Shell::global(cx)
+            .read(cx)
+            .store
+            .recording
+            .screen_first;
+        let choose = |id: &'static str, label: &'static str, glyph: Icon, screen: bool| {
+            let kind = if screen == screen_first {
+                Kind::Primary
+            } else {
+                Kind::Secondary
+            };
+            button(id, label, Some(glyph), kind, true)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.set_open(None, window, cx);
+                    this.call.update(cx, |c, cx| {
+                        if screen {
+                            c.choose_screen_to_record(cx)
+                        } else {
+                            c.record_audio(cx)
+                        }
+                    });
+                }))
+        };
+        div()
+            .px(px(12.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .h(px(18.0))
+                    .text_size(px(12.0))
+                    .text_color(rgb(TEXT_DIM))
+                    .child("Record on this Mac. Everyone sees it."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(6.0))
+                    .child(choose("record-audio", "Audio", Icon::Mic, false))
+                    .child(choose(
+                        "record-screen",
+                        "Audio and screen",
+                        Icon::Monitor,
+                        true,
+                    )),
+            )
     }
 }
 

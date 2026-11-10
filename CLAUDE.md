@@ -21,12 +21,14 @@ Read README.md first. Plan: docs/PLAN.md. Decisions: docs/ARCHITECTURE.md.
 
 ## Testing the desktop app
 - `QUIPCALL_DATA_DIR=/tmp/qc-data` keeps the user's rooms and history out of tests.
-- `QUIPCALL_NO_MIC=1` starts the app without opening an audio device.
+- `QUIPCALL_NO_MIC=1` starts the app without opening an audio device (and mutes Home's player). Put test variables on the command itself or `export` them in a bash script: zsh doesn't word-split `$VARS`, so `env $COMMON app` silently drops them, and an instance without `QUIPCALL_NO_MIC` opens the real microphone. Check with `ps eww -p <pid>`.
 - `--features snapshot` with `QUIPCALL_SNAPSHOT_DIR` saves a PNG of every window. The AppKit capsule clip and blur don't show in it, and a window hidden behind others stops drawing, so its PNG keeps an old frame. `QUIPCALL_SCRIPT` actions `hover`, `unhover`, `stack`, `top`, `panel` and `people` (and `QUIPCALL_PANEL=transcript|people`) reach the new UI states.
-- `QUIPCALL_SCRIPT="4:regular 8:leave"` presses buttons on a timer (`src/snapshot.rs`).
+- `QUIPCALL_SCRIPT="4:regular 8:leave"` presses buttons on a timer (`src/snapshot.rs`), in whole seconds. Building it in zsh, write `"${t}:leave"`: `$t:leave` applies zsh's `:l` modifier and the step silently never runs.
 - `QUIPCALL_FAKE_SCREEN=1` (or `=1600x900`) with the `share-own` script action shares a test pattern instead of anything on screen. Two app instances can share at once this way.
 - Without a terminal the app logs to `~/Library/Logs/Quipcall/`, which is the user's log. Run test instances under `script -q <logfile> <app> …` to keep them out of it.
-- Headless web participant: Chrome with `--headless=new --use-fake-device-for-media-stream --use-fake-ui-for-media-stream`, opening `?room=X&autojoin=1&mic=0`. The room is `window.qcRoom`, and its stats can be read over the DevTools protocol.
+- Headless web participant: Chrome with `--headless=new --use-fake-device-for-media-stream --use-fake-ui-for-media-stream`, opening `?room=X&autojoin=1&mic=0`. The room is `window.qcRoom`, and its stats can be read over the DevTools protocol. To make it speak, add `--use-file-for-fake-audio-capture=<16-bit WAV>` (`say -o x.wav --file-format=WAVE --data-format=LEI16@48000 "…"`) and `--no-sandbox`, or Chrome can't read the file and sends silence. It sends silence too for a path with `..` in it. Check with the track's `getRTCStatsReport()`: `media-source` should show `totalAudioEnergy` above 0. Editing the web app while it runs hot-reloads the page, which joins again without leaving: restart Chrome after.
+- Settings › Try it in a test instance speaks `QUIPCALL_FAKE_MIC` (a 48 kHz float WAV) instead of the microphone.
+- Transcription: `QUIPCALL_MODELS_DIR=<dir>` points at models already downloaded (named as in `crates/stt/src/catalog.rs`), so tests don't fetch 740 MB. `QUIPCALL_STT_MODELS=<dir> cargo test -p quipcall-stt -- --ignored` runs two `say` voices through the real model.
 - Noise suppression: `QUIPCALL_DENOISE=webrtc` (WebRTC's filter) or `=off` instead of DeepFilterNet, and `QUIPCALL_DENOISE_LIMIT=15/30` (dB while talking / in pauses, or `none`) for a stronger model, for A/B. `python3 dev/denoise-eval.py` runs real voices and noise through a call's audio processing and scores every chain; listen in `target/denoise-eval/out/`.
 - Measure memory with `dev/measure.sh <pid>`, which reports the physical footprint, not RSS. RSS once hid a 3 GB IOSurface leak.
 

@@ -22,6 +22,8 @@ pub const ACCENT: u32 = 0x4f8cff;
 pub const DANGER: u32 = 0xe5484d;
 /// The speaking ring, live calls.
 pub const SPEAKING: u32 = 0x3fd07a;
+/// The call is being recorded: the record button, its dot.
+pub const RECORDING: u32 = 0xff6b61;
 /// Hairlines between areas.
 pub const LINE: u32 = 0x24262d;
 

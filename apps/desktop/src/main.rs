@@ -5,9 +5,11 @@ mod fullscreen;
 mod handle;
 mod home;
 mod mac;
+mod models;
 mod onboarding;
 mod regular;
 mod screen_window;
+mod settings;
 mod share_picker;
 #[cfg(feature = "snapshot")]
 mod snapshot;
@@ -15,6 +17,7 @@ mod store;
 mod text_input;
 mod theme;
 mod timeline;
+mod transcript;
 mod ui;
 mod video_mac;
 
@@ -274,7 +277,7 @@ impl Shell {
         self.quitting = true;
         let call = self.call()?;
         Some(call.update(cx, |call, cx| {
-            call.leave(cx);
+            call.leave_now(cx);
             call.closed()
         }))
     }
@@ -377,6 +380,7 @@ fn main() {
         });
         cx.set_global(GlobalShell(shell.clone()));
         share_picker::bind_keys(cx);
+        settings::bind_keys(cx);
         fullscreen::bind_keys(cx);
         text_input::bind_keys(cx);
         mac::log_window_events();

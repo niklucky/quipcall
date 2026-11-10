@@ -16,7 +16,11 @@ ndarray = "0.15"
 tract-onnx = "=0.21.4"
 parking_lot = "0.13.0"
 quipcall-protocol.workspace = true
+quipcall-stt.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+serde_json = "1.0.154"
+# Checks downloaded models (already in the tree for LiveKit's tokens).
+sha2 = "0.10"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 tracing = "0.1.44"
 
@@ -24,13 +28,15 @@ tracing = "0.1.44"
 block2 = "0.6"
 dispatch2 = "0.3"
 objc2 = "0.6"
-objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-media", "objc2-core-video", "block2", "dispatch2", "AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession", "AVCaptureSessionPreset", "AVCaptureVideoDataOutput", "AVMediaFormat"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-media", "objc2-core-video", "block2", "dispatch2", "AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession", "AVCaptureSessionPreset", "AVCaptureVideoDataOutput", "AVMediaFormat", "AVAssetWriter", "AVAssetWriterInput", "AVVideoSettings", "AVPlayer", "AVPlayerItem", "AVCaptureAudioDataOutput"] }
+# Recordings: AVAssetWriter takes PCM in CMSampleBuffers (all system frameworks).
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFBase", "CFCGTypes", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGWindow", "CGDirectDisplay"] }
-objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMSampleBuffer", "CMTime", "CMFormatDescription", "CMAttachment", "objc2-core-video"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMBase", "CMBlockBuffer", "CMSampleBuffer", "CMTime", "CMFormatDescription", "CMAttachment", "objc2-core-video", "objc2-core-audio-types"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
 objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "SCShareableContent", "SCStream", "SCScreenshotManager", "block2", "dispatch2", "libc", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSValue", "NSError", "NSObject", "NSArray"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSValue", "NSError", "NSObject", "NSArray", "NSURL"] }
 
 [dev-dependencies]
 # RNNoise, only to compare against in examples/denoise_eval.rs.

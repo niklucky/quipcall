@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/protocol", "crates/core", "apps/server", "apps/desktop"]
+members = ["crates/protocol", "crates/core", "crates/stt", "apps/server", "apps/desktop"]
 exclude = ["vendor"]
 
 [workspace.package]
@@ -11,6 +11,7 @@ publish = false
 [workspace.dependencies]
 quipcall-protocol = { path = "crates/protocol" }
 quipcall-core = { path = "crates/core" }
+quipcall-stt = { path = "crates/stt" }
 
 [profile.dev.package."*"]
 # Dependencies (libwebrtc glue, GPUI, yuv conversion) are painfully slow unoptimized.

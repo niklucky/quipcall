@@ -1,5 +1,6 @@
 //! "Share your screen": pick a screen or window from live thumbnails, and a
-//! frame-rate preset.
+//! frame-rate preset. The same picker chooses what a recording shows ("Record
+//! your screen").
 
 use std::time::Duration;
 
@@ -31,16 +32,34 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// What the picked screen is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Purpose {
+    Share,
+    /// A recording of the call with your screen.
+    Record,
+}
+
+impl Purpose {
+    fn title(self) -> &'static str {
+        match self {
+            Purpose::Share => "Share your screen",
+            Purpose::Record => "Record your screen",
+        }
+    }
+}
+
 pub fn open(
     call: Entity<Call>,
     preset: ScreenSharePreset,
+    purpose: Purpose,
     cx: &mut App,
 ) -> Option<WindowHandle<SharePicker>> {
     let bounds = Bounds::centered(None, size(px(760.0), px(580.0)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
-            title: Some("Share your screen".into()),
+            title: Some(purpose.title().into()),
             appears_transparent: true,
             ..Default::default()
         }),
@@ -51,7 +70,7 @@ pub fn open(
     };
     let handle = cx
         .open_window(options, |window, cx| {
-            cx.new(|cx| SharePicker::new(call, preset, window, cx))
+            cx.new(|cx| SharePicker::new(call, preset, purpose, window, cx))
         })
         .inspect_err(|e| tracing::warn!("open share picker: {e:#}"))
         .ok();
@@ -68,6 +87,7 @@ enum State {
 
 pub struct SharePicker {
     call: Entity<Call>,
+    purpose: Purpose,
     state: State,
     selected: Option<SourceId>,
     preset: ScreenSharePreset,
@@ -80,6 +100,7 @@ impl SharePicker {
     fn new(
         call: Entity<Call>,
         preset: ScreenSharePreset,
+        purpose: Purpose,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -87,6 +108,7 @@ impl SharePicker {
         window.focus(&focus, cx);
         let mut picker = Self {
             call,
+            purpose,
             state: State::Loading,
             selected: None,
             preset,
@@ -166,7 +188,12 @@ impl SharePicker {
         self._load = None;
         self._load_timeout = None;
         let preset = self.preset;
-        self.call.update(cx, |c, cx| c.share(source, preset, cx));
+        match self.purpose {
+            Purpose::Share => self.call.update(cx, |c, cx| c.share(source, preset, cx)),
+            Purpose::Record => self
+                .call
+                .update(cx, |c, cx| c.record_screen(source, preset, cx)),
+        }
         window.remove_window();
     }
 
@@ -412,7 +439,7 @@ impl Render for SharePicker {
                     .items_center()
                     .justify_center()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("Share your screen"),
+                    .child(self.purpose.title()),
             )
             .child(
                 div()
@@ -439,9 +466,16 @@ impl Render for SharePicker {
                             .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx))),
                     )
                     .child(
-                        button("share", "Share", true)
-                            .when(!can_share, |b| b.opacity(0.4))
-                            .on_click(cx.listener(|this, _, window, cx| this.share(window, cx))),
+                        button(
+                            "share",
+                            match self.purpose {
+                                Purpose::Share => "Share",
+                                Purpose::Record => "Record",
+                            },
+                            true,
+                        )
+                        .when(!can_share, |b| b.opacity(0.4))
+                        .on_click(cx.listener(|this, _, window, cx| this.share(window, cx))),
                     ),
             )
     }

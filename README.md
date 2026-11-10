@@ -11,14 +11,15 @@ Alpha at https://quipcall.com. Get the Mac app at https://quipcall.com/download/
 | `apps/desktop` | Mac app (GPUI). Home, a floating capsule of faces, a call window and a share picker |
 | `apps/server` | Axum API: `/api/join` returns LiveKit tokens |
 | `apps/web` | Svelte 5 web client |
-| `crates/core` | Media and call logic, no UI code (LiveKit SDK, capture, video) |
+| `crates/core` | Media and call logic, no UI code (LiveKit SDK, capture, video, recording) |
+| `crates/stt` | Speech to text on this Mac: Silero VAD and Parakeet or Qwen3-ASR through transcribe.cpp |
 | `crates/protocol` | Types shared by the server and the clients |
 | `deploy/` | VPS config (nginx, systemd, LiveKit) and Mac packaging |
 | `vendor/gpui-pre-macos` | GPUI's macOS backend, patched (see `vendor/README.md`) |
 
 ## Run locally
 
-You need Rust, Xcode, Node 22+ with pnpm, and `brew install livekit livekit-cli`.
+You need Rust, Xcode, Node 22+ with pnpm, and `brew install livekit livekit-cli cmake` (cmake builds transcribe.cpp, the speech-to-text engine).
 
 ```sh
 make dev               # LiveKit + server on :8080

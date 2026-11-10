@@ -86,6 +86,29 @@ export function collectTiles(room: Room): Tile[] {
   return tiles;
 }
 
+/** Set by the desktop app on whoever records the call. */
+export const RECORDING_ATTRIBUTE = 'quipcall.recording';
+
+/** Who records the call, if anyone does, and whether their screen is in it. */
+export function recorder(room: Room): { name: string; screen: boolean } | null {
+  for (const p of room.remoteParticipants.values()) {
+    const kind = p.attributes[RECORDING_ATTRIBUTE];
+    if (kind) return { name: p.name || p.identity, screen: kind === 'screen' };
+  }
+  return null;
+}
+
+/** Set by the desktop app whose Mac transcribes the call: the model's id. */
+export const TRANSCRIBING_ATTRIBUTE = 'quipcall.transcribing';
+
+/** Whose Mac transcribes the call, if anyone's. */
+export function transcriber(room: Room): { identity: string; name: string } | null {
+  for (const p of room.remoteParticipants.values()) {
+    if (p.attributes[TRANSCRIBING_ATTRIBUTE]) return { identity: p.identity, name: p.name || p.identity };
+  }
+  return null;
+}
+
 export function uniqueIdentity(name: string) {
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
   return `${slug}-${Math.random().toString(16).slice(2, 6)}`;

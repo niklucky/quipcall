@@ -5,7 +5,8 @@
 //! - [`Capture`]: frames of one screen or window arrive as full-range NV12
 //!   IOSurface `CVPixelBuffer`s at the preset's frame rate and go to WebRTC
 //!   as native buffers: VideoToolbox encodes them without a CPU copy, and
-//!   ScreenCaptureKit does the scaling on the GPU.
+//!   ScreenCaptureKit does the scaling on the GPU. A recording of your screen
+//!   is a capture of its own, whose frames go to the recorder ([`record`]).
 //!
 //! Needs the Screen Recording permission (see [`crate::permissions`]).
 //!
@@ -383,10 +384,37 @@ pub async fn own_window() -> anyhow::Result<Option<SourceId>> {
 /// ScreenCaptureKit sends nothing while the screen doesn't change.
 type LastFrame = Mutex<Option<(Thumbnail, Instant)>>;
 
+/// Where captured frames go.
+#[derive(Clone)]
+enum Target {
+    /// A share: WebRTC's encoder, and your own preview of it (every frame,
+    /// the same buffers).
+    Share {
+        video: NativeVideoSource,
+        preview: Option<Arc<dyn FrameSink>>,
+    },
+    /// A recording of your screen.
+    Record(Arc<dyn PixelSink>),
+}
+
+/// Takes the frames of a screen recording, on the capture's queue.
+pub(crate) trait PixelSink: Send + Sync + 'static {
+    fn on_pixels(&self, pixel_buffer: CFRetained<CVPixelBuffer>);
+}
+
+impl Target {
+    fn deliver(&self, started: Instant, pixel_buffer: CFRetained<CVPixelBuffer>) {
+        match self {
+            Target::Share { video, preview } => {
+                send(video, preview.as_deref(), started, pixel_buffer)
+            }
+            Target::Record(sink) => sink.on_pixels(pixel_buffer),
+        }
+    }
+}
+
 struct Handler {
-    source: NativeVideoSource,
-    /// Your own preview of the share (gets every frame, same buffers).
-    preview: Option<Arc<dyn FrameSink>>,
+    target: Target,
     started: Instant,
     frames: AtomicU64,
     last: Arc<LastFrame>,
@@ -402,12 +430,7 @@ impl Handler {
                 "first screen frame"
             );
         }
-        send(
-            &self.source,
-            self.preview.as_deref(),
-            self.started,
-            pixel_buffer,
-        );
+        self.target.deliver(self.started, pixel_buffer);
     }
 }
 
@@ -517,15 +540,36 @@ pub(crate) async fn start(
     preview: Option<Arc<dyn FrameSink>>,
     on_stop: impl FnOnce() + Send + 'static,
 ) -> anyhow::Result<Box<dyn Send>> {
+    let target = Target::Share { video, preview };
+    Ok(capture(id, preset, target, Box::new(on_stop)).await?.0)
+}
+
+/// Starts capturing `id` for a recording: frames go to `sink`. Returns the
+/// frames' size with the capture, which stops when dropped. `on_stop` runs if
+/// the window or screen goes away.
+pub(crate) async fn record(
+    id: SourceId,
+    preset: ScreenSharePreset,
+    sink: Arc<dyn PixelSink>,
+    on_stop: impl FnOnce() + Send + 'static,
+) -> anyhow::Result<(Box<dyn Send>, (u32, u32))> {
+    capture(id, preset, Target::Record(sink), Box::new(on_stop)).await
+}
+
+async fn capture(
+    id: SourceId,
+    preset: ScreenSharePreset,
+    target: Target,
+    on_stop: Box<dyn FnOnce() + Send>,
+) -> anyhow::Result<(Box<dyn Send>, (u32, u32))> {
     if let Some((width, height)) = synthetic_size() {
         let _ = (id, on_stop);
-        return Ok(Box::new(Synthetic::start(
-            width, height, preset, video, preview,
-        )?));
+        let synthetic = Synthetic::start(width, height, preset, target)?;
+        return Ok((Box::new(synthetic), (width, height)));
     }
-    let capture = {
+    let (capture, size) = {
         let content = shareable_content().await?;
-        setup(&content, id, preset, video, preview, Box::new(on_stop))?
+        setup(&content, id, preset, target, on_stop)?
     };
 
     let (tx, rx) = async_channel::bounded(1);
@@ -548,18 +592,17 @@ pub(crate) async fn start(
     if let Err(e) = rx.recv().await.context("screen capture didn't start")? {
         anyhow::bail!("{e}");
     }
-    Ok(Box::new(capture))
+    Ok((Box::new(capture), size))
 }
 
-/// Builds the stream for `id` (not started yet).
+/// Builds the stream for `id` (not started yet), and the size of its frames.
 fn setup(
     content: &SCShareableContent,
     id: SourceId,
     preset: ScreenSharePreset,
-    video: NativeVideoSource,
-    preview: Option<Arc<dyn FrameSink>>,
+    target: Target,
     on_stop: Box<dyn FnOnce() + Send>,
-) -> anyhow::Result<Capture> {
+) -> anyhow::Result<(Capture, (u32, u32))> {
     // SAFETY: reading immutable snapshots, then configuring fresh objects.
     let filter = unsafe {
         match id {
@@ -589,6 +632,7 @@ fn setup(
         }
     };
 
+    let size;
     // SAFETY: configuring a fresh object.
     let config = unsafe {
         let config = SCStreamConfiguration::new();
@@ -599,6 +643,7 @@ fn setup(
             filter.pointPixelScale() as f64,
             preset.max_width(),
         );
+        size = (w as u32, h as u32);
         tracing::info!(?id, w, h, fps = preset.fps, "starting screen capture");
         config.setWidth(w);
         config.setHeight(h);
@@ -612,8 +657,7 @@ fn setup(
     let last: Arc<LastFrame> = Arc::default();
     let started = Instant::now();
     let output = Output::alloc().set_ivars(Handler {
-        source: video.clone(),
-        preview: preview.clone(),
+        target: target.clone(),
         started,
         frames: AtomicU64::new(0),
         last: last.clone(),
@@ -645,25 +689,26 @@ fn setup(
     };
 
     let keepalive_stop = Arc::new(AtomicBool::new(false));
-    spawn_keepalive(video, preview, started, last, keepalive_stop.clone());
-    Ok(Capture {
-        stream,
-        _output: output,
-        _delegate: delegate,
-        _queue: queue,
-        keepalive_stop,
-    })
+    spawn_keepalive(target, started, last, keepalive_stop.clone());
+    Ok((
+        Capture {
+            stream,
+            _output: output,
+            _delegate: delegate,
+            _queue: queue,
+            keepalive_stop,
+        },
+        size,
+    ))
 }
 
 /// Re-sends the last frame once a second while the screen is still. The
 /// preview gets it too: it may have skipped the newest frame to save repaints.
-fn spawn_keepalive(
-    video: NativeVideoSource,
-    preview: Option<Arc<dyn FrameSink>>,
-    started: Instant,
-    last: Arc<LastFrame>,
-    stop: Arc<AtomicBool>,
-) {
+/// A recording needs none: a still screen is a long frame in the file.
+fn spawn_keepalive(target: Target, started: Instant, last: Arc<LastFrame>, stop: Arc<AtomicBool>) {
+    if matches!(target, Target::Record(_)) {
+        return;
+    }
     let _ = std::thread::Builder::new()
         .name("screen-keepalive".into())
         .spawn(move || {
@@ -680,9 +725,7 @@ fn spawn_keepalive(
                     }
                 };
                 if let Some(pixel_buffer) = stale {
-                    crate::autorelease_pool(|| {
-                        send(&video, preview.as_deref(), started, pixel_buffer)
-                    });
+                    crate::autorelease_pool(|| target.deliver(started, pixel_buffer));
                 }
             }
         });
@@ -712,8 +755,7 @@ impl Synthetic {
         width: u32,
         height: u32,
         preset: ScreenSharePreset,
-        video: NativeVideoSource,
-        preview: Option<Arc<dyn FrameSink>>,
+        target: Target,
     ) -> anyhow::Result<Self> {
         tracing::info!(
             width,
@@ -725,16 +767,9 @@ impl Synthetic {
         let started = Instant::now();
         let last: Arc<LastFrame> = Arc::default();
         let stop = Arc::new(AtomicBool::new(false));
-        spawn_keepalive(
-            video.clone(),
-            preview.clone(),
-            started,
-            last.clone(),
-            stop.clone(),
-        );
+        spawn_keepalive(target.clone(), started, last.clone(), stop.clone());
         let handler = Handler {
-            source: video,
-            preview,
+            target,
             started,
             frames: AtomicU64::new(0),
             last,

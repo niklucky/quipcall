@@ -81,6 +81,9 @@ async fn join(
         .with_grants(VideoGrants {
             room_join: true,
             room: req.room.clone(),
+            // Apps set attributes on themselves: "quipcall.recording" tells
+            // everyone in the call that someone records it.
+            can_update_own_metadata: Some(true),
             ..Default::default()
         })
         .to_jwt()

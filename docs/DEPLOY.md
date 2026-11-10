@@ -42,7 +42,7 @@ Guard rails, because the box is shared:
 
 ## Mac app
 
-`deploy/mac/package.sh` builds one app per architecture (Apple Silicon and Intel), signs them and zips them. Two slices in one binary would be about 60 MB, over the 40 MB bundle budget. Release builds have `https://quipcall.com` baked in (`QUIPCALL_SERVER` at build time), and `MACOSX_DEPLOYMENT_TARGET=12.3`, the release ScreenCaptureKit appeared in. Below 10.14.4 the linker would also point the Swift overlay `libswiftCoreMedia` at `@rpath`, and the Intel app wouldn't launch. The script refuses to package a binary that links anything outside macOS.
+`deploy/mac/package.sh` builds one app per architecture (Apple Silicon and Intel), signs them and zips them. Two slices in one binary would be about 115 MB, well over the 60 MB bundle budget. Release builds have `https://quipcall.com` baked in (`QUIPCALL_SERVER` at build time), and `MACOSX_DEPLOYMENT_TARGET=12.3`, the release ScreenCaptureKit appeared in. Below 10.14.4 the linker would also point the Swift overlay `libswiftCoreMedia` at `@rpath`, and the Intel app wouldn't launch. The script refuses to package a binary that links anything outside macOS.
 
 Friends install with `curl -fsSL https://quipcall.com/download/install.sh | sh`, which picks the right architecture. A file downloaded with curl isn't quarantined, so Gatekeeper doesn't block the unnotarized app. Downloading the zip in a browser works too, but needs System Settings → Privacy & Security → Open Anyway once.
 
