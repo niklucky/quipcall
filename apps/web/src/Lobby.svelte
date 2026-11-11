@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Join from './Join.svelte';
+  import { headlessEntry } from './test-entry';
   import { JoinFlow } from './join-flow';
   import type { JoinOptions } from './media';
   import { api, ApiError, type Principal, type CallRoom, type RoomDetail } from './api';
   let { onjoin, callError = '', joining = false }: { onjoin: (id: string, name: string, options: JoinOptions, title: string) => Promise<void>; callError?: string; joining?: boolean } = $props();
   const query = new URLSearchParams(location.search);
+  const testEntry = headlessEntry(query, location.hostname, import.meta.env.DEV);
   const fragment = new URLSearchParams(location.hash.slice(1));
   // Keep pending tokens in this history entry, so a reload or sign-in does not
   // lose the invitation. They never enter a request URL or referrer.
@@ -115,7 +117,7 @@
   {#if !ready}<p>Loading…</p>
   {:else if flow && !authScreen}
     {#key entryVersion}
-    <Join flow={joinFlow} roomId={linkedRoom} invitation={roomInvite} desktopId={desktop} {me} {callError} {joining} {identify} {accepted} {onjoin} onlogin={() => { cancelJoin(); showLogin = true; error = ''; message = ''; }} onhome={home} />
+    <Join {testEntry} flow={joinFlow} roomId={linkedRoom} invitation={roomInvite} desktopId={desktop} {me} {callError} {joining} {identify} {accepted} {onjoin} onlogin={() => { cancelJoin(); showLogin = true; error = ''; message = ''; }} onhome={home} />
     {/key}
   {:else}
   {#if flow}<button class="back" onclick={() => { showLogin = false; magic = ''; accountInvite = ''; remember(); }}>← Back to your call</button>{/if}

@@ -146,7 +146,7 @@ fn usage() -> ! {
 pub struct Shell {
     pub principal: Option<auth::Principal>,
     pub auth_busy: bool,
-    pub auth_generation: u64,
+    pub auth_attempt: auth::SignInAttempt,
     pub auth_message: String,
     pub args: Args,
     pub store: Store,
@@ -382,7 +382,7 @@ fn main() {
         let shell = cx.new(|_| Shell {
             principal: None,
             auth_busy: false,
-            auth_generation: 0,
+            auth_attempt: auth::SignInAttempt::default(),
             auth_message: String::new(),
             args,
             store,

@@ -72,6 +72,65 @@ impl std::fmt::Display for RequestError {
 }
 impl std::error::Error for RequestError {}
 
+/// A cancelled attempt can never open a browser or install a late session.
+#[derive(Default)]
+pub struct SignInAttempt {
+    generation: u64,
+    pub pending: bool,
+    pub code: Option<String>,
+}
+impl SignInAttempt {
+    fn start(&mut self) -> u64 {
+        self.cancel();
+        self.pending = true;
+        self.generation
+    }
+    fn current(&self, generation: u64) -> bool {
+        self.pending && self.generation == generation
+    }
+    fn cancel(&mut self) {
+        self.generation += 1;
+        self.pending = false;
+        self.code = None;
+    }
+    fn finish(&mut self, generation: u64) -> bool {
+        if !self.current(generation) {
+            return false;
+        }
+        self.cancel();
+        true
+    }
+}
+fn client() -> anyhow::Result<&'static reqwest::blocking::Client> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::blocking::Client, reqwest::Error>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+        })
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+fn unauthorized(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<RequestError>()
+        .is_some_and(|e| e.status == reqwest::StatusCode::UNAUTHORIZED)
+}
+fn forget_session(
+    session: &mut Option<String>,
+    principal: &mut Option<Principal>,
+    store: &mut crate::store::Store,
+    clear_saved: impl FnOnce(),
+) {
+    clear_saved();
+    *session = None;
+    *principal = None;
+    store.rooms.clear();
+    store.bind_rooms(None);
+}
+
 pub(crate) fn request(
     server: &str,
     token: Option<&str>,
@@ -79,9 +138,7 @@ pub(crate) fn request(
     body: Option<Value>,
     method: &str,
 ) -> anyhow::Result<Value> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
+    let client = client()?;
     let mut req = client
         .request(
             method.parse()?,
@@ -115,8 +172,7 @@ impl Shell {
             return;
         }
         self.auth_busy = true;
-        self.auth_generation += 1;
-        let generation = self.auth_generation;
+        let generation = self.auth_attempt.start();
         self.auth_message = "Opening browser sign-in…".into();
         cx.notify();
         let args = self.args.clone();
@@ -144,19 +200,31 @@ impl Shell {
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("Invalid sign-in response"))?
                     .to_owned();
+                let code = start["code"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Update the server to use secure Mac sign-in"))?
+                    .to_owned();
                 let mut url = format!("{}/?desktop={id}", args.web.trim_end_matches('/'));
                 if let Some(room) = &room {
                     url.push_str(&format!("&room={room}"));
                 }
-                this.update(cx, |s, cx| {
-                    s.auth_message = "Approve sign-in in your browser".into();
+                let opened = this.update(cx, |s, cx| {
+                    if !s.auth_attempt.current(generation) {
+                        return false;
+                    }
+                    s.auth_attempt.code = Some(code);
+                    s.auth_message = "Type this code in the browser on this Mac.".into();
                     cx.open_url(&url);
                     cx.notify();
+                    true
                 })?;
+                if !opened {
+                    anyhow::bail!("Sign-in cancelled");
+                }
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
                 let mut delay = std::time::Duration::from_secs(2);
                 while std::time::Instant::now() < deadline {
-                    if !this.update(cx, |s, _| s.auth_generation == generation)? {
+                    if !this.update(cx, |s, _| s.auth_attempt.current(generation))? {
                         anyhow::bail!("Sign-in cancelled");
                     }
                     cx.background_executor()
@@ -168,7 +236,7 @@ impl Shell {
                     if std::time::Instant::now() >= deadline {
                         break;
                     }
-                    if !this.update(cx, |s, _| s.auth_generation == generation)? {
+                    if !this.update(cx, |s, _| s.auth_attempt.current(generation))? {
                         anyhow::bail!("Sign-in cancelled");
                     }
                     let server = args.server.clone();
@@ -212,7 +280,7 @@ impl Shell {
             }
             .await;
             let _ = this.update(cx, |s, cx| {
-                if s.auth_generation != generation {
+                if !s.auth_attempt.finish(generation) {
                     return;
                 }
                 s.auth_busy = false;
@@ -281,8 +349,15 @@ impl Shell {
                         s.store.save();
                         s.auth_message.clear();
                     }
+                    Err(e) if unauthorized(&e) => {
+                        forget_session(&mut s.args.session, &mut s.principal, &mut s.store, || {
+                            clear(&s.args.server)
+                        });
+                        s.store.save();
+                        s.auth_message = "Your session expired. Sign in to continue.".into();
+                    }
                     Err(e) => {
-                        s.auth_message = format!("{e}. Sign in again if your session expired.");
+                        s.auth_message = e.to_string();
                     }
                 }
                 cx.notify();
@@ -290,15 +365,25 @@ impl Shell {
         })
         .detach();
     }
+    pub fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        if !self.auth_attempt.pending {
+            return;
+        }
+        self.auth_attempt.cancel();
+        self.auth_busy = false;
+        self.auth_message = "Sign-in cancelled".into();
+        cx.notify();
+    }
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
         let args = self.args.clone();
-        self.auth_generation += 1;
+        self.auth_attempt.cancel();
         self.auth_busy = false;
-        clear(&args.server);
-        self.args.session = None;
-        self.principal = None;
-        self.store.rooms.clear();
-        self.store.bind_rooms(None);
+        forget_session(
+            &mut self.args.session,
+            &mut self.principal,
+            &mut self.store,
+            || clear(&args.server),
+        );
         self.store.save();
         self.auth_message = "Signed out".into();
         cx.notify();
@@ -454,6 +539,64 @@ mod tests {
         io::{Read, Write},
         net::TcpListener,
     };
+
+    #[test]
+    fn cancelled_signin_cannot_open_browser_or_install_a_late_session() {
+        let mut attempt = SignInAttempt::default();
+        let old = attempt.start();
+        attempt.code = Some("1234ABCD".into());
+        attempt.cancel();
+        assert!(!attempt.pending);
+        assert!(attempt.code.is_none());
+        assert!(!attempt.current(old)); // delayed /start cannot open a browser
+        let retry = attempt.start();
+        assert!(!attempt.finish(old)); // delayed /poll cannot replace the retry
+        assert!(attempt.current(retry));
+        assert!(attempt.finish(retry));
+        assert!(!attempt.pending);
+    }
+
+    #[test]
+    fn expired_session_clears_credentials_identity_and_cached_rooms() {
+        let error: anyhow::Error = RequestError {
+            status: reqwest::StatusCode::UNAUTHORIZED,
+            message: "Expired".into(),
+        }
+        .into();
+        assert!(unauthorized(&error));
+        let network: anyhow::Error = RequestError {
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            message: "Offline".into(),
+        }
+        .into();
+        assert!(!unauthorized(&network));
+        let mut session = Some("old-token".into());
+        let mut principal = Some(Principal {
+            id: "a".into(),
+            name: "A".into(),
+            kind: "user".into(),
+        });
+        let mut store = crate::store::Store::default();
+        store.bind_rooms(Some("a"));
+        store.cache_room(SavedRoom {
+            id: "private".into(),
+            ..Default::default()
+        });
+        let mut cleared_keychain = false;
+        forget_session(&mut session, &mut principal, &mut store, || {
+            cleared_keychain = true
+        });
+        assert!(cleared_keychain);
+        assert!(session.is_none()); // start_call now takes the sign_in path
+        assert!(principal.is_none());
+        assert!(store.rooms.is_empty());
+        assert!(store.rooms_principal.is_none());
+    }
+
+    #[test]
+    fn requests_share_one_http_client_and_runtime() {
+        assert!(std::ptr::eq(client().unwrap(), client().unwrap()));
+    }
 
     #[test]
     fn throttled_non_json_response_keeps_status_for_poll_retry() {

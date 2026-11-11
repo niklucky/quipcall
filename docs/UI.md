@@ -8,7 +8,7 @@ The clickable prototype these screens were built from is [prototype/ui.html](pro
 
 A small window asks what people should call you, with your avatar updating as you type. The name is cached on this Mac (`local.json`); once signed in, the pencil next to your name also updates your account name. `--name` skips the question.
 
-Sign in opens the browser for an email magic link and explicit approval of this Mac. Registration requires an account invitation; room invitations grant room access independently. The native session stays in Keychain. Guests can join through the web with a name. Apple and other OAuth providers are planned.
+Sign in opens the browser for an email magic link and explicit approval of this Mac by typing its displayed code in the browser. **Cancel sign-in** stops a pending attempt immediately; **Sign in** can then start a fresh one. Registration requires an account invitation; room invitations grant room access independently. The native session stays in Keychain. Guests can join through the web with a name. Apple and other OAuth providers are planned.
 
 ## Home
 
@@ -41,7 +41,7 @@ The browser starts with microphone and camera off. Guests can enter their name, 
 
 After accepting an invitation, the address becomes the ordinary room link so the same browser can return. Unclaimed invitations survive reload and sign-in in the current history entry. Consumed or expired invitations, removed access, full 1-to-1 calls and unavailable/private rooms have distinct recovery screens. Member invitations ask for the invited account before claiming access. The layout adapts to small screens and keeps the room name above the preview.
 
-**Open in the Mac app** uses `quipcall://open/<room>` (build 56+) to request explicit browser approval, even when a different identity is already signed in on the Mac. The private polling proof exchanges the browser identity for a Keychain session; session tokens never appear in the link. Complete approval in the browser where the invitation was accepted. Existing `quipcall://join/<room>` links still join using the Mac's current identity.
+**Open in the Mac app** uses `quipcall://open/<room>` (build 56+) to request explicit browser approval, even when a different identity is already signed in on the Mac. The private polling proof exchanges the browser identity for a Keychain session; session tokens never appear in the link. Complete approval in the browser where the invitation was accepted, using the code displayed in the Mac app. Existing `quipcall://join/<room>` links still join using the Mac's current identity.
 
 ## Room access
 

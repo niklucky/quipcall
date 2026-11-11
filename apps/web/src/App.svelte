@@ -30,7 +30,7 @@
     type Line,
   } from './transcript';
 
-  // Test participants: `?room=spike&name=Bot&autojoin=1`, plus `codec=vp8`
+  // Dev-only test participants: `?room=<created-id>&name=Bot&autojoin=1`, plus `codec=vp8`
   // (camera codec) and `mic=0` (join without a microphone).
   const params = new URLSearchParams(location.search);
   // H.264 by default: desktop receivers decode it in hardware and draw the

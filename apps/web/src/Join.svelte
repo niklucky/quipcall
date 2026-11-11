@@ -1,11 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, type Entry, type Principal, type CallRoom } from './api';
+  import type { TestEntry } from './test-entry';
   import type { JoinFlow } from './join-flow';
   import { MediaPreview, type PreviewState, type JoinOptions } from './media';
 
-  let { roomId, invitation, desktopId, me, callError, joining, flow, identify, accepted, onjoin, onlogin, onhome }:
-    { roomId: string; invitation: string; desktopId: string; me: Principal | null; callError: string; joining: boolean; flow: JoinFlow;
+  let { roomId, invitation, desktopId, me, callError, joining, flow, testEntry, identify, accepted, onjoin, onlogin, onhome }:
+    { roomId: string; invitation: string; desktopId: string; me: Principal | null; callError: string; joining: boolean; flow: JoinFlow; testEntry?: TestEntry;
       identify: (name: string, current: () => boolean) => Promise<Principal>; accepted: (room: CallRoom) => void;
       onjoin: (id: string, name: string, options: JoinOptions, title: string) => Promise<void>; onlogin: () => void; onhome: () => void } = $props();
   let entry = $state<Entry | null>(null);
@@ -13,6 +14,13 @@
   let error = $state('');
   let busy = $state(false);
   let done = $state(false);
+  let desktopCode = $state('');
+  let autojoined = false;
+  $effect(() => {
+    if (testEntry && !autojoined && !loading && allowed && !desktopId && !invitation) {
+      autojoined = true; name = testEntry.name; void proceed('browser', testEntry.options);
+    }
+  });
   let openedMac = $state(false);
   let name = $state(localStorage.getItem('quipcall.name') ?? '');
   let identityId: string | undefined;
@@ -95,20 +103,20 @@
       navigator.mediaDevices?.removeEventListener('devicechange', enumerate);
     };
   });
-  async function proceed(destination: 'browser' | 'mac' | 'approve') {
-    if (working || loading || !allowed || !name.trim()) return;
+  async function proceed(destination: 'browser' | 'mac' | 'approve', testOptions?: JoinOptions) {
+    if (working || loading || !allowed || !name.trim() || (destination === 'approve' && !/^[a-f0-9]{8}$/i.test(desktopCode.trim()))) return;
     const operation = ++attempt;
     const current = () => alive && operation === attempt;
     busy = true; error = '';
-    const options: JoinOptions = { microphone: !!media.audio, camera: !!media.video,
+    const options: JoinOptions = testOptions ?? { microphone: !!media.audio, camera: !!media.video,
       audioDeviceId: media.audio?.getSettings().deviceId || audioId || undefined,
       videoDeviceId: media.video?.getSettings().deviceId || videoId || undefined };
     try {
-      await flow.run({ destination, roomId, invitation, desktopId, name: name.trim(), title: entry?.room?.name ?? roomId, options }, {
+      await flow.run({ destination, roomId, invitation, desktopId, desktopCode: desktopCode.trim(), name: name.trim(), title: entry?.room?.name ?? roomId, options }, {
         identify, accepted,
         redeem: token => api<CallRoom>('/invites/redeem', { token }),
         stopPreview: () => preview.stop(),
-        approve: id => api('/auth/desktop/approve', { id }),
+        approve: (id, code) => api('/auth/desktop/approve', { id, code }),
         approved: () => { done = true; },
         openMac: id => {
           openedMac = true;
@@ -172,8 +180,8 @@
       <form onsubmit={(e) => { e.preventDefault(); void proceed(desktopId ? 'approve' : 'browser'); }}>
         <label>Your name<input bind:value={name} maxlength="64" autocomplete="nickname" placeholder="What should we call you?" required disabled={working} /></label>
         {#if me?.email}<p class="fine identity">Signed in as {me.email} <button type="button" class="text-button" disabled={working} onclick={onlogin}>Switch account</button></p>{/if}
-        {#if desktopId}<p class="fine">Continue only if you just opened Quipcall or started sign-in on your Mac. The Mac app uses its own microphone and camera settings.</p>{/if}
-        <button class="primary join-button" disabled={working || loading || !name.trim() || media.audioBusy || media.videoBusy}>{working ? (joining ? 'Joining…' : 'Getting ready…') : desktopId ? `Continue${name.trim() ? ` as ${name.trim()}` : ''}` : 'Join call'}<span aria-hidden="true">→</span></button>
+        {#if desktopId}<label>Code shown on your Mac<input bind:value={desktopCode} autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="8" pattern="[a-fA-F0-9]{8}" placeholder="8-character code" required disabled={working} /></label><p class="fine">Open Quipcall on this Mac and type the code displayed there. Do not use a code sent by someone else. The Mac app uses its own microphone and camera settings.</p>{/if}
+        <button class="primary join-button" disabled={working || loading || !name.trim() || (desktopId && !/^[a-f0-9]{8}$/i.test(desktopCode.trim())) || media.audioBusy || media.videoBusy}>{working ? (joining ? 'Joining…' : 'Getting ready…') : desktopId ? `Continue${name.trim() ? ` as ${name.trim()}` : ''}` : 'Join call'}<span aria-hidden="true">→</span></button>
       </form>
       {#if !desktopId}
         <p class="fine media-summary">{!media.audio && !media.video ? 'You’ll join in this browser with your mic and camera off.' : `${media.audio ? 'Microphone on' : 'Microphone off'} · ${media.video ? 'Camera on' : 'Camera off'}`}</p>

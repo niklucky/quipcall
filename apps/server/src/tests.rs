@@ -11,6 +11,9 @@ struct Test {
     state: AppState,
     app: Router,
     dir: tempfile::TempDir,
+    participants: Arc<std::sync::Mutex<Vec<String>>>,
+    disconnected: Arc<std::sync::Mutex<Vec<String>>>,
+    fail_disconnect: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Test {
     async fn new() -> Self {
@@ -18,10 +21,40 @@ impl Test {
         // Fake LiveKit room service: exercise the actual disconnect HTTP path.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let api = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async {
+        let participants = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let disconnected = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let fail_disconnect = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (active, removed, fail) = (
+            participants.clone(),
+            disconnected.clone(),
+            fail_disconnect.clone(),
+        );
+        tokio::spawn(async move {
             axum::serve(
                 listener,
-                Router::new().fallback(|| async { Json(json!({})) }),
+                Router::new().fallback(move |uri: axum::http::Uri, Json(body): Json<Value>| {
+                    let (active, removed, fail) = (active.clone(), removed.clone(), fail.clone());
+                    async move {
+                        if uri.path().ends_with("ListParticipants") {
+                            let participants: Vec<_> = active
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .map(|id| json!({"identity":id}))
+                                .collect();
+                            return (StatusCode::OK, Json(json!({"participants":participants})));
+                        }
+                        if uri.path().ends_with("RemoveParticipant") {
+                            if fail.load(std::sync::atomic::Ordering::Relaxed) {
+                                return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({})));
+                            }
+                            let id = body["identity"].as_str().unwrap().to_owned();
+                            removed.lock().unwrap().push(id.clone());
+                            active.lock().unwrap().retain(|p| p != &id);
+                        }
+                        (StatusCode::OK, Json(json!({})))
+                    }
+                }),
             )
             .await
             .unwrap();
@@ -41,7 +74,14 @@ impl Test {
         };
         let state = AppState::new(config).await.unwrap();
         let app = router(state.clone());
-        Self { state, app, dir }
+        Self {
+            state,
+            app,
+            dir,
+            participants,
+            disconnected,
+            fail_disconnect,
+        }
     }
     async fn req(
         &self,
@@ -50,7 +90,18 @@ impl Test {
         token: &str,
         body: Value,
     ) -> (StatusCode, Value, Option<String>) {
+        self.req_from("local", method, path, token, body).await
+    }
+    async fn req_from(
+        &self,
+        ip: &str,
+        method: &str,
+        path: &str,
+        token: &str,
+        body: Value,
+    ) -> (StatusCode, Value, Option<String>) {
         let mut req = Request::builder()
+            .header("x-real-ip", ip)
             .method(method)
             .uri(path)
             .header("x-quipcall", "1")
@@ -89,6 +140,7 @@ impl Test {
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{v}");
+        auth::deliver_pending(&self.state).await.unwrap();
         let email = std::fs::read_to_string(
             self.dir
                 .path()
@@ -274,7 +326,12 @@ async fn private_guest_claim_return_remove_and_cached_media_token() {
     };
     let (s, v, _) = t.join(&winner, &room).await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(v["identity"], id);
+    assert!(
+        v["identity"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{id}:"))
+    );
     let media = v["token"].as_str().unwrap();
     assert_eq!(t.gate(media).await, StatusCode::NO_CONTENT);
     assert_eq!(t.join(&winner, &room).await.0, StatusCode::OK); // returns without redeeming again
@@ -364,7 +421,12 @@ async fn public_and_direct_rooms_use_server_identity_and_two_slots() {
         1
     );
     if a.0 == StatusCode::OK {
-        assert_eq!(a.1["identity"], gid);
+        assert!(
+            a.1["identity"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("{gid}:"))
+        );
         assert_eq!(t.join(&g, &direct).await.0, StatusCode::OK);
     }
     assert_eq!(
@@ -427,7 +489,7 @@ async fn membership_email_invites_and_desktop_proof() {
             "POST",
             "/api/auth/desktop/approve",
             &g,
-            json!({"id":start["id"]})
+            json!({"id":start["id"],"code":start["code"]})
         )
         .await
         .0,
@@ -498,7 +560,7 @@ async fn csrf_and_email_rate_limits() {
         )
         .await
         .0,
-        StatusCode::TOO_MANY_REQUESTS
+        StatusCode::OK
     );
 }
 
@@ -733,7 +795,7 @@ async fn desktop_polling_does_not_starve_shared_ip_signin_or_approval() {
             "POST",
             "/api/auth/desktop/approve",
             &owner,
-            json!({"id":challenges[1]["id"]})
+            json!({"id":challenges[1]["id"],"code":challenges[1]["code"]})
         )
         .await
         .0,
@@ -794,4 +856,368 @@ async fn room_rename_is_owner_only_and_survives_reload() {
             .1["room"]["name"],
         "Project lounge"
     );
+}
+
+#[tokio::test]
+async fn desktop_approval_requires_the_initiating_device_code_and_limits_guesses() {
+    let t = Test::new().await;
+    let owner = t.admin().await;
+    let challenge = t
+        .req("POST", "/api/auth/desktop/start", "", json!({}))
+        .await
+        .1;
+    assert_eq!(challenge["code"].as_str().unwrap().len(), 8);
+    for code in ["", "incorrect"] {
+        assert_eq!(
+            t.req(
+                "POST",
+                "/api/auth/desktop/approve",
+                &owner,
+                json!({"id":challenge["id"],"code":code})
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        t.req("POST", "/api/auth/desktop/poll", "", challenge.clone())
+            .await
+            .1["pending"],
+        true
+    );
+    assert_eq!(
+        t.req(
+            "POST",
+            "/api/auth/desktop/approve",
+            &owner,
+            json!({"id":challenge["id"],"code":challenge["code"]})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert!(
+        t.req("POST", "/api/auth/desktop/poll", "", challenge)
+            .await
+            .1["token"]
+            .is_string()
+    );
+
+    let locked = t
+        .req("POST", "/api/auth/desktop/start", "", json!({}))
+        .await
+        .1;
+    for _ in 0..5 {
+        assert_eq!(
+            t.req(
+                "POST",
+                "/api/auth/desktop/approve",
+                &owner,
+                json!({"id":locked["id"],"code":"wrong"})
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        t.req(
+            "POST",
+            "/api/auth/desktop/approve",
+            &owner,
+            json!({"id":locked["id"],"code":locked["code"]})
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        t.req("POST", "/api/auth/desktop/poll", "", locked).await.1["pending"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn email_abuse_is_scoped_and_delivered_links_still_work() {
+    let t = Test::new().await;
+    // One IP cannot exhaust a global email budget or block other auth endpoints.
+    for i in 0..120 {
+        assert_eq!(
+            t.req_from(
+                "attacker",
+                "POST",
+                "/api/auth/request",
+                "",
+                json!({"email":format!("unknown{i}@example.com")})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        t.req_from(
+            "attacker",
+            "POST",
+            "/api/auth/request",
+            "",
+            json!({"email":"more@example.com"})
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    auth::deliver_pending(&t.state).await.unwrap();
+    auth::deliver_pending(&t.state).await.unwrap();
+    let token = t.magic("admin@example.com", None).await;
+    for _ in 0..5 {
+        assert_eq!(
+            t.req_from(
+                "mail-attacker",
+                "POST",
+                "/api/auth/request",
+                "",
+                json!({"email":"admin@example.com"})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        auth::deliver_pending(&t.state).await.unwrap();
+    }
+    // The attacker's recipient allowance does not prevent this IP requesting
+    // a fresh link, even before the older delivered link is consumed.
+    let before_verify = t.magic("admin@example.com", None).await;
+    assert_ne!(before_verify, token);
+    assert_eq!(
+        t.req("POST", "/api/auth/verify", "", json!({"token":token}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    // Verification clears mail suppression; the next sign-in can get a link.
+    let next = t.magic("admin@example.com", None).await;
+    assert_ne!(next, token);
+    t.guest("Unaffected").await;
+    assert_eq!(
+        t.req("POST", "/api/auth/desktop/start", "", json!({}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let globals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rate_limits WHERE key IN ('email-global','verify','guest','desktop-start')")
+        .fetch_one(&t.state.db).await.unwrap();
+    assert_eq!(globals, 0);
+}
+
+#[tokio::test]
+async fn mail_eligibility_and_delivery_failure_are_off_the_response_path() {
+    let t = Test::new().await;
+    // Make the local provider fail; neither known nor unknown requests touch it.
+    std::fs::write(t.dir.path().join("mail"), "not a directory").unwrap();
+    for email in ["admin@example.com", "unknown@example.com"] {
+        let (status, value, _) = t
+            .req("POST", "/api/auth/request", "", json!({"email":email}))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value, json!({"ok":true}));
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM mail_requests")
+            .fetch_one(&t.state.db)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM magic_links")
+            .fetch_one(&t.state.db)
+            .await
+            .unwrap(),
+        0
+    );
+    // Pending requests survive restart and are processed independently.
+    let restarted = AppState::new((*t.state.config).clone()).await.unwrap();
+    auth::deliver_pending(&restarted).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM magic_links")
+            .fetch_one(&t.state.db)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM rate_limits WHERE key LIKE 'email:%'")
+            .fetch_one(&t.state.db)
+            .await
+            .unwrap(),
+        0
+    );
+    std::fs::remove_file(t.dir.path().join("mail")).unwrap();
+    assert!(!t.magic("admin@example.com", None).await.is_empty());
+}
+
+#[tokio::test]
+async fn claimed_invite_survives_expiry_and_cleanup_without_restoring_removed_access() {
+    let t = Test::new().await;
+    let owner = t.admin().await;
+    let room = t.room(&owner, "private").await;
+    let (guest, id) = t.guest("Guest").await;
+    let link = t
+        .req(
+            "POST",
+            &format!("/api/rooms/{room}/invites"),
+            &owner,
+            json!({"kind":"guest"}),
+        )
+        .await
+        .1;
+    let token = link["url"].as_str().unwrap().split('=').nth(1).unwrap();
+    assert_eq!(
+        t.req(
+            "POST",
+            "/api/invites/redeem",
+            &guest,
+            json!({"token":token})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    t.req(
+        "POST",
+        &format!("/api/rooms/{room}/invites"),
+        &owner,
+        json!({"kind":"guest"}),
+    )
+    .await;
+    sqlx::query("UPDATE room_invites SET expires=0")
+        .execute(&t.state.db)
+        .await
+        .unwrap();
+    rooms::cleanup_invites(&t.state.db).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM room_invites")
+            .fetch_one(&t.state.db)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        t.req("POST", "/api/entry", &guest, json!({"invite":token}))
+            .await
+            .1["state"],
+        "ready"
+    );
+    assert_eq!(
+        t.req(
+            "POST",
+            "/api/invites/redeem",
+            &guest,
+            json!({"token":token})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        t.req("POST", "/api/entry", "", json!({"invite":token}))
+            .await
+            .1,
+        json!({"state":"used"})
+    );
+    assert_eq!(
+        t.req(
+            "DELETE",
+            &format!("/api/rooms/{room}/members/{id}"),
+            &owner,
+            json!({})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        t.req("POST", "/api/entry", &guest, json!({"invite":token}))
+            .await
+            .1["state"],
+        "removed"
+    );
+    assert_eq!(
+        t.req(
+            "POST",
+            "/api/invites/redeem",
+            &guest,
+            json!({"token":token})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn multiple_connections_are_removed_together_and_direct_slot_can_be_reused() {
+    let t = Test::new().await;
+    let owner = t.admin().await;
+    let room = t.room(&owner, "direct").await;
+    let (guest, id) = t.guest("Guest A").await;
+    let (replacement, _) = t.guest("Guest B").await;
+    let first = t.join(&guest, &room).await.1;
+    let second = t.join(&guest, &room).await.1;
+    let owner_join = t.join(&owner, &room).await.1;
+    assert_ne!(first["identity"], second["identity"]);
+    for value in [&first, &second] {
+        assert_eq!(
+            t.gate(value["token"].as_str().unwrap()).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+    *t.participants.lock().unwrap() = vec![
+        first["identity"].as_str().unwrap().into(),
+        second["identity"].as_str().unwrap().into(),
+        id.clone(),
+        owner_join["identity"].as_str().unwrap().into(),
+    ];
+    t.fail_disconnect
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let path = format!("/api/rooms/{room}/members/{id}");
+    assert_eq!(
+        t.req("DELETE", &path, &owner, json!({})).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        t.req("POST", "/api/entry", &replacement, json!({"room":room}))
+            .await
+            .1["state"],
+        "ready"
+    );
+    assert_eq!(t.join(&replacement, &room).await.0, StatusCode::OK);
+    t.fail_disconnect
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        t.req("DELETE", &path, &owner, json!({})).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(t.disconnected.lock().unwrap().len(), 3); // both connections and a legacy identity
+    assert_eq!(
+        *t.participants.lock().unwrap(),
+        vec![owner_join["identity"].as_str().unwrap().to_owned()]
+    );
+    assert_eq!(t.join(&guest, &room).await.0, StatusCode::FORBIDDEN);
+    for value in [&first, &second] {
+        assert_eq!(
+            t.gate(value["token"].as_str().unwrap()).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+    // Retrying A's removal must not clear B's newly claimed slot.
+    assert_eq!(
+        t.req("POST", "/api/entry", "", json!({"room":room}))
+            .await
+            .1["state"],
+        "full"
+    );
+    assert_eq!(t.join(&replacement, &room).await.0, StatusCode::OK);
 }

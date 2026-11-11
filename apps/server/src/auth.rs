@@ -129,7 +129,6 @@ pub async fn guest(
     if let Ok(p) = current(&s, &h).await {
         return Ok(Json(p).into_response());
     }
-    rate(&s, "guest", 200, 60).await?;
     let name = clean_name(&req.name);
     let p = Principal {
         id: random(),
@@ -234,43 +233,96 @@ pub struct LinkRequest {
 }
 pub async fn request_link(
     State(s): State<AppState>,
+    h: HeaderMap,
     Json(req): Json<LinkRequest>,
 ) -> Result<Json<Value>> {
     let email = email(&req.email)?;
-    rate(&s, "email-global", 100, 900).await?;
-    rate(&s, &format!("email:{}", hash(&email)), 3, 900).await?;
-    // The same response for invited, existing, and unknown addresses.
-    let response = Json(json!({"ok":true}));
+    // nginx overwrites this header; direct API traffic is loopback-only.
+    let requester = hash(
+        h.get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("local"),
+    );
+    sqlx::query("INSERT INTO mail_requests(email,requester,invite,created) VALUES (?,?,?,?)")
+        .bind(email)
+        .bind(requester)
+        .bind(req.invite.as_deref().map(hash))
+        .bind(now())
+        .execute(&s.db)
+        .await?;
+    // Delivery, eligibility and suppression never affect the public response.
+    Ok(Json(json!({"ok":true})))
+}
+
+/// One bounded worker drains the durable queue; never hold an HTTP request open
+/// for delivery or expose a provider failure to an account-enumeration probe.
+pub async fn deliver_pending(s: &AppState) -> Result<()> {
+    let requests: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id,email,requester,invite FROM mail_requests WHERE created>? ORDER BY id LIMIT 100",
+    )
+    .bind(now() - 900)
+    .fetch_all(&s.db)
+    .await?;
+    for (id, email, requester, invite) in requests {
+        if let Err(e) = deliver_link(s, &email, &requester, invite).await {
+            tracing::error!("email delivery failed: {}", e.message);
+        }
+        sqlx::query("DELETE FROM mail_requests WHERE id=?")
+            .bind(id)
+            .execute(&s.db)
+            .await?;
+    }
+    Ok(())
+}
+async fn deliver_link(
+    s: &AppState,
+    email: &str,
+    requester: &str,
+    invite: Option<String>,
+) -> Result<()> {
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM identities WHERE provider='email' AND subject=?)",
     )
-    .bind(&email)
+    .bind(email)
     .fetch_one(&s.db)
     .await?;
-    let invite = req.invite.as_deref().map(hash);
     let allowed: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM account_invites WHERE hash=? AND email=? AND expires>?)",
     )
     .bind(&invite)
-    .bind(&email)
+    .bind(email)
     .bind(now())
     .fetch_one(&s.db)
     .await?;
-    if !exists && !allowed && s.config.bootstrap_email.as_deref() != Some(&email) {
-        return Ok(response);
+    if !exists && !allowed && s.config.bootstrap_email.as_deref() != Some(email) {
+        return Ok(());
+    }
+    // Suppress excess mail silently. Previously delivered links stay usable,
+    // and successful verification resets this budget for the next sign-in.
+    let budget = format!("email:{requester}:{}", hash(email));
+    if let Err(e) = rate(s, &budget, 3, 900).await {
+        if e.status == StatusCode::TOO_MANY_REQUESTS {
+            return Ok(());
+        }
+        return Err(e);
     }
     let token = random();
     sqlx::query("INSERT INTO magic_links VALUES (?, ?, ?, ?)")
         .bind(hash(&token))
-        .bind(&email)
+        .bind(email)
         .bind(invite)
         .bind(now() + 15 * 60)
         .execute(&s.db)
         .await?;
     let url = format!("{}/#magic={token}", s.config.public_url);
-    if let Err(e) = send(&s, &email, &url).await {
+    if let Err(e) = send(s, email, &url).await {
         sqlx::query("DELETE FROM magic_links WHERE hash=?")
             .bind(hash(&token))
+            .execute(&s.db)
+            .await?;
+        // A delivery failure must not consume the recipient's mail allowance.
+        sqlx::query("DELETE FROM rate_limits WHERE key=?")
+            .bind(budget)
             .execute(&s.db)
             .await?;
         tracing::error!("email delivery failed: {e}");
@@ -279,7 +331,7 @@ pub async fn request_link(
             "Email delivery is unavailable. Please retry later.",
         ));
     }
-    Ok(response)
+    Ok(())
 }
 async fn send(s: &AppState, email: &str, url: &str) -> anyhow::Result<()> {
     if let Some(dir) = &s.config.mail_dir {
@@ -306,7 +358,6 @@ pub struct Token {
     pub token: String,
 }
 pub async fn verify_link(State(s): State<AppState>, Json(req): Json<Token>) -> Result<Response> {
-    rate(&s, "verify", 200, 60).await?;
     let mut tx = s.db.begin().await?;
     let (email, invite): (String, Option<String>) = sqlx::query_as(
         "DELETE FROM magic_links WHERE hash=? AND expires>? RETURNING email, invite",
@@ -355,6 +406,10 @@ pub async fn verify_link(State(s): State<AppState>, Json(req): Json<Token>) -> R
     }
     let p = p.unwrap();
     let token = session(&mut tx, &p).await?;
+    sqlx::query("DELETE FROM rate_limits WHERE key LIKE ?")
+        .bind(format!("email:%:{}", hash(&email)))
+        .execute(&mut *tx)
+        .await?;
     // Invalidate other outstanding links for this email after successful use.
     sqlx::query("DELETE FROM magic_links WHERE email=?")
         .bind(&email)
@@ -364,20 +419,24 @@ pub async fn verify_link(State(s): State<AppState>, Json(req): Json<Token>) -> R
     Ok(signed_in(&s, &token, &p))
 }
 pub async fn desktop_start(State(s): State<AppState>) -> Result<Json<Value>> {
-    rate(&s, "desktop-start", 100, 60).await?;
     let id = random();
     let secret = random();
-    sqlx::query("INSERT INTO desktop_logins(id,secret_hash,expires) VALUES (?,?,?)")
+    // Eight hex characters are typed from the initiating Mac, never put in a URL.
+    let code = random()[..8].to_uppercase();
+    sqlx::query("INSERT INTO desktop_logins(id,secret_hash,expires,code_hash) VALUES (?,?,?,?)")
         .bind(&id)
         .bind(hash(&secret))
         .bind(now() + 600)
+        .bind(hash(&code))
         .execute(&s.db)
         .await?;
-    Ok(Json(json!({"id":id,"secret":secret})))
+    Ok(Json(json!({"id":id,"secret":secret,"code":code})))
 }
 #[derive(Deserialize)]
 pub struct DesktopApproval {
     pub id: String,
+    #[serde(default)]
+    pub code: String,
 }
 pub async fn desktop_approve(
     State(s): State<AppState>,
@@ -385,18 +444,24 @@ pub async fn desktop_approve(
     Json(req): Json<DesktopApproval>,
 ) -> Result<Json<Value>> {
     let p = current(&s, &h).await?;
-    let n = sqlx::query(
-        "UPDATE desktop_logins SET principal=? WHERE id=? AND principal IS NULL AND expires>?",
-    )
-    .bind(p.id)
-    .bind(req.id)
-    .bind(now())
-    .execute(&s.db)
-    .await?
-    .rows_affected();
-    if n != 1 {
-        return Err(AppError::bad("Desktop sign-in expired or already approved"));
+    let code = req.code.trim().to_ascii_uppercase();
+    let mut tx = s.db.begin().await?;
+    let expected: Option<String> = sqlx::query_scalar(
+        "UPDATE desktop_logins SET attempts=attempts+1 WHERE id=? AND principal IS NULL AND expires>? AND attempts<5 AND code_hash IS NOT NULL RETURNING code_hash")
+        .bind(&req.id).bind(now()).fetch_optional(&mut *tx).await?;
+    if expected.as_deref() != Some(hash(&code).as_str()) {
+        // Commit failed guesses too; a challenge gets five attempts total.
+        tx.commit().await?;
+        return Err(AppError::bad(
+            "Check the code shown in Quipcall on your Mac, or restart sign-in",
+        ));
     }
+    sqlx::query("UPDATE desktop_logins SET principal=? WHERE id=?")
+        .bind(p.id)
+        .bind(req.id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(Json(json!({"ok":true})))
 }
 #[derive(Deserialize)]

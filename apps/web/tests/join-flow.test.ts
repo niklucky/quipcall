@@ -7,13 +7,13 @@ const room: CallRoom = { id: 'claimed-room', name: 'Project', kind: 'private', o
 function deferred<T>() { let resolve!: (v: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { resolve, promise }; }
 function setup(destination: JoinRequest['destination'] = 'browser') {
   const calls: string[] = [];
-  const input: JoinRequest = { destination, roomId: '', invitation: 'invite', desktopId: 'proof', name: 'Guest', title: 'Project', options: { microphone: false, camera: true, videoDeviceId: 'camera-one' } };
+  const input: JoinRequest = { destination, roomId: '', invitation: 'invite', desktopId: 'proof', desktopCode: 'ABC12345', name: 'Guest', title: 'Project', options: { microphone: false, camera: true, videoDeviceId: 'camera-one' } };
   const effects: JoinEffects = {
     identify: async () => principal,
     redeem: async token => { calls.push(`redeem:${token}`); return room; },
     accepted: value => { calls.push(`accepted:${value.id}`); },
     stopPreview: () => { calls.push('stop'); },
-    approve: async id => { calls.push(`approve:${id}`); },
+    approve: async (id, code) => { calls.push(`approve:${id}:${code}`); },
     approved: () => { calls.push('approved'); },
     openMac: id => { calls.push(`open:${id}`); },
     join: async (id, name, options) => { calls.push(`join:${id}:${name}:${options.videoDeviceId}`); },

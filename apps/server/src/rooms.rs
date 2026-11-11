@@ -193,7 +193,7 @@ pub async fn redeem(
     let p = auth::current(&s, &h).await?;
     let mut tx = s.db.begin().await?;
     let (id, kind, email, used): (String, String, Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT room,kind,email,used_by FROM room_invites WHERE hash=? AND expires>?",
+        "SELECT room,kind,email,used_by FROM room_invites WHERE hash=? AND (used_by IS NOT NULL OR expires>?)",
     )
     .bind(hash(&req.token))
     .bind(now())
@@ -269,7 +269,7 @@ pub async fn entry(
             else {
                 return Ok(Json(json!({"state":"expired"})));
             };
-            if expires <= now() {
+            if used.is_none() && expires <= now() {
                 return Ok(Json(json!({"state":"expired"})));
             }
             if used.is_some() && used.as_deref() != p.as_ref().map(|p| p.id.as_str()) {
@@ -377,8 +377,11 @@ pub async fn join(
             .execute(&mut *tx)
             .await?;
     }
+    // LiveKit identities belong to connections, access belongs to principals.
+    // The signed subject preserves this binding across LiveKit token refreshes.
+    let identity = format!("{}:{}", p.id, random());
     let token = AccessToken::with_api_key(&s.config.livekit_api_key, &s.config.livekit_api_secret)
-        .with_identity(&p.id)
+        .with_identity(&identity)
         .with_name(&p.name)
         .with_ttl(Duration::from_secs(120))
         .with_grants(VideoGrants {
@@ -395,7 +398,7 @@ pub async fn join(
     Ok(Json(quipcall_protocol::JoinInfo {
         url: s.config.livekit_public_url.clone(),
         token,
-        identity: p.id,
+        identity,
     }))
 }
 /// Called by nginx auth_request on *every* LiveKit signaling handshake, including
@@ -437,11 +440,12 @@ pub async fn media_check(State(s): State<AppState>, h: HeaderMap) -> Result<Stat
     let r = room(&mut db, &claims.video.room)
         .await
         .map_err(|_| AppError::forbidden("Room unavailable"))?;
-    if !allowed(&mut db, &r, &claims.sub).await? {
+    let principal = media_principal(&claims.sub);
+    if !allowed(&mut db, &r, principal).await? {
         return Err(AppError::forbidden("Room access removed"));
     }
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM principals WHERE id=?)")
-        .bind(claims.sub)
+        .bind(principal)
         .fetch_one(&mut *db)
         .await?;
     if !exists {
@@ -449,12 +453,26 @@ pub async fn media_check(State(s): State<AppState>, h: HeaderMap) -> Result<Stat
     }
     Ok(StatusCode::NO_CONTENT)
 }
-async fn livekit(s: &AppState, method: &str, r: &Room, principal: Option<&str>) -> Result<()> {
+// Also accept legacy tokens whose signed identity was the principal itself.
+fn media_principal(identity: &str) -> &str {
+    identity
+        .split_once(':')
+        .map_or(identity, |(principal, _)| principal)
+}
+pub async fn cleanup_invites(db: &sqlx::SqlitePool) -> Result<()> {
+    // Claimed links remain return addresses; membership still controls access.
+    sqlx::query("DELETE FROM room_invites WHERE expires<? AND used_by IS NULL")
+        .bind(now())
+        .execute(db)
+        .await?;
+    Ok(())
+}
+async fn livekit(s: &AppState, method: &str, r: &Room, identity: Option<&str>) -> Result<Value> {
     let token = AccessToken::with_api_key(&s.config.livekit_api_key, &s.config.livekit_api_secret)
         .with_ttl(Duration::from_secs(60))
         .with_grants(VideoGrants {
             room_admin: true,
-            room_create: principal.is_none(),
+            room_create: method == "DeleteRoom",
             room: r.id.clone(),
             ..Default::default()
         })
@@ -466,14 +484,17 @@ async fn livekit(s: &AppState, method: &str, r: &Room, principal: Option<&str>) 
             s.config.livekit_api_url.trim_end_matches('/')
         ))
         .bearer_auth(token)
-        .json(&match principal {
+        .json(&match identity {
             Some(identity) => json!({"room":r.id,"identity":identity}),
             None => json!({"room":r.id}),
         })
         .send()
         .await?;
-    if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
-        return Ok(());
+    if response.status() == StatusCode::NOT_FOUND {
+        return Ok(json!({"participants":[]}));
+    }
+    if response.status().is_success() {
+        return Ok(response.json().await?);
     }
     Err(AppError::new(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -490,8 +511,24 @@ pub async fn remove(
         return Err(AppError::bad("The owner cannot be removed"));
     }
     // Persist first: even if LiveKit is down, no new/replayed tokens get in.
-    sqlx::query("INSERT INTO memberships VALUES (?,?,1) ON CONFLICT(room,principal) DO UPDATE SET revoked=1").bind(id).bind(&principal).execute(&s.db).await?;
-    livekit(&s, "RemoveParticipant", &r, Some(&principal)).await?;
+    let mut tx = s.db.begin().await?;
+    sqlx::query("INSERT INTO memberships VALUES (?,?,1) ON CONFLICT(room,principal) DO UPDATE SET revoked=1")
+        .bind(&id).bind(&principal).execute(&mut *tx).await?;
+    // Free only this guest's slot, even on a retry after a replacement joined.
+    sqlx::query("UPDATE rooms SET guest=NULL WHERE id=? AND kind='direct' AND guest=?")
+        .bind(&id)
+        .bind(&principal)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let active = livekit(&s, "ListParticipants", &r, None).await?;
+    if let Some(participants) = active["participants"].as_array() {
+        for identity in participants.iter().filter_map(|p| p["identity"].as_str()) {
+            if media_principal(identity) == principal {
+                livekit(&s, "RemoveParticipant", &r, Some(identity)).await?;
+            }
+        }
+    }
     Ok(Json(json!({"ok":true})))
 }
 pub async fn close(

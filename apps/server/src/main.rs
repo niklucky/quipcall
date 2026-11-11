@@ -127,6 +127,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let state = AppState::new(Config::from_env()?).await?;
+    let mail_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Err(e) = auth::deliver_pending(&mail_state).await {
+                tracing::warn!("mail queue: {}", e.message);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
     let cleanup = state.db.clone();
     tokio::spawn(async move {
         loop {
@@ -136,7 +145,6 @@ async fn main() -> anyhow::Result<()> {
                 "account_invites",
                 "magic_links",
                 "desktop_logins",
-                "room_invites",
             ] {
                 if let Err(e) = sqlx::query(&format!("DELETE FROM {table} WHERE expires < ?"))
                     .bind(auth::now())
@@ -146,6 +154,11 @@ async fn main() -> anyhow::Result<()> {
                     tracing::warn!("auth cleanup: {e}");
                 }
             }
+            let _ = rooms::cleanup_invites(&cleanup).await;
+            let _ = sqlx::query("DELETE FROM mail_requests WHERE created < ?")
+                .bind(auth::now() - 900)
+                .execute(&cleanup)
+                .await;
             let _ = sqlx::query("DELETE FROM rate_limits WHERE expires < ?")
                 .bind(auth::now())
                 .execute(&cleanup)

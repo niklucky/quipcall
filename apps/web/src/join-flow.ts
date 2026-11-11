@@ -6,6 +6,7 @@ export type JoinRequest = {
   roomId: string;
   invitation: string;
   desktopId: string;
+  desktopCode: string;
   name: string;
   title: string;
   options: JoinOptions;
@@ -15,7 +16,7 @@ export type JoinEffects = {
   redeem: (token: string) => Promise<CallRoom>;
   accepted: (room: CallRoom) => void;
   stopPreview: () => void;
-  approve: (id: string) => Promise<unknown>;
+  approve: (id: string, code: string) => Promise<unknown>;
   approved: () => void;
   openMac: (roomId: string) => void;
   join: (roomId: string, name: string, options: JoinOptions, title: string) => Promise<void>;
@@ -46,7 +47,7 @@ export class JoinFlow {
       effects.stopPreview();
       if (!current()) return;
       if (request.destination === 'approve') {
-        await effects.approve(request.desktopId);
+        await effects.approve(request.desktopId, request.desktopCode);
         if (!current()) return;
         effects.approved();
       } else if (request.destination === 'mac') {
