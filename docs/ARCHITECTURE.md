@@ -49,6 +49,16 @@ deploy/             VPS deploy (nginx, systemd, LiveKit config) and Mac app pack
 docs/               plan, architecture, footprint measurements, deploy runbook
 ```
 
+## Accounts and room authorization
+
+The Axum backend owns identity and admission. SQLite migrations store principals (accounts or guests), linked provider identities, hashed sessions, account invitations, magic-link challenges, desktop approval challenges, rooms, memberships and room invitations. Resend delivers email; it does not own sessions. Account creation requires an unused email-bound registration invitation and email verification, except the configured bootstrap admin. Future OAuth providers attach to a permanent internal principal and must preserve that registration gate; provider linking must require explicit authenticated proof.
+
+User sessions last 30 days, guest sessions one year. Web uses HttpOnly cookies; macOS stores bearer credentials in Keychain and signs in through browser approval with a separate polling secret. Mutations require a custom header and same-origin browser requests. Email sending, challenge creation and verification are rate-limited. Single-use redemption and direct-call guest-slot allocation are transactional.
+
+Rooms are persistent authorization objects with an owner and a `direct`, `public` or `private` kind. Direct calls reserve two identities, public rooms admit link holders, and private rooms require membership. A guest invitation is redeemed once into durable membership; access ends only on manual removal. Registered-member invitations require the invited account email. Registration permission is separate from membership permission. Only owners manage rooms and invitations. Call histories and recordings remain local; joining a room grants no old-history access.
+
+`POST /api/join` derives identity and media grants from the authenticated account/guest session. It never accepts a caller-chosen identity or implicitly creates a room. LiveKit tokens last two minutes. nginx checks their signatures and the current room policy on every signaling handshake, including SDK-refreshed tokens; only nginx can reach the loopback LiveKit signaling listener in production. Removing access first persists revocation, then calls LiveKit to disconnect the participant. A failed disconnect is reported for retry. The signaling gate prevents cached tokens from restoring revoked access. Deployment and local test details: [DEPLOY.md](DEPLOY.md).
+
 ## Media decisions
 
 - **Rendering video (macOS).** GPUI's `surface()` draws full-range NV12 `CVPixelBuffer`s directly on the GPU. Hardware-decoded H.264 already arrives in that format and is drawn with no copy; software-decoded frames are converted into pooled IOSurface buffers.

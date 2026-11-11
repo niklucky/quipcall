@@ -57,6 +57,15 @@ if [ ! -f $ROOT/secrets.env ]; then
 	restart_livekit=1
 fi
 
+# Auth deployment fails before replacing the running binary if email/bootstrap
+# configuration is absent. Fill secrets.env from deploy/auth.env.example first.
+for setting in RESEND_API_KEY QUIPCALL_MAIL_FROM QUIPCALL_BOOTSTRAP_EMAIL; do
+    if ! grep -q "^${setting}=.\+" "$ROOT/secrets.env"; then
+        echo "Set $setting in $ROOT/secrets.env before deploying auth" >&2
+        exit 1
+    fi
+done
+
 put "$STAGE/deploy/livekit.yaml" $ROOT/livekit.yaml 644 && restart_livekit=1
 put "$STAGE/deploy/systemd/quipcall-livekit.service" /etc/systemd/system/quipcall-livekit.service 644 &&
 	restart_livekit=1

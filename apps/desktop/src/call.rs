@@ -332,7 +332,7 @@ impl Call {
             }
         });
 
-        let identity = unique_identity(&args.name);
+        let identity = String::new();
         let transcript = cx.new(|_| Transcript::new(args.name.clone()));
         // A download finishing starts the transcription waiting for it.
         let models = Models::global(cx);
@@ -375,12 +375,22 @@ impl Call {
             can_transcribe: None,
         });
 
-        let join = engine.join(&args.server, &room.id, &identity, &args.name);
+        let join = engine.join(
+            &args.server,
+            &room.id,
+            args.session.as_deref().unwrap_or_default(),
+        );
         let join_task = cx.spawn(async move |this, cx| {
             let result = join.await;
             let _ = this.update(cx, |call, cx| {
                 match result {
-                    Ok(info) => call.engine.connect(info),
+                    Ok(info) => {
+                        call.me.update(cx, |me, cx| {
+                            me.identity = info.identity.clone();
+                            cx.notify();
+                        });
+                        call.engine.connect(info);
+                    }
                     Err(e) => call.fail(format!("{e:#}"), cx),
                 }
                 cx.notify();
@@ -648,6 +658,10 @@ impl Call {
             cx.notify();
             schedule_sync(&cx.entity(), cx);
         }
+    }
+
+    pub fn invite(&self, cx: &mut Context<Self>) {
+        crate::rooms::open(Some(self.room.id.clone()), cx);
     }
 
     pub fn copy_link(&mut self, cx: &mut Context<Self>) {
@@ -1838,24 +1852,4 @@ fn visible_area(cx: &App) -> Bounds<Pixels> {
     cx.primary_display()
         .map(|d| d.visible_bounds())
         .unwrap_or_else(|| Bounds::new(point(px(0.0), px(0.0)), size(px(1440.0), px(900.0))))
-}
-
-/// LiveKit identities must be unique per room; this lets you run several
-/// copies of the app side by side.
-fn unique_identity(name: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or_default();
-    let slug: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    format!("{slug}-{:04x}", nanos & 0xffff)
 }

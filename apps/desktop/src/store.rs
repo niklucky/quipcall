@@ -1,4 +1,4 @@
-//! Rooms and call history, kept on this Mac until the backend exists.
+//! Cached server rooms and local call history.
 //!
 //! `~/Library/Application Support/Quipcall/local.json`, or `$QUIPCALL_DATA_DIR/local.json`
 //! (tests and parallel dev copies).
@@ -12,10 +12,38 @@ use crate::call::Ended;
 
 const HISTORY_LIMIT: usize = 200;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomKind {
+    Direct,
+    Public,
+    #[default]
+    Private,
+}
+impl RoomKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Direct => "1-to-1 call",
+            Self::Public => "Public room",
+            Self::Private => "Private room",
+        }
+    }
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Direct => "You and the first person to join. The same guest can return.",
+            Self::Public => "Anyone with the room link can join.",
+            Self::Private => "Only invited members and guests can join.",
+        }
+    }
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SavedRoom {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub kind: RoomKind,
+    #[serde(default)]
+    pub owner: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -151,6 +179,9 @@ pub struct Store {
     #[serde(default)]
     pub name: Option<String>,
     pub rooms: Vec<SavedRoom>,
+    /// Identity whose server room list is cached here; local history is separate.
+    #[serde(default)]
+    pub rooms_principal: Option<String>,
     /// Newest first.
     pub history: Vec<HistoryItem>,
     #[serde(default)]
@@ -191,13 +222,21 @@ impl Store {
         }
     }
 
-    pub fn add_room(&mut self, name: &str) -> SavedRoom {
-        let room = SavedRoom {
-            id: format!("{}-{}", slug(name), random_suffix()),
-            name: name.to_owned(),
-        };
-        self.rooms.push(room.clone());
-        room
+    /// Drop the old identity's room metadata before fetching the new account.
+    /// An offline/failed refresh must never leave the previous account's cache.
+    pub fn bind_rooms(&mut self, principal: Option<&str>) {
+        if self.rooms_principal.as_deref() != principal {
+            self.rooms.clear();
+            self.rooms_principal = principal.map(str::to_owned);
+        }
+    }
+
+    pub fn cache_room(&mut self, room: SavedRoom) {
+        if let Some(existing) = self.rooms.iter_mut().find(|r| r.id == room.id) {
+            *existing = room;
+        } else {
+            self.rooms.insert(0, room);
+        }
     }
 
     pub fn remove_room(&mut self, id: &str) {
@@ -220,6 +259,7 @@ impl Store {
             self.rooms.push(SavedRoom {
                 id: id.to_owned(),
                 name: name.to_owned(),
+                ..Default::default()
             });
         }
         for item in self.history.iter_mut().filter(|h| h.room_id == id) {
@@ -324,36 +364,6 @@ pub fn file_size(bytes: u64) -> String {
     }
 }
 
-pub fn quick_room_id() -> String {
-    format!("quick-{}{}", random_suffix(), random_suffix())
-}
-
-fn slug(name: &str) -> String {
-    let slug: String = name
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let slug = slug.trim_matches('-');
-    if slug.is_empty() {
-        "room".into()
-    } else {
-        slug.split('-')
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("-")
-    }
-}
-
-fn random_suffix() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    let mixed = (nanos as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ std::process::id() as u64;
-    format!("{:04x}", (mixed >> 32) & 0xffff)
-}
-
 pub fn duration(secs: u64) -> String {
     match secs {
         0..60 => format!("{secs} s"),
@@ -445,7 +455,45 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{civil_from_days, file_size};
+    use super::{SavedRoom, Store, civil_from_days, file_size};
+
+    #[test]
+    fn switching_accounts_clears_and_persists_the_room_cache_before_refresh() {
+        let mut store = Store::default();
+        store.bind_rooms(Some("account-a"));
+        store.cache_room(SavedRoom {
+            id: "private-a".into(),
+            name: "Private project A".into(),
+            owner: "account-a".into(),
+            ..Default::default()
+        });
+        store.bind_rooms(Some("account-a"));
+        assert_eq!(store.rooms.len(), 1, "same-account refresh keeps its cache");
+        store.bind_rooms(Some("account-b"));
+        // No replacement list is installed, as when /rooms fails or is offline.
+        assert!(store.rooms.is_empty());
+        let saved = serde_json::to_vec(&store).unwrap();
+        let reloaded: Store = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(reloaded.rooms_principal.as_deref(), Some("account-b"));
+        assert!(reloaded.rooms.is_empty());
+        assert!(
+            !String::from_utf8(saved)
+                .unwrap()
+                .contains("Private project A")
+        );
+    }
+
+    #[test]
+    fn legacy_unscoped_room_cache_is_not_reused_for_a_new_identity() {
+        let mut store = Store::default();
+        store.cache_room(SavedRoom {
+            id: "old-room".into(),
+            name: "Old project".into(),
+            ..Default::default()
+        });
+        store.bind_rooms(Some("account-b"));
+        assert!(store.rooms.is_empty());
+    }
 
     #[test]
     fn sizes() {

@@ -97,6 +97,30 @@ fn act(action: &str, cx: &mut App) {
     use crate::Shell;
     use crate::call::{Call, Mode};
 
+    if action == "room-new" {
+        crate::rooms::open(None, cx);
+        return;
+    }
+    if action == "room-manage" {
+        let id = Shell::global(cx)
+            .read(cx)
+            .store
+            .rooms
+            .first()
+            .map(|r| r.id.clone());
+        if let Some(id) = id {
+            crate::rooms::open(Some(id), cx);
+        }
+        return;
+    }
+    if action.starts_with("room-") {
+        for handle in cx.windows() {
+            if let Some(room) = handle.downcast::<crate::rooms::RoomAccess>() {
+                let _ = room.update(cx, |v, _, cx| v.scripted(action, cx));
+            }
+        }
+        return;
+    }
     if matches!(
         action,
         "hover"

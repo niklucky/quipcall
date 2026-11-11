@@ -9,6 +9,12 @@ Group=quipcall
 EnvironmentFile=/opt/quipcall/secrets.env
 Environment=QUIPCALL_BIND=127.0.0.1:4600
 Environment=LIVEKIT_PUBLIC_URL=wss://quipcall.com
+Environment=LIVEKIT_API_URL=http://127.0.0.1:7880
+Environment=QUIPCALL_PUBLIC_URL=https://quipcall.com
+Environment=QUIPCALL_DATABASE_URL=sqlite:///var/lib/quipcall/quipcall.db
+StateDirectory=quipcall
+StateDirectoryMode=0700
+UMask=0077
 Environment=RUST_LOG=quipcall_server=info,tower_http=info
 ExecStart=/opt/quipcall/bin/quipcall-server
 Restart=on-failure

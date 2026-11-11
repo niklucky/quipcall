@@ -2,19 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Query for `GET /api/join`. Rooms are open: anyone with a room's link can
-/// join it. Authenticated call tokens replace this in Stage 3.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JoinRequest {
-    pub room: String,
-    pub identity: String,
-    #[serde(default)]
-    pub name: Option<String>,
-}
-
 /// Everything a client needs to join a LiveKit room.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinInfo {
+    /// Server-assigned participant identity.
+    pub identity: String,
     /// LiveKit WebSocket URL as reachable from the client.
     pub url: String,
     pub token: String,

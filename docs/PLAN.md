@@ -94,18 +94,18 @@ Design: [UI.md](UI.md).
 
 ## Stage 3 — Backend core
 
-- [ ] SQLite via sqlx, with migrations
-- [ ] Accounts: invite codes, username + password (argon2), session tokens
+- [x] ~~SQLite via sqlx, with migrations~~
+- [x] ~~Accounts: invite-only registration, email magic links through Resend, session tokens~~ *Web cookies, desktop Keychain/browser approval, bootstrap admin, separate provider identities ready for future OAuth.*
 - [ ] `protocol`: REST request/response types and WebSocket messages, with TypeScript types generated for web
 - [ ] WebSocket hub: authenticated connection, presence (online / away / in call)
 - [ ] LiveKit token minting for calls; LiveKit webhooks (joined / left / room finished) → call records
-- [ ] Remove the dev-only token endpoint from non-dev builds
+- [x] ~~Remove the unauthenticated token endpoint~~ *POST join requires an account/guest session and room access; nginx gates LiveKit signaling against current membership.*
 
 **Done when:** integration tests for auth, token minting, and WebSocket presence pass.
 
 ## Stage 4 — Desktop app shell
 
-- [ ] Login, with the session stored in the macOS Keychain
+- [x] ~~Login, with the session stored in the macOS Keychain~~ *Browser approval with a private polling secret; refresh rooms, switch account and sign out.*
 - [ ] Menu-bar mode: runs in the background, stays connected for presence, small idle footprint. Check that GPUI's GPU memory (~90 MB with the call window open) is released when no window is open.
 - [ ] `core`: call state machine with no UI code
 - [ ] Contacts: add by username, see who's online
@@ -116,6 +116,9 @@ Design: [UI.md](UI.md).
 
 ## Stage 5 — 1:1 calls
 
+- [x] ~~Guest 1-to-1 calls: authenticated creator, one guest identity, reconnects, no third participant~~
+- [x] ~~Public rooms and private rooms with membership and single-use guest links granting access until removal~~ *Web and native room creation/access management: public/private choice, guest/member invitations, revoke/remove, rename/close, and in-call Invite. Registration and room invitations are independent.*
+
 - [ ] Ringing protocol: invite → ringing → accept / decline / cancel / timeout / busy. With multiple devices, the first accept wins.
 - [ ] Incoming-call window and ringtone
 - [ ] Device switching (mic, speaker, camera) during a call
@@ -125,7 +128,9 @@ Design: [UI.md](UI.md).
 
 ## Stage 6 — Web client
 
-- [ ] Login, contacts, place and answer calls from the browser
+- [x] ~~Web magic-link login, room creation/joining and invitation/access management~~
+- [x] ~~Focused guest join flow: name, camera preview, mic level and input selection, permission recovery, invitation/access states, mobile layout and explicit Mac identity handoff~~ *Verified against an isolated LiveKit server with synthetic tracks; preview cleanup, enabled/disabled media, return visits, live removal and browser-to-Mac identity approval checked.*
+- [ ] Contacts, ringing, place and answer contact calls from the browser
 - [ ] Call UI on par with desktop: grid, controls, screen share with frame-rate picker
 - [ ] Mobile layout (active speaker + up to 4 tiles), tested in Chrome on Android
 
@@ -133,7 +138,7 @@ Design: [UI.md](UI.md).
 
 ## Stage 7 — Alpha deploy to the VPS (friends start testing here)
 
-Started early (2026-11-03), ahead of Stages 3–6: there are no accounts yet, so rooms are open links (`/api/join`). Runbook: [DEPLOY.md](DEPLOY.md).
+Started early (2026-11-03), ahead of Stages 3–6, with open room links. Invite-only auth and room policies shipped on 2026-11-11 with the web/API update and signed Mac build 54 (Apple Silicon and Intel). Production checks passed for secure guest sessions, admission rules, retired open joins and the nginx signaling gate; the Resend sender domain is verified. Signed Mac build 55 adds native room creation, invitations and access management; isolated native/API checks cover guest redemption, return, removal, invitation revocation, public admission, non-owner controls and room closure. The focused web join flow and read-only access preflight shipped on 2026-11-12; signed Mac build 56 adds the explicit browser-identity handoff. Runbook: [DEPLOY.md](DEPLOY.md).
 
 - [x] ~~LiveKit on a single node: one UDP port (7882), TCP fallback (7881)~~ — calls from outside connect over UDP
 - [ ] Built-in TURN/TLS for strict networks (only 443 open)
@@ -142,7 +147,7 @@ Started early (2026-11-03), ahead of Stages 3–6: there are no accounts yet, so
 - [x] ~~macOS build: `.app` bundle, ad-hoc signing for friends~~ — one app per architecture, `curl … | sh` installer, call links (`quipcall://join/<room>`); `make release-mac`
 - [ ] Updates keep their permissions: releases are signed with one self-signed certificate (`deploy/mac/signing.sh`), so macOS's requirement for the app stays the same across builds. *Built; needs two releases in a row to confirm.*
 - [ ] Notarization (Apple Developer ID), so a downloaded zip opens without the manual "Open"; simple update check
-- [ ] Invite codes for friends
+- [x] ~~Email-bound account invitations for friends~~
 - [x] ~~Fix: crash on join on Macs with a Touch Bar~~ — floating windows are created borderless (patched GPUI) instead of switching style afterwards; the accessibility content view also keeps its class when home closes so Touch Bar observers survive the transition
 - [ ] Verify on the affected Intel Mac (macOS 15.6, two displays, Touch Bar): call windows stay visible when sharing and switching apps. *Fixed NSPanel's default hide-on-deactivate behavior for floating windows and popups; audio continued while the UI disappeared. Needs a manual check with the updated app.*
 - [ ] Verify share picker responsiveness with many windows. *Permission checks and enumeration run off the UI thread; choices arrive before previews. Native submissions run on isolated workers with deadlines and a shared limit of four requests across picker sessions. In-flight requests keep their slot through timeouts and cancellation until the native callback completes; listing failures offer Retry.*
@@ -153,7 +158,7 @@ Started early (2026-11-03), ahead of Stages 3–6: there are no accounts yet, so
 
 - [ ] Groups: create, add/remove members, owner role
 - [ ] Start a group call (rings online members); join a call already in progress; show which groups are in a call
-- [ ] Guest links: signed, expiring link → join on web with a display name and limited permissions; the host can remove guests
+- [x] ~~Single-use guest links → durable private-room access with a display name; the owner can revoke access and disconnect guests~~ *Opaque hashed invitation tokens, atomic redemption, persistent membership and signaling admission checks.*
 - [ ] Layouts: grid / speaker / screen-share focus; active speaker; pagination
 - [ ] Performance: adaptive stream, dynacast, pause off-screen tiles, tuned simulcast layers
 

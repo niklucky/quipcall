@@ -2,7 +2,7 @@
 include dev/dev.env
 export
 
-.PHONY: dev livekit server web desktop check fmt token deploy mac-app release-mac vendor
+.PHONY: dev livekit server web desktop check fmt deploy mac-app release-mac vendor
 
 # Cargo needs vendor/webrtc-sys (crates.io source + our patch) before any build.
 vendor:
@@ -31,9 +31,7 @@ check: vendor
 fmt: vendor
 	cargo fmt --all
 
-# Print a join token: make token ROOM=spike ID=alice
-token:
-	@curl -s "http://$(QUIPCALL_BIND)/api/join?room=$(or $(ROOM),spike)&identity=$(or $(ID),cli-$$RANDOM)"; echo
+# The former unauthenticated GET /api/join is intentionally gone.
 
 # Server, web client and VPS config → https://quipcall.com (docs/DEPLOY.md).
 deploy: vendor

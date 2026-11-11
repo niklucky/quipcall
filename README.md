@@ -2,14 +2,14 @@
 
 Small, fast video and audio calls: a native Rust desktop app (macOS first, built with GPUI) and a Svelte web client, on a self-hosted LiveKit server.
 
-Alpha at https://quipcall.com. Get the Mac app at https://quipcall.com/download/.
+Invite-only alpha at https://quipcall.com. Get the Mac app at https://quipcall.com/download/.
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `apps/desktop` | Mac app (GPUI). Home, a floating capsule of faces, a call window and a share picker |
-| `apps/server` | Axum API: `/api/join` returns LiveKit tokens |
+| `apps/server` | Axum + SQLite: accounts, invitations, room access and LiveKit tokens |
 | `apps/web` | Svelte 5 web client |
 | `crates/core` | Media and call logic, no UI code (LiveKit SDK, capture, video, recording) |
 | `crates/stt` | Speech to text on this Mac: Silero VAD and Parakeet or Qwen3-ASR through transcribe.cpp |
@@ -24,11 +24,13 @@ You need Rust, Xcode, Node 22+ with pnpm, and `brew install livekit livekit-cli 
 ```sh
 make dev               # LiveKit + server on :8080
 make web               # http://127.0.0.1:5173 (run `pnpm install` in apps/web first)
-make desktop           # home screen; ROOM=spike joins a room straight away
+make desktop           # sign in through the browser; credentials stay in Keychain
 make check             # clippy + svelte-check
 ```
 
-To add a test participant: `lk room join --url ws://127.0.0.1:7880 --api-key quipcall-dev --api-secret quipcall-dev-secret-0123456789abcdef --identity bot --publish-demo spike`
+For local sign-in use `admin@example.test`; open the magic link from `dev/data/mail` (no email is sent). Create rooms while signed in. Auth/deployment details: [DEPLOY.md](docs/DEPLOY.md).
+
+To add a low-level LiveKit test participant (bypasses application auth): `lk room join --url ws://127.0.0.1:7880 --api-key quipcall-dev --api-secret quipcall-dev-secret-0123456789abcdef --identity bot --publish-demo spike`
 
 ## Ship
 

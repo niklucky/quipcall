@@ -83,6 +83,18 @@ pub struct TextInput {
 impl EventEmitter<InputEvent> for TextInput {}
 
 impl TextInput {
+    pub fn with_max_len(mut self, max_len: usize) -> Self {
+        self.max_len = max_len;
+        self
+    }
+
+    pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.content = text.into();
+        self.selected_range = self.content.len()..self.content.len();
+        self.marked_range = None;
+        cx.notify();
+    }
+
     pub fn new(
         content: impl Into<SharedString>,
         placeholder: impl Into<SharedString>,

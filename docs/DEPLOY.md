@@ -24,21 +24,21 @@ Set `QUIPCALL_HOST=user@host` to deploy somewhere else.
 - nginx terminates TLS: site `/etc/nginx/sites-available/quipcall.com.conf` (source: `deploy/nginx/`). `www` redirects to the bare domain.
 - Let's Encrypt certificate via certbot's webroot (`/var/www/quipcall-acme`), renewed by `certbot.timer`. A deploy hook already on the box reloads nginx after renewals.
 - systemd units `quipcall-livekit` and `quipcall-server`, both running as the `quipcall` user.
-- `/opt/quipcall/secrets.env` (root, 0600) holds the LiveKit API key and secret. `install.sh` generates it on the first deploy and it never leaves the box. To rotate: delete it and deploy again.
+- `/opt/quipcall/secrets.env` (root, 0600) holds the LiveKit API key and secret. `install.sh` generates it on the first deploy and it never leaves the box. It also holds the auth settings below. Rotate LiveKit keys in place; do not delete the email configuration.
 - No host firewall. LiveKit binds only to `eth0` (public IPv4 + IPv6), not to the Docker bridges.
 
 ## How `make deploy` works
 
 `deploy/deploy.sh` builds locally and runs `deploy/install.sh` on the box:
 
-1. The server, cross-compiled to a static Linux binary (`x86_64-unknown-linux-musl`, linked by Rust's bundled `rust-lld`, so no Docker or C toolchain), and the web client (`pnpm build`).
+1. The server, cross-compiled to a static Linux binary with `cargo zigbuild` (`x86_64-unknown-linux-musl`; Zig compiles bundled SQLite and TLS C code), and the web client (`pnpm build`). Install `zig` and `cargo-zigbuild` on the build Mac first.
 2. One tarball over SSH to `/opt/quipcall/incoming`, removed afterwards.
 3. `install.sh` (idempotent): user and directories, LiveKit at the pinned version, keys, configs, units, web files, nginx site, then health checks (`/api/health` through nginx, LiveKit on 7880).
 
 Guard rails, because the box is shared:
 - LiveKit restarts only when its binary, config or unit changed. A restart drops every call in progress. The API server always restarts; that takes milliseconds and keeps calls alive.
 - If `nginx -t` rejects the new site, the previous one is restored, so other sites keep working and future reloads don't fail.
-- Only quipcall files are touched: the site file, two units, `/opt/quipcall`, `/var/www/quipcall-acme`.
+- Only quipcall files are touched: the site file, two units, `/opt/quipcall`, `/var/lib/quipcall`, `/var/www/quipcall-acme`.
 
 ## Mac app
 
@@ -47,6 +47,8 @@ Guard rails, because the box is shared:
 Friends install with `curl -fsSL https://quipcall.com/download/install.sh | sh`, which picks the right architecture. A file downloaded with curl isn't quarantined, so Gatekeeper doesn't block the unnotarized app. Downloading the zip in a browser works too, but needs System Settings → Privacy & Security → Open Anyway once.
 
 macOS remembers the app's permissions (microphone, camera, Screen Recording) by its signature. Ad-hoc signatures tied them to one exact build, so every update lost them, while System Settings went on showing the old build as allowed. Releases are now signed with a self-signed certificate that stays the same across builds. `deploy/mac/signing.sh` makes it on the first `make mac-app`, in `~/Library/Keychains/quipcall-signing.keychain-db` (no password, not in the keychain search list). **Back that file up**: a new certificate means everyone grants permissions once more. The first release signed this way also needs that once, coming from ad-hoc. The certificate isn't a Developer ID, so a zip downloaded in a browser still needs one manual "Open"; notarization would fix that (Stage 7).
+
+For a release from uncommitted work, set `QUIPCALL_BUILD` to a positive integer greater than the currently published build (check `/download/version.txt`). Otherwise the build number defaults to the Git commit count.
 
 The app logs to `~/Library/Logs/Quipcall/quipcall.log` when started from Finder (the previous run is kept as `quipcall.previous.log`).
 
@@ -57,6 +59,45 @@ ssh root@testron.dev journalctl -u quipcall-server -u quipcall-livekit -f
 ssh root@testron.dev systemctl status quipcall-livekit quipcall-server
 ```
 
-## Rooms are open
+## Invite-only authentication
 
-There are no accounts yet (Stage 3). `/api/join` gives a token for any room to anyone, like a meeting link: knowing the room ID is the only key. Room IDs from the desktop app have a random suffix (`quick-1a2b3c4d`). Fine for an alpha among friends. Invite codes and accounts close it.
+Keep local credentials in ignored `deploy/auth.env.local` (mode 0600), using [deploy/auth.env.example](../deploy/auth.env.example) as the template. Add those values to `/opt/quipcall/secrets.env` before deploying:
+
+- `RESEND_API_KEY`: a Resend key with permission to send emails.
+- `QUIPCALL_MAIL_FROM`: sender on a domain verified in Resend. Disable email click tracking for sign-in messages.
+- `QUIPCALL_BOOTSTRAP_EMAIL`: your email. Verify it through the normal magic-link flow to create the first admin account; only admins issue account registration invitations.
+
+The installer checks these settings before replacing the running application. It never writes real Resend credentials. No deployment is needed to run tests.
+
+The systemd unit sets the public origin to `https://quipcall.com`, creates a private state directory, and stores SQLite at `/var/lib/quipcall/quipcall.db`. Back this database up using SQLite's online backup command (or stop the API before copying it). It contains accounts, sessions, invitations, rooms and memberships. Restarting the API preserves access. Migrations run at startup. The API checks readiness by opening and migrating the database before binding its port.
+
+Sign in on the web, then use **Invite a new account** to make a single-use, email-bound registration link. Share the link yourself. It expires after seven days. The recipient enters the invited email and verifies it through Resend. Existing accounts only need an email sign-in link. Magic links expire after 15 minutes and are consumed only by an explicit confirmation POST, so email-link scanners don't consume them. Credential hashes, rather than bearer credentials, are stored in SQLite.
+
+Browser sessions use HttpOnly, Secure, SameSite=Lax cookies on production. Native sessions use macOS Keychain, scoped to the server and (for tests) `QUIPCALL_DATA_DIR`. Desktop sign-in opens the browser and requires explicit approval. The app exchanges a separate private polling secret for a session; no session credential is passed through a custom URL scheme. User sessions last 30 days, guest browser/device sessions one year. A room membership persists independently of session expiry; a guest who loses their credential needs a fresh invitation. Apple and other OAuth providers are deferred; the `identities` table already separates provider identity from the internal account ID.
+
+## Calls and access
+
+- A signed-in user creates rooms. A **guest 1-to-1** reserves one identity for the creator and one for the first guest; the same guest can reconnect, and a third identity cannot join.
+- A **public room** admits anyone with its unguessable link, including guests.
+- A **private room** admits its owner, invited registered members and explicitly invited guests. Account registration and room membership are separate permissions.
+- A **single-use guest invitation** can be claimed by one identity; that identity can leave and return until manually removed. The unclaimed link expires after seven days, but claimed membership has no time limit. Acceptance is atomic. A lost HTTP response can be retried by the same identity, but a consumed link never restores removed access.
+- Only the room owner can issue/revoke room invitations, remove access, rename or close the room. Membership invitations are bound to an account email. Guests cannot create rooms or issue invitations.
+- **Remove access** commits revocation before requesting LiveKit disconnection. If disconnection fails, the API reports failure and the UI offers a retry; access remains revoked. Closing a room works the same way.
+
+LiveKit signaling **must** pass through nginx's `auth_request` gate on `/rtc` (including its subpaths). It validates the signed LiveKit token and checks current room access before every handshake, including refreshed tokens. The LiveKit HTTP/signaling port remains bound to loopback. This is required for manual removal: self-hosted LiveKit alone does not reliably revoke a previously issued token. Do not expose port 7880 directly, cache authorization responses, or remove this gate. nginx must include `http_auth_request_module`; the installer runs `nginx -t` before reload. Signaling access logs are disabled because URLs contain tokens.
+
+The old unauthenticated GET `/api/join` is removed. Unknown room IDs no longer create rooms. Existing alpha room bookmarks are not automatically claimed by whoever presents them; create replacement rooms while signed in. Ship the updated desktop app with the backend/web update; old clients cannot authenticate. Current call history and recordings remain local and aren't exposed by a room invitation. Desktop **+** creates public/private rooms. **Access** on Home and **Invite** during a call manage guest/member links, pending invitations, member removal, renaming and closing. **Refresh rooms** syncs the native list. Registration invitations remain in the web admin controls.
+
+## Local auth development
+
+`make dev` uses `dev/dev.env`: SQLite under `dev/data`, bootstrap email `admin@example.test`, and a private-file outbox in `dev/data/mail`. Request a magic link from the local web UI, then open the URL from the outbox file. Nothing is sent to Resend in this mode. The outbox is explicitly restricted to localhost and never logged. Real deployment must use Resend.
+
+For an isolated second stack, set `QUIPCALL_BIND=127.0.0.1:8180`, `QUIPCALL_PUBLIC_URL=http://127.0.0.1:5273`, a separate database/outbox, `LIVEKIT_API_URL=http://127.0.0.1:7980`, and the corresponding `LIVEKIT_PUBLIC_URL`. Run Vite on 5273 with `QUIPCALL_API=http://127.0.0.1:8180`. To test token revocation end to end, put a local nginx auth-request gateway in front of LiveKit and use its URL as `LIVEKIT_PUBLIC_URL`. The minimal `make dev` stack connects directly to LiveKit and therefore does not enforce the signaling gate; it still enforces API admission.
+
+Verification: `cargo test -p quipcall-server` covers signup gating, email confirmation/reuse/expiry, session revocation, role enforcement, simultaneous invite/direct-slot claims, private access persistence/removal, cached-token authorization, desktop proof and CSRF/rate limits. `make check` checks Rust and Svelte; `pnpm build` in `apps/web` checks the production bundle.
+
+Native room checks: `cargo test -p quipcall-desktop rooms::tests` covers creation responses, retaining issued links when refresh fails, and revocation/disconnection partial failure. With the `snapshot` feature, `room-new`, `room-create-private`, `room-create-public`, `room-manage`, `room-guest`, `room-member`, `room-refresh`, `room-remove`, `room-retry-remove`, `room-revoke` and `room-close` exercise the native controls against an isolated API. `QUIPCALL_TEST_SESSION_FILE` supplies a fixture credential only on localhost; `QUIPCALL_ROOM_TEST_STATE` exports the result for assertions. These hooks are absent from release packages. Always use an isolated `QUIPCALL_DATA_DIR`, `QUIPCALL_NO_MIC=1`, `QUIPCALL_FAKE_CAMERA=1` and `QUIPCALL_FAKE_SCREEN=1`.
+
+Join preflight: `POST /api/entry` accepts exactly one of `room` or `invite`. It returns only permitted room metadata and an access state, never consumes invitations or reserves a direct-call slot, and never mints a media token. Ship its server change with the web join page. Mac build 56 adds `quipcall://open/` for the explicit browser-identity handoff. `pnpm test` in `apps/web` (Node 22.18+ or 24+) checks media request cancellation, device changes, cleanup and permission denial. API tests check preflight privacy and unchanged admission rules.
+
+Desktop sign-in polling uses a separate IP allowance from email/approval requests, plus a per-challenge quota after verifying the private proof. The app backs off on HTTP 429 within its original sign-in deadline. Cached room lists are bound to the principal and cleared before a new account refresh, including when that refresh fails. Browser join continuations are cancelled when navigating away, so late identity/redemption responses cannot trigger another join or approval.

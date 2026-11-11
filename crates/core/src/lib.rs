@@ -325,15 +325,11 @@ impl Engine {
         &self,
         server: &str,
         room: &str,
-        identity: &str,
-        name: &str,
+        session: &str,
     ) -> impl Future<Output = anyhow::Result<JoinInfo>> + Send + 'static {
         let url = format!("{}/api/join", server.trim_end_matches('/'));
-        let query = [
-            ("room", room.to_owned()),
-            ("identity", identity.to_owned()),
-            ("name", name.to_owned()),
-        ];
+        let body = serde_json::json!({"room": room});
+        let session = session.to_owned();
         let handle = self.rt().handle().clone();
         async move {
             handle
@@ -345,7 +341,14 @@ impl Engine {
                     // shouldn't fail the call: retry transport errors only.
                     let mut attempt = 1;
                     let resp = loop {
-                        match client.get(&url).query(&query).send().await {
+                        match client
+                            .post(&url)
+                            .header("X-Quipcall", "1")
+                            .bearer_auth(&session)
+                            .json(&body)
+                            .send()
+                            .await
+                        {
                             Ok(resp) => break resp,
                             Err(e) if attempt < 3 && (e.is_connect() || e.is_timeout()) => {
                                 tracing::warn!("join attempt {attempt} failed: {e}");

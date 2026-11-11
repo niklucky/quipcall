@@ -67,10 +67,9 @@ pub struct Home {
     tab: Tab,
     /// Renaming this room, with the field.
     renaming: Option<(String, Entity<TextInput>, Subscription)>,
-    /// The trash button was pressed once: press again to remove.
-    confirm_remove: Option<String>,
     /// The selected call's recording, playing under its transcript.
     playback: Option<Playback>,
+    principal_id: Option<String>,
     _subscription: Subscription,
 }
 
@@ -135,10 +134,43 @@ impl Home {
             selected,
             tab: Tab::Transcript,
             renaming: None,
-            confirm_remove: None,
             playback: None,
-            _subscription: cx.observe(&shell, |_, _, cx| cx.notify()),
+            principal_id: shell.read(cx).principal.as_ref().map(|p| p.id.clone()),
+            _subscription: cx.observe(&shell, |this, shell, cx| {
+                let principal_id = shell.read(cx).principal.as_ref().map(|p| p.id.clone());
+                if this.principal_id != principal_id {
+                    this.principal_id = principal_id;
+                    this.selected = None;
+                    this.renaming = None;
+                    this.playback = None;
+                    this.side = Side::Rooms;
+                    this.tab = Tab::Transcript;
+                }
+                if this.selected.is_none()
+                    && let Some(room) = shell.read(cx).store.rooms.first()
+                {
+                    this.selected = Some(Selected {
+                        room: room.id.clone(),
+                        call: 0,
+                    });
+                }
+                cx.notify();
+            }),
         }
+    }
+
+    pub fn forget_room(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.selected.as_ref().is_some_and(|s| s.room == id) {
+            self.selected = None;
+            self.playback = None;
+            self.side = Side::Rooms;
+            cx.notify();
+        }
+    }
+
+    pub fn select_room(&mut self, room: String, cx: &mut Context<Self>) {
+        self.side = Side::Rooms;
+        self.select(room, 0, cx);
     }
 
     fn select(&mut self, room: String, call: usize, cx: &mut Context<Self>) {
@@ -148,7 +180,6 @@ impl Home {
             self.tab = Tab::Transcript;
             self.playback = None;
             self.renaming = None;
-            self.confirm_remove = None;
             cx.notify();
         }
     }
@@ -321,11 +352,8 @@ impl Home {
             )
     }
 
-    fn new_room(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let id = Shell::global(cx).update(cx, |s, cx| s.new_room(cx));
-        self.side = Side::Rooms;
-        self.select(id.clone(), 0, cx);
-        self.start_rename(id, window, cx);
+    fn new_room(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        crate::rooms::open(None, cx);
     }
 
     fn start_rename(&mut self, room: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -416,8 +444,9 @@ impl Home {
                     .map(|(ix, room)| {
                         let people = store.people_in(&room.id);
                         let latest = store.calls_in(&room.id).next();
-                        let meta =
+                        let recent =
                             latest.map_or_else(|| "No calls yet".to_owned(), |i| when(i, true));
+                        let meta = format!("{} · {recent}", room.kind.label());
                         let selected = self.selected.as_ref().is_some_and(|s| s.room == room.id);
                         let id = room.id.clone();
                         let join = room.id.clone();
@@ -633,6 +662,57 @@ impl Home {
             )
             .child(
                 div()
+                    .px(px(12.0))
+                    .py(px(6.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(
+                        button(
+                            "sign-in",
+                            if s.auth_busy {
+                                "Waiting for browser…"
+                            } else {
+                                "Sign in / switch account"
+                            },
+                            None,
+                            Kind::Secondary,
+                            !s.auth_busy,
+                        )
+                        .on_click(|_, _, cx| {
+                            Shell::global(cx).update(cx, |s, cx| s.sign_in(None, cx))
+                        }),
+                    )
+                    .child(
+                        button(
+                            "refresh-rooms",
+                            "Refresh rooms",
+                            None,
+                            Kind::Secondary,
+                            true,
+                        )
+                        .on_click(|_, _, cx| {
+                            Shell::global(cx).update(cx, |s, cx| s.refresh_account(cx))
+                        }),
+                    )
+                    .when(s.args.session.is_some(), |el| {
+                        el.child(
+                            button("sign-out", "Sign out", None, Kind::Secondary, true).on_click(
+                                |_, _, cx| Shell::global(cx).update(cx, |s, cx| s.sign_out(cx)),
+                            ),
+                        )
+                    })
+                    .when(!s.auth_message.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(TEXT_DIM))
+                                .child(s.auth_message.clone()),
+                        )
+                    }),
+            )
+            .child(
+                div()
                     .id("list")
                     .flex_1()
                     .min_h_0()
@@ -655,7 +735,14 @@ impl Home {
                     .border_t_1()
                     .border_color(rgb(LINE))
                     .child(avatar(&me, 26.0))
-                    .child(row_text(me.clone(), "On this Mac"))
+                    .child(row_text(
+                        me.clone(),
+                        if s.principal.as_ref().is_some_and(|p| p.kind == "user") {
+                            "Signed in"
+                        } else {
+                            "Guest / signed out"
+                        },
+                    ))
                     .child(
                         icon_button("edit-me", Icon::Pencil, 28.0)
                             .tooltip(tooltip("Change your name"))
@@ -680,7 +767,7 @@ impl Home {
             return pane.child(div().h(px(52.0))).child(empty_state(
                 Icon::Users,
                 "No calls yet",
-                "Start a quick call, or make a room with + and send its link around.",
+                "Start a quick call, or create a public or private room with +.",
             ));
         };
         let saved = store.rooms.iter().find(|r| r.id == selected.room).cloned();
@@ -726,24 +813,28 @@ impl Home {
                         .truncate()
                         .child(title.clone()),
                 )
-                .when(saved.is_some(), |el| {
-                    let id = room_id.clone();
-                    el.child(
-                        icon_button("rename", Icon::Pencil, 24.0)
-                            .tooltip(tooltip("Rename"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.start_rename(id.clone(), window, cx)
-                            })),
-                    )
-                })
+                .when(
+                    saved
+                        .as_ref()
+                        .is_some_and(|r| s.principal.as_ref().is_some_and(|p| p.id == r.owner)),
+                    |el| {
+                        let id = room_id.clone();
+                        el.child(
+                            icon_button("rename", Icon::Pencil, 24.0)
+                                .tooltip(tooltip("Rename"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.start_rename(id.clone(), window, cx)
+                                })),
+                        )
+                    },
+                )
                 .into_any_element(),
         };
 
         let actions: Vec<AnyElement> = match &saved {
             Some(room) => {
                 let copy = link.clone();
-                let remove = room.id.clone();
-                let confirming = self.confirm_remove.as_deref() == Some(room.id.as_str());
+                let manage = room.id.clone();
                 let join = room.id.clone();
                 vec![
                     icon_button("copy-link", Icon::Link, 28.0)
@@ -752,30 +843,16 @@ impl Home {
                             cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
                         })
                         .into_any_element(),
-                    if confirming {
-                        button(
-                            "remove",
-                            "Remove room",
-                            Some(Icon::Trash),
-                            Kind::Danger,
-                            false,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.confirm_remove = None;
-                            this.selected = None;
-                            Shell::global(cx).update(cx, |s, cx| s.remove_room(&remove, cx));
-                            cx.notify();
-                        }))
-                        .into_any_element()
-                    } else {
-                        icon_button("remove", Icon::Trash, 28.0)
-                            .tooltip(tooltip("Remove room"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.confirm_remove = Some(remove.clone());
-                                cx.notify();
-                            }))
-                            .into_any_element()
-                    },
+                    button(
+                        "room-access",
+                        "Access",
+                        Some(Icon::UserPlus),
+                        Kind::Secondary,
+                        false,
+                    )
+                    .tooltip(tooltip("Invitations and room access"))
+                    .on_click(move |_, _, cx| crate::rooms::open(Some(manage.clone()), cx))
+                    .into_any_element(),
                     button("call", "Call", Some(Icon::Phone), Kind::Primary, false)
                         .on_click(move |_, _, cx| {
                             Shell::global(cx).update(cx, |s, cx| s.join_saved(&join, cx))
@@ -947,7 +1024,7 @@ impl Home {
             (None, _) => empty_state(
                 Icon::Phone,
                 "No calls in this room yet",
-                "Press Call, or copy the link and send it to whoever should join.",
+                "Press Call to join. Use Access to invite someone or share the room link.",
             )
             .into_any_element(),
             (Some(item), Tab::Transcript) if item.started == 0 => empty_state(

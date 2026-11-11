@@ -1,3 +1,4 @@
+import { api } from './api';
 import {
   Room,
   Track,
@@ -45,13 +46,9 @@ export function screenShareOptions(
   ];
 }
 
-/** A token for `room`. Rooms are open to anyone with the link until Stage 3. */
-export async function requestJoin(room: string, identity: string, name: string) {
-  const q = new URLSearchParams({ room, identity, name });
-  const res = await fetch(`/api/join?${q}`);
-  const body = await res.json();
-  if (!res.ok) throw new Error(body.error ?? res.statusText);
-  return body as { url: string; token: string };
+/** The backend derives identity and grants from the current session. */
+export async function requestJoin(room: string) {
+  return api<{url: string; token: string; identity: string}>('/join', {room});
 }
 
 export interface Tile {
@@ -107,9 +104,4 @@ export function transcriber(room: Room): { identity: string; name: string } | nu
     if (p.attributes[TRANSCRIBING_ATTRIBUTE]) return { identity: p.identity, name: p.name || p.identity };
   }
   return null;
-}
-
-export function uniqueIdentity(name: string) {
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-  return `${slug}-${Math.random().toString(16).slice(2, 6)}`;
 }

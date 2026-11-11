@@ -6,9 +6,10 @@ cd "$(dirname "$0")/.."
 HOST=${QUIPCALL_HOST:-root@testron.dev}
 STAGE=/opt/quipcall/incoming
 
-# A static Linux binary, linked by Rust's own lld: no Docker, no C toolchain.
-CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
-	cargo build --release -p quipcall-server --target x86_64-unknown-linux-musl
+# SQLite and rustls include C code: Zig supplies the musl cross toolchain.
+command -v zig >/dev/null || { echo 'Install Zig before deploying (brew install zig)' >&2; exit 1; }
+command -v cargo-zigbuild >/dev/null || { echo 'Install cargo-zigbuild before deploying (cargo install cargo-zigbuild --locked)' >&2; exit 1; }
+cargo zigbuild --release -p quipcall-server --target x86_64-unknown-linux-musl
 (cd apps/web && pnpm install --frozen-lockfile --silent && pnpm build)
 
 bundle=$(mktemp -d)
