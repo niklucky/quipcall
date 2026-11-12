@@ -69,8 +69,32 @@ pub struct Home {
     renaming: Option<(String, Entity<TextInput>, Subscription)>,
     /// The selected call's recording, playing under its transcript.
     playback: Option<Playback>,
-    principal_id: Option<String>,
+    account: AccountView,
     _subscription: Subscription,
+}
+
+/// Loading the identity for an existing credential is not an account switch.
+#[derive(Default)]
+struct AccountView {
+    principal: Option<String>,
+    session: Option<String>,
+}
+impl AccountView {
+    fn update(&mut self, session: Option<&str>, principal: Option<&str>) -> bool {
+        let replaced = self.session.as_deref() != session;
+        let changed = self.session.is_some() != session.is_some()
+            || principal.is_some_and(|p| self.principal.as_deref().is_some_and(|old| old != p))
+            || (self.principal.is_none() && replaced);
+        if replaced {
+            self.session = session.map(str::to_owned);
+        }
+        if session.is_none() {
+            self.principal = None;
+        } else if let Some(p) = principal {
+            self.principal = Some(p.to_owned());
+        }
+        changed
+    }
 }
 
 /// A recording in Home's player.
@@ -135,11 +159,16 @@ impl Home {
             tab: Tab::Transcript,
             renaming: None,
             playback: None,
-            principal_id: shell.read(cx).principal.as_ref().map(|p| p.id.clone()),
+            account: AccountView {
+                principal: store.rooms_principal.clone(),
+                session: shell.read(cx).args.session.clone(),
+            },
             _subscription: cx.observe(&shell, |this, shell, cx| {
-                let principal_id = shell.read(cx).principal.as_ref().map(|p| p.id.clone());
-                if this.principal_id != principal_id {
-                    this.principal_id = principal_id;
+                let s = shell.read(cx);
+                if this.account.update(
+                    s.args.session.as_deref(),
+                    s.principal.as_ref().map(|p| p.id.as_str()),
+                ) {
                     this.selected = None;
                     this.renaming = None;
                     this.playback = None;
@@ -160,6 +189,13 @@ impl Home {
     }
 
     pub fn forget_room(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self
+            .renaming
+            .as_ref()
+            .is_some_and(|(room, _, _)| room == id)
+        {
+            self.renaming = None;
+        }
         if self.selected.as_ref().is_some_and(|s| s.room == id) {
             self.selected = None;
             self.playback = None;
@@ -356,7 +392,12 @@ impl Home {
         crate::rooms::open(None, cx);
     }
 
-    fn start_rename(&mut self, room: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn start_rename(
+        &mut self,
+        room: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let name = Shell::global(cx)
             .read(cx)
             .store
@@ -634,7 +675,9 @@ impl Home {
                     .px(px(12.0))
                     .child(
                         button("quick", "Quick call", Some(Icon::Zap), Kind::Primary, true)
-                            .tooltip(tooltip("A one-time room, started right away"))
+                            .tooltip(tooltip(
+                                "Start a 1-to-1 call; the link expires in 24 hours unless kept",
+                            ))
                             .on_click(|_, _, cx| {
                                 Shell::global(cx).update(cx, |s, cx| s.quick_call(cx))
                             }),
@@ -864,7 +907,19 @@ impl Home {
                 let copy = link.clone();
                 let manage = room.id.clone();
                 let join = room.id.clone();
+                let remove = room.id.clone();
                 vec![
+                    icon_button("remove-room", Icon::Trash, 28.0)
+                        .tooltip(tooltip("Remove from your rooms on this Mac"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            Shell::global(cx).update(cx, |s, cx| {
+                                s.store.remove_room(&remove);
+                                s.store.save();
+                                cx.notify();
+                            });
+                            this.forget_room(&remove, cx);
+                        }))
+                        .into_any_element(),
                     icon_button("copy-link", Icon::Link, 28.0)
                         .tooltip(tooltip("Copy the room's link"))
                         .on_click(move |_, _, cx| {
@@ -902,14 +957,10 @@ impl Home {
                         Kind::Secondary,
                         false,
                     )
-                    .tooltip(tooltip("Add it to your rooms, link and all"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if Shell::global(cx).update(cx, |s, cx| s.keep_room(&keep, &keep_name, cx))
-                        {
-                            this.side = Side::Rooms;
-                            this.start_rename(keep.clone(), window, cx);
-                        }
-                    }))
+                    .tooltip(tooltip("Save this link; your Quick call becomes reusable"))
+                    .on_click(move |_, _, cx| {
+                        Shell::global(cx).update(cx, |s, cx| s.keep_room(&keep, &keep_name, cx));
+                    })
                     .into_any_element(),
                     button(
                         "again",
@@ -1391,4 +1442,36 @@ fn nav_button(id: &'static str, glyph: Icon, enabled: bool) -> Stateful<Div> {
                 rgb(RAISED_2)
             },
         ))
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::AccountView;
+    #[test]
+    fn initial_identity_load_preserves_home_but_account_changes_reset_it() {
+        let mut first = AccountView {
+            session: Some("token-a".into()),
+            ..Default::default()
+        };
+        assert!(!first.update(Some("token-a"), None));
+        assert!(!first.update(Some("token-a"), Some("a")));
+        assert!(!first.update(Some("token-a"), Some("a")));
+        assert!(first.update(Some("token-b"), Some("b")));
+        assert!(first.update(None, None));
+        assert!(!first.update(None, None));
+        assert!(first.update(Some("token-a"), Some("a")));
+        let mut cached = AccountView {
+            session: Some("token-a".into()),
+            principal: Some("a".into()),
+        };
+        assert!(!cached.update(Some("token-a"), None));
+        assert!(!cached.update(Some("token-a"), Some("a")));
+        assert!(!cached.update(Some("renewed-token-a"), Some("a")));
+        assert!(cached.update(Some("token-b"), Some("b")));
+        let mut unknown = AccountView {
+            session: Some("unloaded-a".into()),
+            ..Default::default()
+        };
+        assert!(unknown.update(Some("token-b"), Some("b")));
+    }
 }

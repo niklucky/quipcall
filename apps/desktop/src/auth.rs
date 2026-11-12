@@ -165,20 +165,14 @@ impl Shell {
         cx.notify();
         let args = self.args.clone();
         cx.spawn(async move |this, cx| {
-            let server = args.server.clone();
-            let start = cx
-                .background_executor()
-                .spawn(async move {
-                    request(
-                        &server,
-                        None,
-                        "/auth/desktop/start",
-                        Some(json!({})),
-                        "POST",
-                    )
-                    .await
-                })
-                .await;
+            let start = request(
+                &args.server,
+                None,
+                "/auth/desktop/start",
+                Some(json!({})),
+                "POST",
+            )
+            .await;
             let result: anyhow::Result<(String, Principal)> = async {
                 let start = start?;
                 let id = start["id"]
@@ -228,22 +222,14 @@ impl Shell {
                     if !this.update(cx, |s, _| s.auth_attempt.current(generation))? {
                         anyhow::bail!("Sign-in cancelled");
                     }
-                    let server = args.server.clone();
-                    let id = id.clone();
-                    let secret = secret.clone();
-                    let value = cx
-                        .background_executor()
-                        .spawn(async move {
-                            request(
-                                &server,
-                                None,
-                                "/auth/desktop/poll",
-                                Some(json!({"id":id,"secret":secret})),
-                                "POST",
-                            )
-                            .await
-                        })
-                        .await;
+                    let value = request(
+                        &args.server,
+                        args.session.as_deref(),
+                        "/auth/desktop/poll",
+                        Some(json!({"id":id,"secret":secret})),
+                        "POST",
+                    )
+                    .await;
                     let value = match value {
                         Err(e)
                             if e.downcast_ref::<RequestError>()
@@ -268,32 +254,51 @@ impl Shell {
                 anyhow::bail!("Sign-in expired. Try again.")
             }
             .await;
-            let _ = this.update(cx, |s, cx| {
-                if !s.auth_attempt.finish(generation) {
-                    return;
-                }
-                match result {
-                    Ok((token, p)) => {
-                        if let Err(e) = save(&s.args.server, &token) {
-                            s.auth_message = format!("Cannot save session in Keychain: {e}");
-                            cx.notify();
-                            return;
+            let issued = result.as_ref().ok().map(|(token, _)| token.clone());
+            let installed = this
+                .update(cx, |s, cx| {
+                    if !s.auth_attempt.finish(generation) {
+                        return false;
+                    }
+                    match result {
+                        Ok((token, p)) => {
+                            if let Err(e) = save(&s.args.server, &token) {
+                                s.expire_session(args.session.as_deref(), cx);
+                                s.auth_message = format!("Cannot save session in Keychain: {e}");
+                                cx.notify();
+                                return false;
+                            }
+                            s.store.bind_rooms(Some(&p.id));
+                            s.store.save();
+                            s.args.session = Some(token);
+                            s.args.name = p.name.clone();
+                            s.principal = Some(p);
+                            s.auth_message.clear();
+                            s.refresh_account(cx);
+                            if let Some(room) = room {
+                                s.join_link(room, cx);
+                            }
                         }
-                        s.store.bind_rooms(Some(&p.id));
-                        s.store.save();
-                        s.args.session = Some(token);
-                        s.args.name = p.name.clone();
-                        s.principal = Some(p);
-                        s.auth_message.clear();
-                        s.refresh_account(cx);
-                        if let Some(room) = room {
-                            s.join_link(room, cx);
+                        Err(e) => {
+                            s.auth_message = e.to_string();
+                            cx.notify();
+                            return false;
                         }
                     }
-                    Err(e) => s.auth_message = e.to_string(),
-                }
-                cx.notify();
-            });
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !installed && let Some(token) = issued {
+                let _ = request(
+                    &args.server,
+                    Some(&token),
+                    "/auth/logout",
+                    Some(json!({})),
+                    "POST",
+                )
+                .await;
+            }
         })
         .detach();
     }
@@ -304,26 +309,23 @@ impl Shell {
         }
         let expected = args.session.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let p: Principal = serde_json::from_value(
-                        request(
-                            &args.server,
-                            args.session.as_deref(),
-                            "/auth/me",
-                            None,
-                            "GET",
-                        )
-                        .await?,
-                    )?;
-                    let rooms: Vec<SavedRoom> = serde_json::from_value(
-                        request(&args.server, args.session.as_deref(), "/rooms", None, "GET")
-                            .await?,
-                    )?;
-                    Ok::<_, anyhow::Error>((p, rooms))
-                })
-                .await;
+            let result = async {
+                let p: Principal = serde_json::from_value(
+                    request(
+                        &args.server,
+                        args.session.as_deref(),
+                        "/auth/me",
+                        None,
+                        "GET",
+                    )
+                    .await?,
+                )?;
+                let rooms: Vec<SavedRoom> = serde_json::from_value(
+                    request(&args.server, args.session.as_deref(), "/rooms", None, "GET").await?,
+                )?;
+                Ok::<_, anyhow::Error>((p, rooms))
+            }
+            .await;
             let _ = this.update(cx, |s, cx| {
                 if s.args.session != expected {
                     return;
@@ -370,18 +372,17 @@ impl Shell {
         self.store.save();
         self.auth_message = "Signed out".into();
         cx.notify();
-        cx.background_executor()
-            .spawn(async move {
-                let _ = request(
-                    &args.server,
-                    args.session.as_deref(),
-                    "/auth/logout",
-                    Some(json!({})),
-                    "POST",
-                )
-                .await;
-            })
-            .detach();
+        cx.spawn(async move |_, _| {
+            let _ = request(
+                &args.server,
+                args.session.as_deref(),
+                "/auth/logout",
+                Some(json!({})),
+                "POST",
+            )
+            .await;
+        })
+        .detach();
     }
     pub fn create_room(&mut self, kind: &str, join: bool, cx: &mut Context<Self>) {
         if self.auth_busy() {
@@ -401,20 +402,18 @@ impl Shell {
             self.store.next_room_name()
         };
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let r = request(
-                        &args.server,
-                        args.session.as_deref(),
-                        "/rooms",
-                        Some(json!({"name":name,"kind":kind})),
-                        "POST",
-                    )
-                    .await?;
-                    serde_json::from_value::<SavedRoom>(r).map_err(anyhow::Error::from)
-                })
-                .await;
+            let result = async {
+                let r = request(
+                    &args.server,
+                    args.session.as_deref(),
+                    "/rooms",
+                    Some(json!({"name":name,"kind":kind})),
+                    "POST",
+                )
+                .await?;
+                serde_json::from_value::<SavedRoom>(r).map_err(anyhow::Error::from)
+            }
+            .await;
             let _ = this.update(cx, |s, cx| {
                 if !s.room_creation.finish(operation) || s.args.session != expected {
                     return;
@@ -452,19 +451,14 @@ impl Shell {
         let name = name.to_owned();
         let expected = args.session.clone();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    request(
-                        &args.server,
-                        args.session.as_deref(),
-                        "/auth/me",
-                        Some(json!({"name":name})),
-                        "PATCH",
-                    )
-                    .await
-                })
-                .await;
+            let result = request(
+                &args.server,
+                args.session.as_deref(),
+                "/auth/me",
+                Some(json!({"name":name})),
+                "PATCH",
+            )
+            .await;
             let _ = this.update(cx, |s, cx| {
                 if s.args.session != expected {
                     return;
@@ -491,21 +485,14 @@ impl Shell {
         let id = id.to_owned();
         let name = name.to_owned();
         cx.spawn(async move |this, cx| {
-            let room = id.clone();
-            let title = name.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    request(
-                        &args.server,
-                        args.session.as_deref(),
-                        &format!("/rooms/{room}"),
-                        Some(json!({"name":title})),
-                        "PATCH",
-                    )
-                    .await
-                })
-                .await;
+            let result = request(
+                &args.server,
+                args.session.as_deref(),
+                &format!("/rooms/{id}"),
+                Some(json!({"name":name})),
+                "PATCH",
+            )
+            .await;
             let _ = this.update(cx, |s, cx| {
                 if s.args.session != expected {
                     return;

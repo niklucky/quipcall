@@ -21,10 +21,12 @@ pub struct Room {
     pub owner: String,
     pub guest: Option<String>,
     pub closed: bool,
+    pub expires: Option<i64>,
 }
 async fn room(db: &mut SqliteConnection, id: &str) -> Result<Room> {
-    sqlx::query_as("SELECT * FROM rooms WHERE id=? AND closed=0")
+    sqlx::query_as("SELECT * FROM rooms WHERE id=? AND closed=0 AND (expires IS NULL OR expires>?)")
         .bind(id)
+        .bind(now())
         .fetch_optional(db)
         .await?
         .ok_or_else(AppError::missing)
@@ -58,7 +60,7 @@ async fn owned(s: &AppState, h: &HeaderMap, id: &str) -> Result<Room> {
 }
 pub async fn list(State(s): State<AppState>, h: HeaderMap) -> Result<Json<Vec<Room>>> {
     let p = auth::current(&s, &h).await?;
-    Ok(Json(sqlx::query_as("SELECT r.* FROM rooms r WHERE r.closed=0 AND (r.owner=? OR EXISTS(SELECT 1 FROM memberships m WHERE m.room=r.id AND m.principal=? AND m.revoked=0)) ORDER BY r.rowid DESC").bind(&p.id).bind(&p.id).fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT r.* FROM rooms r WHERE r.closed=0 AND r.expires IS NULL AND (r.owner=? OR EXISTS(SELECT 1 FROM memberships m WHERE m.room=r.id AND m.principal=? AND m.revoked=0)) ORDER BY r.rowid DESC").bind(&p.id).bind(&p.id).fetch_all(&s.db).await?))
 }
 #[derive(Deserialize)]
 pub struct Create {
@@ -77,15 +79,32 @@ pub async fn create(
         return Err(AppError::bad("Choose a room name and type"));
     }
     let id = random();
-    sqlx::query("INSERT INTO rooms(id,name,kind,owner) VALUES (?,?,?,?)")
+    sqlx::query("INSERT INTO rooms(id,name,kind,owner,expires) VALUES (?,?,?,?,?)")
         .bind(&id)
         .bind(name)
-        .bind(req.kind)
+        .bind(&req.kind)
         .bind(p.id)
+        .bind((req.kind == "direct").then(|| now() + 86400))
         .execute(&s.db)
         .await?;
     Ok(Json(room(&mut *s.db.acquire().await?, &id).await?))
 }
+pub async fn keep(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Room>> {
+    owned(&s, &h, &id).await?;
+    sqlx::query(
+        "UPDATE rooms SET expires=NULL WHERE id=? AND closed=0 AND (expires IS NULL OR expires>?)",
+    )
+    .bind(&id)
+    .bind(now())
+    .execute(&s.db)
+    .await?;
+    Ok(Json(room(&mut *s.db.acquire().await?, &id).await?))
+}
+
 pub async fn detail(
     State(s): State<AppState>,
     h: HeaderMap,
@@ -191,7 +210,7 @@ pub async fn redeem(
     Json(req): Json<auth::Token>,
 ) -> Result<Json<Room>> {
     let p = auth::current(&s, &h).await?;
-    let mut tx = s.db.begin().await?;
+    let mut tx = s.db.begin_with("BEGIN IMMEDIATE").await?;
     let (id, kind, email, used): (String, String, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT room,kind,email,used_by FROM room_invites WHERE hash=? AND (used_by IS NOT NULL OR expires>?)",
     )
@@ -201,11 +220,12 @@ pub async fn redeem(
     .await?
     .ok_or_else(|| AppError::bad("Invitation invalid or expired"))?;
     let r = room(&mut tx, &id).await?;
+    // Owners and existing members already have access. Inspecting their own
+    // link must not consume the guest's claim or add an owner membership.
+    if allowed(&mut tx, &r, &p.id).await? {
+        return Ok(Json(r));
+    }
     if used.is_some() {
-        // Retrying a response lost in transit is safe; removal never restores access.
-        if used.as_deref() == Some(&p.id) && allowed(&mut tx, &r, &p.id).await? {
-            return Ok(Json(r));
-        }
         return Err(AppError::forbidden("This invitation has already been used"));
     }
     if kind == "member" && (p.kind != "user" || p.email != email) {
@@ -213,11 +233,20 @@ pub async fn redeem(
             "Sign in with the invited email to accept membership",
         ));
     }
-    sqlx::query("UPDATE room_invites SET used_by=? WHERE hash=? AND used_by IS NULL")
-        .bind(&p.id)
-        .bind(hash(&req.token))
-        .execute(&mut *tx)
-        .await?;
+    let claimed = sqlx::query(
+        "UPDATE room_invites SET used_by=? WHERE hash=? AND used_by IS NULL AND expires>?",
+    )
+    .bind(&p.id)
+    .bind(hash(&req.token))
+    .bind(now())
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if claimed != 1 {
+        return Err(AppError::forbidden(
+            "This invitation has already been used or expired",
+        ));
+    }
     sqlx::query("INSERT INTO memberships VALUES (?,?,0) ON CONFLICT(room,principal) DO UPDATE SET revoked=0").bind(&id).bind(&p.id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(r))
@@ -272,9 +301,6 @@ pub async fn entry(
             if used.is_none() && expires <= now() {
                 return Ok(Json(json!({"state":"expired"})));
             }
-            if used.is_some() && used.as_deref() != p.as_ref().map(|p| p.id.as_str()) {
-                return Ok(Json(json!({"state":"used"})));
-            }
             invitation = Some((kind, email, used));
             id
         }
@@ -298,11 +324,24 @@ pub async fn entry(
     } else {
         false
     };
-    let state = if let Some((kind, email, used)) = &invitation {
+    let already_allowed = if let Some(p) = &p {
+        allowed(&mut db, &r, &p.id).await?
+    } else {
+        false
+    };
+    let state = if already_allowed {
+        "ready"
+    } else if let Some((kind, email, used)) = &invitation {
         // A fresh invitation intentionally allows the owner to re-invite a
         // removed guest. An already consumed link cannot restore access.
         if used.is_some() {
-            if revoked { "removed" } else { "ready" }
+            if used.as_deref() != p.as_ref().map(|p| p.id.as_str()) {
+                "used"
+            } else if revoked {
+                "removed"
+            } else {
+                "private"
+            }
         } else if kind == "member"
             && p.as_ref()
                 .is_none_or(|p| p.kind != "user" || p.email != *email)
@@ -313,10 +352,6 @@ pub async fn entry(
         }
     } else if revoked {
         "removed"
-    } else if let Some(p) = &p
-        && allowed(&mut db, &r, &p.id).await?
-    {
-        "ready"
     } else {
         match r.kind.as_str() {
             "public" => "ready",
@@ -328,9 +363,9 @@ pub async fn entry(
     let mut value = json!({"state":state});
     if matches!(state, "ready" | "invite" | "signin") {
         value["room"] = json!({"id":r.id,"name":r.name,"kind":r.kind});
-    }
-    if let Some((kind, _, _)) = invitation {
-        value["inviteKind"] = json!(kind);
+        if let Some((kind, _, _)) = invitation {
+            value["inviteKind"] = json!(kind);
+        }
     }
     Ok(Json(value))
 }
@@ -345,7 +380,7 @@ pub async fn join(
     Json(req): Json<Join>,
 ) -> Result<Json<quipcall_protocol::JoinInfo>> {
     let p = auth::current(&s, &h).await?;
-    let mut tx = s.db.begin().await?;
+    let mut tx = s.db.begin_with("BEGIN IMMEDIATE").await?;
     let mut r = room(&mut tx, &req.room).await?;
     if r.kind == "direct" && r.owner != p.id && r.guest.is_none() {
         let blocked: bool = sqlx::query_scalar(
@@ -358,11 +393,14 @@ pub async fn join(
         if blocked {
             return Err(AppError::forbidden("Your access was removed"));
         }
-        sqlx::query("UPDATE rooms SET guest=? WHERE id=? AND guest IS NULL")
+        let claimed = sqlx::query("UPDATE rooms SET guest=? WHERE id=? AND guest IS NULL AND closed=0 AND (expires IS NULL OR expires>?)")
             .bind(&p.id)
-            .bind(&r.id)
+            .bind(&r.id).bind(now())
             .execute(&mut *tx)
-            .await?;
+            .await?.rows_affected();
+        if claimed != 1 {
+            return Err(AppError::forbidden("This call is full or unavailable"));
+        }
         r.guest = Some(p.id.clone());
     }
     if !allowed(&mut tx, &r, &p.id).await? {
@@ -467,6 +505,23 @@ pub async fn cleanup_invites(db: &sqlx::SqlitePool) -> Result<()> {
         .await?;
     Ok(())
 }
+pub async fn cleanup_quick_calls(s: &AppState) -> Result<()> {
+    let expired: Vec<Room> =
+        sqlx::query_as("SELECT * FROM rooms WHERE closed=0 AND expires<=? LIMIT 100")
+            .bind(now())
+            .fetch_all(&s.db)
+            .await?;
+    for room in expired {
+        livekit(s, "DeleteRoom", &room, None).await?;
+        sqlx::query("UPDATE rooms SET closed=1 WHERE id=? AND expires<=?")
+            .bind(&room.id)
+            .bind(now())
+            .execute(&s.db)
+            .await?;
+    }
+    Ok(())
+}
+
 async fn livekit(s: &AppState, method: &str, r: &Room, identity: Option<&str>) -> Result<Value> {
     let token = AccessToken::with_api_key(&s.config.livekit_api_key, &s.config.livekit_api_secret)
         .with_ttl(Duration::from_secs(60))

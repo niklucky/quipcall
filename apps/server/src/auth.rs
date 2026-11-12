@@ -260,16 +260,31 @@ pub async fn request_link(
 /// One bounded worker drains the durable queue; never hold an HTTP request open
 /// for delivery or expose a provider failure to an account-enumeration probe.
 pub async fn deliver_pending(s: &AppState) -> Result<usize> {
-    let requests: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT id,email,requester,invite FROM mail_requests WHERE created>? ORDER BY id LIMIT 100",
+    let requests: Vec<(i64, String, String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT id,email,requester,invite,attempts FROM mail_requests WHERE created>? AND available<=? ORDER BY id LIMIT 100",
     )
     .bind(now() - 900)
+    .bind(now())
     .fetch_all(&s.db)
     .await?;
     let count = requests.len();
-    for (id, email, requester, invite) in requests {
-        if let Err(e) = deliver_link(s, &email, &requester, invite).await {
-            tracing::error!("email delivery failed: {}", e.message);
+    for (id, email, requester, invite, attempts) in requests {
+        if let Err(e) = deliver_link(s, &email, &requester, invite, attempts).await {
+            tracing::warn!(
+                request = id,
+                attempt = attempts + 1,
+                "email delivery failed: {}",
+                e.message
+            );
+            if attempts < 4 {
+                sqlx::query("UPDATE mail_requests SET attempts=attempts+1,available=? WHERE id=?")
+                    .bind(now() + 30 * (1 << attempts))
+                    .bind(id)
+                    .execute(&s.db)
+                    .await?;
+                continue;
+            }
+            tracing::error!(request = id, "email retries exhausted");
         }
         sqlx::query("DELETE FROM mail_requests WHERE id=?")
             .bind(id)
@@ -282,14 +297,29 @@ pub async fn deliver_pending(s: &AppState) -> Result<usize> {
 /// arrives during delivery, so the transition to sleep cannot lose a wakeup.
 pub async fn mail_worker(s: AppState) {
     loop {
-        match deliver_pending(&s).await {
+        let failed = match deliver_pending(&s).await {
             Ok(100) => continue,
-            Ok(_) => {}
-            Err(e) => tracing::warn!("mail queue: {}", e.message),
-        }
+            Ok(_) => false,
+            Err(e) => {
+                tracing::warn!("mail queue: {}", e.message);
+                true
+            }
+        };
+        // A pending retry supplies the next wakeup; an empty queue stays idle.
+        let next: Option<i64> =
+            sqlx::query_scalar("SELECT MIN(available) FROM mail_requests WHERE created>?")
+                .bind(now() - 900)
+                .fetch_one(&s.db)
+                .await
+                .unwrap_or(None);
+        let delay = if failed {
+            300
+        } else {
+            next.map_or(300, |at| (at - now()).clamp(0, 300)) as u64
+        };
         tokio::select! {
             _ = s.mail_ready.notified() => {},
-            _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {},
+            _ = tokio::time::sleep(std::time::Duration::from_secs(delay)) => {},
         }
     }
 }
@@ -298,6 +328,7 @@ async fn deliver_link(
     email: &str,
     requester: &str,
     invite: Option<String>,
+    attempts: i64,
 ) -> Result<()> {
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM identities WHERE provider='email' AND subject=?)",
@@ -316,15 +347,27 @@ async fn deliver_link(
     if !exists && !allowed && s.config.bootstrap_email.as_deref() != Some(email) {
         return Ok(());
     }
-    // Suppress excess mail silently. Previously delivered links stay usable,
-    // and successful verification resets this budget for the next sign-in.
+    // One requester cannot use up the whole recipient allowance. The second
+    // budget caps delivery attempts across rotating IPs, including retries.
+    let mut tx = s.db.begin_with("BEGIN IMMEDIATE").await?;
     let budget = format!("email:{requester}:{}", hash(email));
-    if let Err(e) = rate(s, &budget, 3, 900).await {
+    if attempts == 0
+        && let Err(e) = rate_connection(&mut tx, &budget, 3, 900).await
+    {
         if e.status == StatusCode::TOO_MANY_REQUESTS {
             return Ok(());
         }
         return Err(e);
     }
+    if let Err(e) =
+        rate_connection(&mut tx, &format!("email-recipient:{}", hash(email)), 6, 900).await
+    {
+        if attempts == 0 && e.status == StatusCode::TOO_MANY_REQUESTS {
+            return Ok(());
+        }
+        return Err(e);
+    }
+    tx.commit().await?;
     let token = random();
     sqlx::query("INSERT INTO magic_links VALUES (?, ?, ?, ?)")
         .bind(hash(&token))
@@ -335,15 +378,9 @@ async fn deliver_link(
         .await?;
     let url = format!("{}/#magic={token}", s.config.public_url);
     if let Err(e) = send(s, email, &url).await {
-        sqlx::query("DELETE FROM magic_links WHERE hash=?")
-            .bind(hash(&token))
-            .execute(&s.db)
-            .await?;
-        // A delivery failure must not consume the recipient's mail allowance.
-        sqlx::query("DELETE FROM rate_limits WHERE key=?")
-            .bind(budget)
-            .execute(&s.db)
-            .await?;
+        // A timeout can happen after provider acceptance. Keep this token
+        // valid, and count the attempt, so a late email works and ambiguous
+        // failures cannot bypass the recipient cap. Retries mint a fresh link.
         tracing::error!("email delivery failed: {e}");
         return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -490,6 +527,7 @@ pub struct DesktopPoll {
 }
 pub async fn desktop_poll(
     State(s): State<AppState>,
+    h: HeaderMap,
     Json(req): Json<DesktopPoll>,
 ) -> Result<Json<Value>> {
     let mut tx = s.db.begin().await?;
@@ -518,6 +556,12 @@ pub async fn desktop_poll(
         .fetch_one(&mut *tx)
         .await?;
     let token = session(&mut tx, &p).await?;
+    if let Some(previous) = credential(&h) {
+        sqlx::query("DELETE FROM sessions WHERE hash=?")
+            .bind(hash(previous))
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     Ok(Json(json!({"token":token,"principal":p})))
 }

@@ -44,6 +44,8 @@ pub struct SavedRoom {
     pub kind: RoomKind,
     #[serde(default)]
     pub owner: String,
+    #[serde(default)]
+    pub expires: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -186,6 +188,9 @@ pub struct Store {
     /// the server cache. Keeping a link never grants access or renames it remotely.
     #[serde(default)]
     pub bookmarks: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    /// Hidden locally without revoking access or closing the room for others.
+    #[serde(default)]
+    pub hidden_rooms: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     /// Newest first.
     pub history: Vec<HistoryItem>,
     #[serde(default)]
@@ -271,7 +276,16 @@ impl Store {
         }
     }
     pub fn cache_room(&mut self, mut room: SavedRoom) {
-        if room.kind == RoomKind::Direct && !self.is_bookmarked(&room.id) {
+        if self
+            .rooms_principal
+            .as_ref()
+            .and_then(|p| self.hidden_rooms.get(p))
+            .is_some_and(|hidden| hidden.contains(&room.id))
+        {
+            return;
+        }
+        if room.kind == RoomKind::Direct && room.expires.is_some() && !self.is_bookmarked(&room.id)
+        {
             return;
         }
         if let Some(name) = self.alias(&room.id) {
@@ -303,6 +317,12 @@ impl Store {
     }
 
     pub fn remove_room(&mut self, id: &str) {
+        if let Some(p) = &self.rooms_principal {
+            self.hidden_rooms
+                .entry(p.clone())
+                .or_default()
+                .insert(id.to_owned());
+        }
         self.rooms.retain(|r| r.id != id);
         if let Some(bookmarks) = self
             .rooms_principal
@@ -328,6 +348,9 @@ impl Store {
         let Some(principal) = &self.rooms_principal else {
             return false;
         };
+        if let Some(hidden) = self.hidden_rooms.get_mut(principal) {
+            hidden.remove(id);
+        }
         self.bookmarks
             .entry(principal.clone())
             .or_default()
@@ -562,6 +585,36 @@ mod tests {
     }
 
     #[test]
+    fn removing_saved_links_survives_refresh_and_does_not_affect_other_accounts() {
+        let mut store = Store::default();
+        store.bind_rooms(Some("me"));
+        let room = SavedRoom {
+            id: "friend".into(),
+            owner: "someone-else".into(),
+            ..Default::default()
+        };
+        store.keep_room(&room.id, "Friend");
+        store.remove_room(&room.id);
+        let mut store: Store =
+            serde_json::from_slice(&serde_json::to_vec(&store).unwrap()).unwrap();
+        store.refresh_rooms(vec![room.clone()]);
+        assert!(store.rooms.is_empty());
+        assert!(!store.is_bookmarked(&room.id));
+        store.bind_rooms(Some("other"));
+        store.refresh_rooms(vec![room.clone()]);
+        assert_eq!(store.rooms.len(), 1);
+        store.bind_rooms(Some("me"));
+        store.refresh_rooms(vec![room.clone()]);
+        assert!(store.rooms.is_empty());
+        assert!(store.keep_room(&room.id, "Saved again"));
+        store.refresh_rooms(vec![room]);
+        assert_eq!(store.rooms[0].name, "Saved again");
+        store.remove_room("friend");
+        store.refresh_rooms(vec![]);
+        assert!(store.rooms.is_empty());
+    }
+
+    #[test]
     fn quick_calls_are_not_saved_until_kept_even_after_refresh() {
         let mut store = Store::default();
         store.bind_rooms(Some("owner"));
@@ -569,6 +622,7 @@ mod tests {
             id: "quick".into(),
             name: "Quick call".into(),
             kind: super::RoomKind::Direct,
+            expires: Some(i64::MAX),
             owner: "owner".into(),
         };
         store.cache_room(direct.clone());

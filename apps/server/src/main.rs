@@ -34,7 +34,8 @@ impl AppState {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
         }
-        // One writer makes invite redemption and the direct-call slot atomic.
+        // Keep the alpha pool small; claims use explicit write transactions and
+        // checked conditional updates independently of the pool size.
         let db = SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(
@@ -72,6 +73,7 @@ fn router(state: AppState) -> Router {
             get(rooms::detail).patch(rooms::rename).delete(rooms::close),
         )
         .route("/api/rooms/{id}/invites", post(rooms::invite))
+        .route("/api/rooms/{id}/keep", post(rooms::keep))
         .route(
             "/api/rooms/{id}/invites/{hash}",
             delete(rooms::revoke_invite),
@@ -130,8 +132,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let state = AppState::new(Config::from_env()?).await?;
     tokio::spawn(auth::mail_worker(state.clone()));
-    let cleanup = state.db.clone();
+    let cleanup_state = state.clone();
     tokio::spawn(async move {
+        let cleanup = &cleanup_state.db;
         loop {
             // Expired challenges and session credentials have no reason to remain.
             for table in [
@@ -142,20 +145,23 @@ async fn main() -> anyhow::Result<()> {
             ] {
                 if let Err(e) = sqlx::query(&format!("DELETE FROM {table} WHERE expires < ?"))
                     .bind(auth::now())
-                    .execute(&cleanup)
+                    .execute(cleanup)
                     .await
                 {
                     tracing::warn!("auth cleanup: {e}");
                 }
             }
-            let _ = rooms::cleanup_invites(&cleanup).await;
+            let _ = rooms::cleanup_invites(cleanup).await;
+            if let Err(e) = rooms::cleanup_quick_calls(&cleanup_state).await {
+                tracing::warn!("quick call cleanup: {}", e.message);
+            }
             let _ = sqlx::query("DELETE FROM mail_requests WHERE created < ?")
                 .bind(auth::now() - 900)
-                .execute(&cleanup)
+                .execute(cleanup)
                 .await;
             let _ = sqlx::query("DELETE FROM rate_limits WHERE expires < ?")
                 .bind(auth::now())
-                .execute(&cleanup)
+                .execute(cleanup)
                 .await;
             tokio::time::sleep(Duration::from_secs(600)).await;
         }

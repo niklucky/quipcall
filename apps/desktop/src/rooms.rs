@@ -48,6 +48,7 @@ enum Confirm {
 enum Action {
     Load,
     Create,
+    Keep,
     Rename,
     InviteGuest,
     InviteMember,
@@ -235,12 +236,7 @@ impl RoomAccess {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let performed = action.clone();
-            let result =
-                cx.background_executor()
-                    .spawn(async move {
-                        execute(&args, id.as_deref(), kind, &name, &email, &action).await
-                    })
-                    .await;
+            let result = execute(&args, id.as_deref(), kind, &name, &email, &action).await;
             let _ = this.update(cx, |v, cx| {
                 if v.invalid_session || Shell::global(cx).read(cx).args.session != v.args.session {
                     return;
@@ -309,6 +305,7 @@ impl RoomAccess {
                                 match performed {
                                     Action::Load => "Room access refreshed.",
                                     Action::Create => "Room created.",
+                                    Action::Keep => "Room kept. Its link no longer expires.",
                                     Action::Rename => "Room name saved.",
                                     Action::InviteGuest | Action::InviteMember => {
                                         "Invitation ready. Copy the link and share it."
@@ -439,6 +436,7 @@ async fn execute(
     let mutation = match action {
         Action::Load => Ok(json!({})),
         Action::Create => unreachable!("handled above"),
+        Action::Keep => request(&format!("{path}/keep"), Some(json!({})), "POST").await,
         Action::Rename => request(&path, Some(json!({"name":name})), "PATCH").await,
         Action::InviteGuest | Action::InviteMember => {
             let kind = if matches!(action, Action::InviteGuest) {
@@ -650,6 +648,27 @@ impl Render for RoomAccess {
                         .on_click(cx.listener(move |v, _, _, cx| v.copy(url.clone(), cx))),
                     ),
             );
+            if let Some(expires) = d.room.expires {
+                let at = expires.max(0) as u64;
+                body = body.child(note(format!(
+                    "This call expires {} at {}.",
+                    crate::store::day(at),
+                    crate::store::clock(at)
+                )));
+                if owner {
+                    body = body.child(
+                        button(
+                            "keep-room",
+                            "Keep as room",
+                            Some(Icon::Plus),
+                            Kind::Secondary,
+                            true,
+                        )
+                        .when(!ready, |v| v.opacity(0.45))
+                        .on_click(cx.listener(|v, _, _, cx| v.run(Action::Keep, cx))),
+                    );
+                }
+            }
             if d.room.kind == RoomKind::Private {
                 body = body.child(note(
                     "The room address is for people who already have access.",

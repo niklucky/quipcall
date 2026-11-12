@@ -214,16 +214,67 @@ impl Shell {
         }
     }
 
-    /// Keep a quick call's room in the rooms list.
-    pub fn keep_room(&mut self, id: &str, name: &str, cx: &mut Context<Self>) -> bool {
-        if !self.store.keep_room(id, name) {
+    /// Save a link locally, first making an owned Quick call reusable.
+    pub fn keep_room(&mut self, id: &str, name: &str, cx: &mut Context<Self>) {
+        let Some(principal) = self.store.rooms_principal.clone() else {
             self.auth_message = "Sign in before saving a room.".into();
             cx.notify();
-            return false;
-        }
-        self.store.save();
-        cx.notify();
-        true
+            return;
+        };
+        let args = self.args.clone();
+        let id = id.to_owned();
+        let name = name.to_owned();
+        cx.spawn(async move |this, cx| {
+            let result: anyhow::Result<()> = async {
+                let detail = auth::request(
+                    &args.server,
+                    args.session.as_deref(),
+                    &format!("/rooms/{id}"),
+                    None,
+                    "GET",
+                )
+                .await?;
+                if detail["room"]["owner"].as_str() == Some(&principal)
+                    && !detail["room"]["expires"].is_null()
+                {
+                    auth::request(
+                        &args.server,
+                        args.session.as_deref(),
+                        &format!("/rooms/{id}/keep"),
+                        Some(serde_json::json!({})),
+                        "POST",
+                    )
+                    .await?;
+                }
+                Ok(())
+            }
+            .await;
+            let _ = this.update(cx, |s, cx| {
+                if s.args.session != args.session {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        s.store.keep_room(&id, &name);
+                        s.store.save();
+                        s.auth_message.clear();
+                        cx.defer(move |cx| {
+                            for h in cx.windows() {
+                                if let Some(home) = h.downcast::<Home>() {
+                                    let _ = home.update(cx, |home, window, cx| {
+                                        home.select_room(id.clone(), cx);
+                                        home.start_rename(id.clone(), window, cx);
+                                    });
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => s.auth_message = format!("Could not save room: {e}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Call a room from history again (same room, same link).

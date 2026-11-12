@@ -23,6 +23,7 @@ mod record_mac;
 mod screen;
 #[cfg(target_os = "macos")]
 mod screen_mac;
+mod tasks;
 mod transcribe;
 pub mod trial;
 pub mod video;
@@ -213,6 +214,7 @@ pub struct Handover {
 }
 
 pub struct Engine {
+    tasks: tasks::Tasks,
     state: Arc<Mutex<State>>,
     events: async_channel::Sender<Event>,
 }
@@ -330,6 +332,7 @@ impl Engine {
         let (events, rx) = async_channel::unbounded();
         Ok((
             Self {
+                tasks: Default::default(),
                 state: Default::default(),
                 events,
             },
@@ -382,7 +385,7 @@ impl Engine {
         };
         let state = self.state.clone();
         let events = self.events.clone();
-        self.rt().spawn(async move {
+        self.tasks.spawn(async move {
             if let Err(e) = connect(state, events.clone(), join, connection).await {
                 let _ = events
                     .send(Event::Error(format!("connect failed: {e:#}")))
@@ -412,7 +415,7 @@ impl Engine {
         drop(screen);
         stop_taking_in(transcribing.as_ref(), recorder.as_ref());
         let events = self.events.clone();
-        let closing = self.rt().spawn(async move {
+        let closing = self.tasks.spawn(async move {
             // Leaving finishes your recording, keeping everything up to now,
             // while what was being said is still transcribed: the call's
             // history waits for it.
@@ -471,7 +474,7 @@ impl Engine {
         }
         let state = self.state.clone();
         let events = self.events.clone();
-        self.rt().spawn(async move {
+        self.tasks.spawn(async move {
             let result = async {
                 if !camera::synthetic() {
                     if permissions::status(MediaDevice::Camera) == Access::Undecided {
@@ -518,7 +521,7 @@ impl Engine {
             (s.room.clone(), s.camera.take())
         };
         let events = self.events.clone();
-        self.rt().spawn(async move {
+        self.tasks.spawn(async move {
             if let Some(camera) = camera {
                 match room {
                     Some(room) => camera.stop(&room).await,
@@ -542,12 +545,14 @@ impl Engine {
     ) -> async_channel::Receiver<anyhow::Result<ShareSourceUpdate>> {
         let (tx, rx) = async_channel::bounded(8);
         let runtime = self.rt().handle().clone();
+        let tasks = self.tasks.clone();
         self.rt().spawn_blocking(move || {
             crate::autorelease_pool(|| {
                 runtime.block_on(async {
                     tokio::select! {
                         biased;
                         _ = tx.closed() => {},
+                        _ = tasks.cancelled() => {},
                         result = screen_mac::list_sources(thumb_width, &tx) => {
                             if let Err(error) = result {
                                 let _ = tx.send(Err(error)).await;
@@ -570,8 +575,8 @@ impl Engine {
     ) {
         let state = self.state.clone();
         let events = self.events.clone();
-        let handle = self.rt().handle().clone();
-        self.rt().spawn(async move {
+        let handle = self.tasks.clone();
+        self.tasks.spawn(async move {
             let result = async {
                 let room = state.lock().room.clone().context("not in a call")?;
                 let previous = state.lock().screen.take();
@@ -609,7 +614,7 @@ impl Engine {
     }
 
     pub fn stop_screen_share(&self) {
-        self.rt()
+        self.tasks
             .spawn(stop_screen_share(self.state.clone(), self.events.clone()));
     }
 
@@ -631,12 +636,12 @@ impl Engine {
         track: &RemoteVideoTrack,
         sink: Arc<dyn FrameSink>,
     ) -> VideoSubscription {
-        video::attach(self.rt().handle(), track, sink)
+        video::attach(&self.tasks, track, sink)
     }
 
     /// Everyone's voice, 10 ms at a time, until the listener is dropped.
     pub fn listen(&self) -> Listener {
-        listen(&self.state, self.rt().handle())
+        listen(&self.state, &self.tasks)
     }
 
     /// Record the call into `path`: everyone's voice, mixed (.m4a), and with
@@ -653,9 +658,9 @@ impl Engine {
     ) {
         let state = self.state.clone();
         let events = self.events.clone();
-        let handle = self.rt().handle().clone();
+        let handle = self.tasks.clone();
         let with_screen = screen.is_some();
-        self.rt().spawn(async move {
+        self.tasks.spawn(async move {
             let event =
                 match start_recording(&state, &handle, &events, path, screen, each_voice).await {
                     Ok(path) => Event::RecordingStarted {
@@ -676,7 +681,7 @@ impl Engine {
         };
         let Some(recorder) = recorder else { return };
         let events = self.events.clone();
-        self.rt().spawn(async move {
+        self.tasks.spawn(async move {
             let saved = tokio::task::spawn_blocking(move || recorder.stop()).await;
             if let Some(room) = room
                 && let Err(e) = set_attribute(&room, RECORDING, "").await
@@ -716,8 +721,8 @@ impl Engine {
         };
         let state = self.state.clone();
         let events = self.events.clone();
-        let handle = self.rt().handle().clone();
-        self.rt().spawn(async move {
+        let handle = self.tasks.clone();
+        self.tasks.spawn(async move {
             let started =
                 start_transcribing(&state, &handle, &events, options, room, connection, id).await;
             let current = {
@@ -754,7 +759,7 @@ impl Engine {
     pub fn stop_transcribing(&self) {
         let state = self.state.clone();
         let events = self.events.clone();
-        self.rt()
+        self.tasks
             .spawn(async move { stop_transcribing(&state, &events, None).await });
     }
 
@@ -795,7 +800,7 @@ impl Engine {
             s.room.clone()
         };
         if let Some(room) = room {
-            self.rt().spawn(async move {
+            self.tasks.spawn(async move {
                 let value = value.as_deref().unwrap_or("");
                 if let Err(e) = set_attribute(&room, CAN_TRANSCRIBE, value).await {
                     tracing::warn!("can-transcribe attribute: {e}");
@@ -809,7 +814,7 @@ impl Engine {
             return;
         };
         let to = identity.to_owned();
-        self.rt().spawn(async move {
+        self.tasks.spawn(async move {
             if let Err(e) = send_transcript(&room, &message, Some(to)).await {
                 tracing::warn!("transcript message {message:?}: {e}");
             }
@@ -857,7 +862,7 @@ async fn stop_transcribing_for(
     };
     // Sending can wait on the connection: it holds nothing up.
     if let Some(room) = room.clone().filter(|_| !pass_on.is_empty()) {
-        tokio::spawn(async move {
+        tasks::spawn(async move {
             for to in pass_on {
                 tracing::info!(%to, "the transcript stopped: so does its handover");
                 if let Err(e) = send_transcript(&room, &TranscriptMessage::Stop, Some(to)).await {
@@ -1009,7 +1014,7 @@ async fn on_transcript(
             tracing::info!(%by, "asked to stop the transcript");
             // The last words take a moment; room events go on meanwhile.
             let (state, events) = (state.clone(), events.clone());
-            tokio::spawn(async move { stop_transcribing(&state, &events, Some(by)).await });
+            tasks::spawn(async move { stop_transcribing(&state, &events, Some(by)).await });
         }
         Ok(TranscriptMessage::Ask { handover, claim }) => {
             // Older apps don't say which claim they hand over: the one they
@@ -1040,7 +1045,7 @@ async fn on_transcript(
 /// Start `id` ([`reserve_start`]) in `room`, the call `connection`.
 async fn start_transcribing(
     state: &Arc<Mutex<State>>,
-    handle: &tokio::runtime::Handle,
+    handle: &tasks::Tasks,
     events: &async_channel::Sender<Event>,
     options: TranscribeOptions,
     room: Arc<Room>,
@@ -1213,7 +1218,7 @@ fn install_transcribing(
     state: &Arc<Mutex<State>>,
     connection: u64,
     id: u64,
-    handle: &tokio::runtime::Handle,
+    handle: &tasks::Tasks,
     make: impl FnOnce(Listener) -> transcribe::Transcribing,
 ) -> anyhow::Result<()> {
     let weak = Arc::downgrade(state);
@@ -1246,7 +1251,7 @@ fn may_start(
 }
 
 /// A listener to this call; remote microphones start decoding for it.
-fn listen(state: &Arc<Mutex<State>>, handle: &tokio::runtime::Handle) -> Listener {
+fn listen(state: &Arc<Mutex<State>>, handle: &tasks::Tasks) -> Listener {
     let weak = Arc::downgrade(state);
     listen_to(&mut state.lock(), weak, handle)
 }
@@ -1254,7 +1259,7 @@ fn listen(state: &Arc<Mutex<State>>, handle: &tokio::runtime::Handle) -> Listene
 fn listen_to(
     s: &mut State,
     weak: std::sync::Weak<Mutex<State>>,
-    handle: &tokio::runtime::Handle,
+    handle: &tasks::Tasks,
 ) -> Listener {
     let listener = s.hub.listen(move || {
         if let Some(state) = weak.upgrade() {
@@ -1304,7 +1309,7 @@ async fn pump_mic(identity: String, track: RemoteAudioTrack, hub: Arc<audio_tap:
 
 async fn start_recording(
     state: &Arc<Mutex<State>>,
-    handle: &tokio::runtime::Handle,
+    handle: &tasks::Tasks,
     events: &async_channel::Sender<Event>,
     path: PathBuf,
     screen: Option<(SourceId, ScreenSharePreset)>,
@@ -1650,11 +1655,14 @@ impl Drop for Engine {
     fn drop(&mut self) {
         self.disconnect();
         let closed = self.closed();
-        // The shared runtime outlives this call, including its final goodbye.
+        let tasks = self.tasks.clone();
+        // Give goodbye/finalization its usual grace period, then cancel every
+        // remaining engine task. Other engines and account HTTP keep running.
         self.rt().spawn(async move {
             if tokio::time::timeout(CLOSE_TIMEOUT, closed).await.is_err() {
                 tracing::warn!("leaving the room timed out");
             }
+            tasks.shutdown().await;
         });
     }
 }
@@ -1756,7 +1764,7 @@ async fn connect(
     // Others can ask this Mac to transcribe.
     if let Some(model) = can_transcribe {
         let room = room.clone();
-        tokio::spawn(async move {
+        tasks::spawn(async move {
             if let Err(e) = set_attribute(&room, CAN_TRANSCRIBE, &model).await {
                 tracing::warn!("can-transcribe attribute: {e}");
             }
@@ -1784,7 +1792,7 @@ async fn connect(
     // Publishing opens the mic and can take a moment; don't hold up room events.
     if let Some(audio) = audio.filter(|_| mic_allowed) {
         let (room, state, events) = (room.clone(), state.clone(), events.clone());
-        tokio::spawn(async move {
+        tasks::spawn(async move {
             if let Some(denoise) = denoise
                 && let Err(e) = denoise.await
             {
@@ -1890,7 +1898,7 @@ async fn connect(
                 if yields {
                     tracing::info!(%identity, "their Mac takes over the transcript");
                     let (state, events) = (state.clone(), events.clone());
-                    tokio::spawn(async move {
+                    tasks::spawn(async move {
                         stop_transcribing_for(&state, &events, Some(identity), true).await
                     });
                 }
@@ -1918,7 +1926,7 @@ async fn connect(
                 };
                 if let Some(lines) = history.filter(|l| !l.is_empty()) {
                     let to = p.identity().to_string();
-                    tokio::spawn({
+                    tasks::spawn({
                         let room = room.clone();
                         async move { send_history(&room, lines, to).await }
                     });
@@ -2069,7 +2077,7 @@ fn track_publications(state: &Mutex<State>, connection: u64, event: &RoomEvent) 
             };
             if s.hub.listening() && !s.mic_streams.contains_key(&key) {
                 let pump = pump_mic(key.participant.clone(), track.clone(), s.hub.clone());
-                s.mic_streams.insert(key.clone(), tokio::spawn(pump));
+                s.mic_streams.insert(key.clone(), tasks::spawn(pump));
             }
             s.mics.insert(key, track.clone());
         }
@@ -2229,7 +2237,7 @@ mod tests {
             Some("anna".into()),
         ));
         assert_eq!(state.lock().start, Start::Stopped(id, Some("anna".into())));
-        let installed = install_transcribing(state, connection, id, engine.rt().handle(), |_| {
+        let installed = install_transcribing(state, connection, id, &engine.tasks, |_| {
             unreachable!("it listened")
         });
         let stopped = installed.expect_err("installed after Stop");
