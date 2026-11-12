@@ -196,11 +196,9 @@ impl RoomAccess {
         })
     }
     fn can_create(&self, cx: &App) -> bool {
-        Shell::global(cx)
-            .read(cx)
-            .principal
-            .as_ref()
-            .is_some_and(|p| p.kind == "user")
+        let shell = Shell::global(cx);
+        let shell = shell.read(cx);
+        shell.args.session.is_some() && shell.principal.as_ref().is_none_or(|p| p.kind == "user")
     }
     fn run(&mut self, action: Action, cx: &mut Context<Self>) {
         if self.busy || self.invalid_session || self.closed {
@@ -237,10 +235,12 @@ impl RoomAccess {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let performed = action.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move { execute(&args, id.as_deref(), kind, &name, &email, &action) })
-                .await;
+            let result =
+                cx.background_executor()
+                    .spawn(async move {
+                        execute(&args, id.as_deref(), kind, &name, &email, &action).await
+                    })
+                    .await;
             let _ = this.update(cx, |v, cx| {
                 if v.invalid_session || Shell::global(cx).read(cx).args.session != v.args.session {
                     return;
@@ -408,7 +408,7 @@ impl RoomAccess {
     }
 }
 
-fn execute(
+async fn execute(
     args: &Args,
     id: Option<&str>,
     kind: RoomKind,
@@ -420,11 +420,9 @@ fn execute(
         auth::request(&args.server, args.session.as_deref(), path, body, method)
     };
     if matches!(action, Action::Create) {
-        let room: SavedRoom = serde_json::from_value(request(
-            "/rooms",
-            Some(json!({"name":name,"kind":kind})),
-            "POST",
-        )?)?;
+        let room: SavedRoom = serde_json::from_value(
+            request("/rooms", Some(json!({"name":name,"kind":kind})), "POST").await?,
+        )?;
         return Ok(Reply {
             detail: Some(Detail {
                 room,
@@ -441,7 +439,7 @@ fn execute(
     let mutation = match action {
         Action::Load => Ok(json!({})),
         Action::Create => unreachable!("handled above"),
-        Action::Rename => request(&path, Some(json!({"name":name})), "PATCH"),
+        Action::Rename => request(&path, Some(json!({"name":name})), "PATCH").await,
         Action::InviteGuest | Action::InviteMember => {
             let kind = if matches!(action, Action::InviteGuest) {
                 "guest"
@@ -453,6 +451,7 @@ fn execute(
                 Some(json!({"kind":kind,"email":email})),
                 "POST",
             )
+            .await
             .and_then(|value| {
                 link = Some(
                     value["url"]
@@ -464,10 +463,12 @@ fn execute(
             })
         }
         Action::Revoke(hash) => {
-            request(&format!("{path}/invites/{hash}"), Some(json!({})), "DELETE")
+            request(&format!("{path}/invites/{hash}"), Some(json!({})), "DELETE").await
         }
-        Action::Remove(id) => request(&format!("{path}/members/{id}"), Some(json!({})), "DELETE"),
-        Action::Close => request(&path, Some(json!({})), "DELETE"),
+        Action::Remove(id) => {
+            request(&format!("{path}/members/{id}"), Some(json!({})), "DELETE").await
+        }
+        Action::Close => request(&path, Some(json!({})), "DELETE").await,
     };
     let error = mutation.err().map(|e| e.to_string());
     // Removal can persist revocation even when LiveKit disconnect fails. Refresh
@@ -486,6 +487,7 @@ fn execute(
         anyhow::bail!("{error}");
     }
     let detail = request(&format!("/rooms/{room_id}"), None, "GET")
+        .await
         .and_then(|v| serde_json::from_value::<Detail>(v).map_err(Into::into));
     match detail {
         Ok(detail) => Ok(Reply {
@@ -965,14 +967,14 @@ mod tests {
     #[test]
     fn created_room_is_returned_without_a_second_network_request() {
         let (args, task) = server(vec![("POST", "/api/rooms", 200, room())]);
-        let reply = execute(
+        let reply = crate::test_support::block_on(execute(
             &args,
             None,
             RoomKind::Private,
             "Project",
             "",
             &Action::Create,
-        )
+        ))
         .unwrap();
         assert_eq!(reply.detail.unwrap().room.owner, "owner");
         task.join().unwrap();
@@ -993,14 +995,14 @@ mod tests {
                 json!({"error":"Temporarily unavailable"}),
             ),
         ]);
-        let reply = execute(
+        let reply = crate::test_support::block_on(execute(
             &args,
             Some("room"),
             RoomKind::Private,
             "",
             "",
             &Action::InviteGuest,
-        )
+        ))
         .unwrap();
         assert_eq!(
             reply.link.as_deref(),
@@ -1025,14 +1027,14 @@ mod tests {
                 json!({"room":room(),"members":[{"id":"guest","name":"Guest","kind":"guest","revoked":true}],"invites":[]}),
             ),
         ]);
-        let reply = execute(
+        let reply = crate::test_support::block_on(execute(
             &args,
             Some("room"),
             RoomKind::Private,
             "",
             "",
             &Action::Remove("guest".into()),
-        )
+        ))
         .unwrap();
         assert!(reply.detail.unwrap().members[0].revoked);
         assert!(reply.mutation_error.unwrap().contains("Retry removal"));

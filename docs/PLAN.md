@@ -86,7 +86,7 @@ Design: [UI.md](UI.md).
 - [x] ~~Text field for naming rooms (adapt GPUI's `input.rs` example)~~ *`text_input.rs`: IME, selection, copy and paste; Enter and Esc as events.*
 - [ ] Mirror your own circle
 - [ ] Mic button on your own circle (also on your screen preview). *Built; checked with snapshots, needs a click.*
-- [x] ~~Fix: after leaving, you stayed in the room as a ghost for 15–40 s, so rejoining showed you twice~~ *The engine's runtime was dropped with the call, cancelling the goodbye to LiveKit mid-way. It now finishes on a thread of its own, and quitting mid-call leaves first. Both checked in LiveKit's log (`CLIENT_REQUEST_LEAVE`).*
+- [x] ~~Fix: after leaving, you stayed in the room as a ghost for 15–40 s, so rejoining showed you twice~~ *The engine's runtime was dropped with the call, cancelling the goodbye to LiveKit mid-way. It now finishes on the shared engine runtime after the call model is dropped, and quitting mid-call leaves first. Both checked in LiveKit's log (`CLIENT_REQUEST_LEAVE`).*
 - [x] ~~Footprint with 10 circles open~~ *~207 MB, ~23% CPU with 10 circles + toolbar while sending the camera. Memory is the same as one grid window; CPU is higher because every circle draws itself.*
 - [x] ~~Footprint of the capsule with 10 people~~ *~19% CPU, ~135 MB (no mic) once repaints were capped at 30 fps; ~24% before ([FOOTPRINT.md](FOOTPRINT.md)).*
 
@@ -149,6 +149,7 @@ Started early (2026-11-03), ahead of Stages 3–6, with open room links. Invite-
 - [ ] Notarization (Apple Developer ID), so a downloaded zip opens without the manual "Open"; simple update check
 - [x] ~~Email-bound account invitations for friends~~
 - [x] ~~PR auth hardening: device-code approval, private queued email delivery, cancellable native sign-in and expired-session recovery, per-connection media identity, reusable direct slots and durable invitation return links~~
+- [x] ~~Native recovery and saved-room fixes: permission before admission, typed 401 recovery, session-safe room requests, persistent local bookmarks, temporary quick calls, and shared async HTTP/runtime; notify-driven mail delivery~~
 - [x] ~~Fix: crash on join on Macs with a Touch Bar~~ — floating windows are created borderless (patched GPUI) instead of switching style afterwards; the accessibility content view also keeps its class when home closes so Touch Bar observers survive the transition
 - [ ] Verify on the affected Intel Mac (macOS 15.6, two displays, Touch Bar): call windows stay visible when sharing and switching apps. *Fixed NSPanel's default hide-on-deactivate behavior for floating windows and popups; audio continued while the UI disappeared. Needs a manual check with the updated app.*
 - [ ] Verify share picker responsiveness with many windows. *Permission checks and enumeration run off the UI thread; choices arrive before previews. Native submissions run on isolated workers with deadlines and a shared limit of four requests across picker sessions. In-flight requests keep their slot through timeouts and cancellation until the native callback completes; listing failures offer Retry.*

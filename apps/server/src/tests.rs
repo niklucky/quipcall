@@ -292,7 +292,7 @@ async fn private_guest_claim_return_remove_and_cached_media_token() {
         )
         .await
         .0,
-        StatusCode::UNAUTHORIZED
+        StatusCode::FORBIDDEN
     );
     let (_, v, _) = t
         .req(
@@ -408,7 +408,7 @@ async fn public_and_direct_rooms_use_server_identity_and_two_slots() {
         )
         .await
         .0,
-        StatusCode::UNAUTHORIZED
+        StatusCode::FORBIDDEN
     );
     let public = t.room(&admin, "public").await;
     assert_eq!(t.join(&g, &public).await.0, StatusCode::OK);
@@ -827,7 +827,7 @@ async fn room_rename_is_owner_only_and_survives_reload() {
         )
         .await
         .0,
-        StatusCode::UNAUTHORIZED
+        StatusCode::FORBIDDEN
     );
     assert_eq!(
         t.req(
@@ -1056,6 +1056,57 @@ async fn mail_eligibility_and_delivery_failure_are_off_the_response_path() {
     );
     std::fs::remove_file(t.dir.path().join("mail")).unwrap();
     assert!(!t.magic("admin@example.com", None).await.is_empty());
+}
+
+#[tokio::test]
+async fn mail_worker_drains_backlog_and_wakes_for_new_requests() {
+    let t = Test::new().await;
+    // More than one delivery batch is already durable when the process starts.
+    for _ in 0..101 {
+        sqlx::query("INSERT INTO mail_requests(email,requester,created) VALUES ('unknown@example.com','test',?)")
+            .bind(auth::now()).execute(&t.state.db).await.unwrap();
+    }
+    let worker = tokio::spawn(auth::mail_worker(t.state.clone()));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_requests")
+                .fetch_one(&t.state.db)
+                .await
+                .unwrap();
+            if remaining == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let path = t
+        .dir
+        .path()
+        .join("mail")
+        .join(format!("{}.txt", auth::hash("admin@example.com")));
+    // The worker's fallback is five minutes; this delivery must be notified.
+    assert_eq!(
+        t.req(
+            "POST",
+            "/api/auth/request",
+            "",
+            json!({"email":"admin@example.com"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    worker.abort();
+    let _ = worker.await;
 }
 
 #[tokio::test]

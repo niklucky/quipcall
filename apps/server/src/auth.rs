@@ -51,7 +51,9 @@ pub async fn current(s: &AppState, h: &HeaderMap) -> Result<Principal> {
 pub async fn user(s: &AppState, h: &HeaderMap) -> Result<Principal> {
     let p = current(s, h).await?;
     if p.kind != "user" {
-        return Err(AppError::unauthorized());
+        return Err(AppError::forbidden(
+            "Sign in with an invited account to create or manage rooms",
+        ));
     }
     Ok(p)
 }
@@ -250,19 +252,21 @@ pub async fn request_link(
         .bind(now())
         .execute(&s.db)
         .await?;
+    s.mail_ready.notify_one();
     // Delivery, eligibility and suppression never affect the public response.
     Ok(Json(json!({"ok":true})))
 }
 
 /// One bounded worker drains the durable queue; never hold an HTTP request open
 /// for delivery or expose a provider failure to an account-enumeration probe.
-pub async fn deliver_pending(s: &AppState) -> Result<()> {
+pub async fn deliver_pending(s: &AppState) -> Result<usize> {
     let requests: Vec<(i64, String, String, Option<String>)> = sqlx::query_as(
         "SELECT id,email,requester,invite FROM mail_requests WHERE created>? ORDER BY id LIMIT 100",
     )
     .bind(now() - 900)
     .fetch_all(&s.db)
     .await?;
+    let count = requests.len();
     for (id, email, requester, invite) in requests {
         if let Err(e) = deliver_link(s, &email, &requester, invite).await {
             tracing::error!("email delivery failed: {}", e.message);
@@ -272,7 +276,22 @@ pub async fn deliver_pending(s: &AppState) -> Result<()> {
             .execute(&s.db)
             .await?;
     }
-    Ok(())
+    Ok(count)
+}
+/// Drain on startup and on new requests. Notify retains a permit if a request
+/// arrives during delivery, so the transition to sleep cannot lose a wakeup.
+pub async fn mail_worker(s: AppState) {
+    loop {
+        match deliver_pending(&s).await {
+            Ok(100) => continue,
+            Ok(_) => {}
+            Err(e) => tracing::warn!("mail queue: {}", e.message),
+        }
+        tokio::select! {
+            _ = s.mail_ready.notified() => {},
+            _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {},
+        }
+    }
 }
 async fn deliver_link(
     s: &AppState,

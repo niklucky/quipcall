@@ -15,7 +15,7 @@ Environment=QUIPCALL_DATABASE_URL=sqlite:///var/lib/quipcall/quipcall.db
 StateDirectory=quipcall
 StateDirectoryMode=0700
 UMask=0077
-Environment=RUST_LOG=quipcall_server=info,tower_http=info
+Environment=RUST_LOG=quipcall_server=info
 ExecStart=/opt/quipcall/bin/quipcall-server
 Restart=on-failure
 RestartSec=2

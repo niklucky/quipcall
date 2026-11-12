@@ -446,7 +446,14 @@ impl Home {
                         let latest = store.calls_in(&room.id).next();
                         let recent =
                             latest.map_or_else(|| "No calls yet".to_owned(), |i| when(i, true));
-                        let meta = format!("{} · {recent}", room.kind.label());
+                        let meta = format!(
+                            "{} · {recent}",
+                            if room.owner.is_empty() {
+                                "Saved link"
+                            } else {
+                                room.kind.label()
+                            }
+                        );
                         let selected = self.selected.as_ref().is_some_and(|s| s.room == room.id);
                         let id = room.id.clone();
                         let join = room.id.clone();
@@ -677,10 +684,13 @@ impl Home {
                             },
                             None,
                             Kind::Secondary,
-                            !s.auth_busy,
+                            true,
                         )
-                        .on_click(|_, _, cx| {
-                            Shell::global(cx).update(cx, |s, cx| s.sign_in(None, cx))
+                        .when(s.auth_busy(), |button| button.opacity(0.45))
+                        .when(!s.auth_busy(), |button| {
+                            button.on_click(|_, _, cx| {
+                                Shell::global(cx).update(cx, |s, cx| s.sign_in(None, cx))
+                            })
                         }),
                     )
                     .child(
@@ -831,9 +841,10 @@ impl Home {
                         .child(title.clone()),
                 )
                 .when(
-                    saved
-                        .as_ref()
-                        .is_some_and(|r| s.principal.as_ref().is_some_and(|p| p.id == r.owner)),
+                    saved.as_ref().is_some_and(|r| {
+                        s.store.is_bookmarked(&r.id)
+                            || s.principal.as_ref().is_some_and(|p| p.id == r.owner)
+                    }),
                     |el| {
                         let id = room_id.clone();
                         el.child(
@@ -893,9 +904,11 @@ impl Home {
                     )
                     .tooltip(tooltip("Add it to your rooms, link and all"))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        Shell::global(cx).update(cx, |s, cx| s.keep_room(&keep, &keep_name, cx));
-                        this.side = Side::Rooms;
-                        this.start_rename(keep.clone(), window, cx);
+                        if Shell::global(cx).update(cx, |s, cx| s.keep_room(&keep, &keep_name, cx))
+                        {
+                            this.side = Side::Rooms;
+                            this.start_rename(keep.clone(), window, cx);
+                        }
                     }))
                     .into_any_element(),
                     button(

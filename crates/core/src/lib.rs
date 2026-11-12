@@ -4,12 +4,13 @@
 //! published tracks and remote video plumbing. It has no UI dependency — a UI
 //! drives it through [`Engine`] methods and consumes [`Event`]s.
 //!
-//! LiveKit needs tokio; the engine owns a small runtime so the UI can use any
-//! executor it likes.
+//! Calls and application HTTP share one small tokio runtime, so the UI can
+//! use any executor without creating another runtime for network requests.
 
 pub mod audio_tap;
 mod camera;
 pub mod denoise;
+pub mod http;
 pub mod models;
 pub mod permissions;
 #[cfg(target_os = "macos")]
@@ -37,7 +38,7 @@ use livekit::options::TrackPublishOptions;
 use livekit::prelude::*;
 use livekit::{AudioProcessingOptions, PlatformAudio};
 use parking_lot::Mutex;
-use quipcall_protocol::{ApiError, JoinInfo};
+use quipcall_protocol::JoinInfo;
 
 pub use audio_tap::{Listener, Speaker, VoiceFrame};
 pub use livekit;
@@ -212,8 +213,6 @@ pub struct Handover {
 }
 
 pub struct Engine {
-    /// `None` only while dropping, when it moves to a thread of its own.
-    rt: Option<tokio::runtime::Runtime>,
     state: Arc<Mutex<State>>,
     events: async_channel::Sender<Event>,
 }
@@ -302,17 +301,35 @@ impl std::fmt::Display for StoppedStarting {
 
 impl std::error::Error for StoppedStarting {}
 
+/// One runtime for calls and account/room HTTP, initialized lazily per process.
+fn runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
+    static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, std::io::Error>> =
+        std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_name("quipcall-engine")
+                .enable_all()
+                .build()
+        })
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+async fn after_permission<T>(
+    permission: impl Future<Output = anyhow::Result<()>>,
+    request: impl Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    permission.await?;
+    request.await
+}
+
 impl Engine {
     pub fn new() -> anyhow::Result<(Self, async_channel::Receiver<Event>)> {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("quipcall-engine")
-            .enable_all()
-            .build()?;
+        runtime()?;
         let (events, rx) = async_channel::unbounded();
         Ok((
             Self {
-                rt: Some(rt),
                 state: Default::default(),
                 events,
             },
@@ -326,47 +343,32 @@ impl Engine {
         server: &str,
         room: &str,
         session: &str,
-    ) -> impl Future<Output = anyhow::Result<JoinInfo>> + Send + 'static {
-        let url = format!("{}/api/join", server.trim_end_matches('/'));
-        let body = serde_json::json!({"room": room});
-        let session = session.to_owned();
-        let handle = self.rt().handle().clone();
+    ) -> impl Future<Output = anyhow::Result<JoinInfo>> + Send + 'static + use<> {
+        let events = self.events.clone();
+        let request = http::request_with_retry(
+            server,
+            Some(session),
+            "/join",
+            Some(serde_json::json!({"room":room})),
+            "POST",
+            true,
+        );
         async move {
-            handle
-                .spawn(async move {
-                    let client = reqwest::Client::builder()
-                        .timeout(Duration::from_secs(10))
-                        .build()?;
-                    // Flaky Wi-Fi or a VPN dropping the first connection
-                    // shouldn't fail the call: retry transport errors only.
-                    let mut attempt = 1;
-                    let resp = loop {
-                        match client
-                            .post(&url)
-                            .header("X-Quipcall", "1")
-                            .bearer_auth(&session)
-                            .json(&body)
-                            .send()
-                            .await
-                        {
-                            Ok(resp) => break resp,
-                            Err(e) if attempt < 3 && (e.is_connect() || e.is_timeout()) => {
-                                tracing::warn!("join attempt {attempt} failed: {e}");
-                                tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
-                                attempt += 1;
-                            }
-                            Err(e) => return Err(e.into()),
-                        }
-                    };
-                    if !resp.status().is_success() {
-                        let err: ApiError = resp.json().await.unwrap_or(ApiError {
-                            error: "unknown server error".into(),
-                        });
-                        anyhow::bail!("server: {}", err.error);
+            // A macOS prompt can remain open indefinitely. Do not mint the
+            // short-lived admission token until the user has answered it.
+            let permission = async move {
+                if std::env::var("QUIPCALL_NO_MIC").is_err() {
+                    if permissions::status(MediaDevice::Microphone) == Access::Undecided {
+                        events
+                            .send(Event::WaitingForPermission(MediaDevice::Microphone))
+                            .await?;
                     }
-                    Ok(resp.json::<JoinInfo>().await?)
-                })
-                .await?
+                    permissions::request(MediaDevice::Microphone).await;
+                }
+                anyhow::Ok(())
+            };
+            let value = after_permission(permission, request).await?;
+            Ok(serde_json::from_value(value)?)
         }
     }
 
@@ -439,7 +441,7 @@ impl Engine {
     }
 
     fn rt(&self) -> &tokio::runtime::Runtime {
-        self.rt.as_ref().expect("engine runtime")
+        runtime().expect("engine runtime initialized")
     }
 
     pub fn set_mic_enabled(&self, enabled: bool) {
@@ -1647,23 +1649,13 @@ pub(crate) fn autorelease_pool<R>(f: impl FnOnce() -> R) -> R {
 impl Drop for Engine {
     fn drop(&mut self) {
         self.disconnect();
-        // Dropping the runtime would cancel the goodbye mid-way. Let it
-        // finish on a thread of its own, then drop the runtime there.
         let closed = self.closed();
-        if let Some(rt) = self.rt.take() {
-            let spawned = std::thread::Builder::new()
-                .name("quipcall-close".into())
-                .spawn(move || {
-                    let closed =
-                        rt.block_on(async { tokio::time::timeout(CLOSE_TIMEOUT, closed).await });
-                    if closed.is_err() {
-                        tracing::warn!("leaving the room timed out");
-                    }
-                });
-            if let Err(e) = spawned {
-                tracing::warn!("leave the room: {e}");
+        // The shared runtime outlives this call, including its final goodbye.
+        self.rt().spawn(async move {
+            if tokio::time::timeout(CLOSE_TIMEOUT, closed).await.is_err() {
+                tracing::warn!("leaving the room timed out");
             }
-        }
+        });
     }
 }
 
@@ -2504,9 +2496,8 @@ mod tests {
         engine.disconnect();
         // Wait for the goodbye task itself; awaiting `closed()` would hide
         // the bug this is about.
-        let metrics = engine.rt().metrics();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while metrics.num_alive_tasks() > 0 {
+        while engine.closed().now_or_never().is_none() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "goodbye never finished"

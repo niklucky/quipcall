@@ -380,9 +380,14 @@ impl Call {
             &room.id,
             args.session.as_deref().unwrap_or_default(),
         );
+        let expected_session = args.session.clone();
         let join_task = cx.spawn(async move |this, cx| {
             let result = join.await;
             let _ = this.update(cx, |call, cx| {
+                if call.status != Status::Joining {
+                    return;
+                }
+                call.waiting_for = None;
                 match result {
                     Ok(info) => {
                         call.me.update(cx, |me, cx| {
@@ -390,6 +395,19 @@ impl Call {
                             cx.notify();
                         });
                         call.engine.connect(info);
+                    }
+                    Err(e) if crate::auth::unauthorized(&e) => {
+                        let room = call.room.id.clone();
+                        call.leave_now(cx);
+                        // Ended first returns Home; then recover the exact failed
+                        // session, without overwriting a newer account switch.
+                        cx.defer(move |cx| {
+                            Shell::global(cx).update(cx, |shell, cx| {
+                                if shell.expire_session(expected_session.as_deref(), cx) {
+                                    shell.sign_in(Some(room), cx);
+                                }
+                            })
+                        });
                     }
                     Err(e) => call.fail(format!("{e:#}"), cx),
                 }
@@ -463,15 +481,15 @@ impl Call {
                 false,
             ));
         }
-        if self.status == Status::Joining {
-            return Some(plain("Joining…".into(), false));
-        }
         if let Some(error) = &self.error {
             return Some(Notice {
                 text: error.clone(),
                 error: true,
                 action: self.error_action.clone(),
             });
+        }
+        if self.status == Status::Joining {
+            return Some(plain("Joining…".into(), false));
         }
         self.flash
             .as_ref()

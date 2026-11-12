@@ -3,7 +3,7 @@
 use crate::{Shell, call::RoomRef, store::SavedRoom};
 use gpui::Context;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
 #[derive(Clone, Deserialize)]
 pub struct Principal {
@@ -60,17 +60,7 @@ fn clear(server: &str) {
         );
     }
 }
-#[derive(Debug)]
-struct RequestError {
-    status: reqwest::StatusCode,
-    message: String,
-}
-impl std::fmt::Display for RequestError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-impl std::error::Error for RequestError {}
+pub(crate) use quipcall_core::http::{RequestError, request};
 
 /// A cancelled attempt can never open a browser or install a late session.
 #[derive(Default)]
@@ -101,22 +91,10 @@ impl SignInAttempt {
         true
     }
 }
-fn client() -> anyhow::Result<&'static reqwest::blocking::Client> {
-    static CLIENT: std::sync::OnceLock<Result<reqwest::blocking::Client, reqwest::Error>> =
-        std::sync::OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-        })
-        .as_ref()
-        .map_err(|e| anyhow::anyhow!("{e}"))
-}
-fn unauthorized(error: &anyhow::Error) -> bool {
+pub(crate) fn unauthorized(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<RequestError>()
-        .is_some_and(|e| e.status == reqwest::StatusCode::UNAUTHORIZED)
+        .is_some_and(|e| e.status == 401)
 }
 fn forget_session(
     session: &mut Option<String>,
@@ -131,47 +109,57 @@ fn forget_session(
     store.bind_rooms(None);
 }
 
-pub(crate) fn request(
-    server: &str,
-    token: Option<&str>,
-    path: &str,
-    body: Option<Value>,
-    method: &str,
-) -> anyhow::Result<Value> {
-    let client = client()?;
-    let mut req = client
-        .request(
-            method.parse()?,
-            format!("{}/api{path}", server.trim_end_matches('/')),
-        )
-        .header("X-Quipcall", "1");
-    if let Some(token) = token {
-        req = req.bearer_auth(token);
+/// Tracks who owns a pending room request, independently of browser sign-in.
+#[derive(Default)]
+pub struct PendingOperation {
+    generation: u64,
+    active: Option<u64>,
+}
+impl PendingOperation {
+    fn start(&mut self) -> u64 {
+        self.generation += 1;
+        self.active = Some(self.generation);
+        self.generation
     }
-    if let Some(body) = body {
-        req = req.json(&body);
-    }
-    let res = req.send()?;
-    let status = res.status();
-    if !status.is_success() {
-        let value: Value = res.json().unwrap_or_default();
-        return Err(RequestError {
-            status,
-            message: value["error"]
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("Request failed ({status})")),
+    fn finish(&mut self, id: u64) -> bool {
+        if self.active != Some(id) {
+            return false;
         }
-        .into());
+        self.active = None;
+        true
     }
-    Ok(res.json()?)
+    fn cancel(&mut self) {
+        self.active = None;
+    }
+    fn pending(&self) -> bool {
+        self.active.is_some()
+    }
 }
 impl Shell {
+    pub fn auth_busy(&self) -> bool {
+        self.auth_attempt.pending || self.room_creation.pending()
+    }
+    pub fn expire_session(&mut self, expected: Option<&str>, cx: &mut Context<Self>) -> bool {
+        if expected.is_none() || self.args.session.as_deref() != expected {
+            return false;
+        }
+        self.room_creation.cancel();
+        forget_session(
+            &mut self.args.session,
+            &mut self.principal,
+            &mut self.store,
+            || clear(&self.args.server),
+        );
+        self.store.save();
+        self.auth_message = "Your session expired. Sign in to continue.".into();
+        cx.notify();
+        true
+    }
+
     pub fn sign_in(&mut self, room: Option<String>, cx: &mut Context<Self>) {
-        if self.auth_busy {
+        if self.auth_busy() {
             return;
         }
-        self.auth_busy = true;
         let generation = self.auth_attempt.start();
         self.auth_message = "Opening browser sign-in…".into();
         cx.notify();
@@ -188,6 +176,7 @@ impl Shell {
                         Some(json!({})),
                         "POST",
                     )
+                    .await
                 })
                 .await;
             let result: anyhow::Result<(String, Principal)> = async {
@@ -252,13 +241,13 @@ impl Shell {
                                 Some(json!({"id":id,"secret":secret})),
                                 "POST",
                             )
+                            .await
                         })
                         .await;
                     let value = match value {
                         Err(e)
-                            if e.downcast_ref::<RequestError>().is_some_and(|e| {
-                                e.status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                            }) =>
+                            if e.downcast_ref::<RequestError>()
+                                .is_some_and(|e| e.status == 429) =>
                         {
                             delay = (delay * 2).min(std::time::Duration::from_secs(30));
                             continue;
@@ -283,7 +272,6 @@ impl Shell {
                 if !s.auth_attempt.finish(generation) {
                     return;
                 }
-                s.auth_busy = false;
                 match result {
                     Ok((token, p)) => {
                         if let Err(e) = save(&s.args.server, &token) {
@@ -319,20 +307,20 @@ impl Shell {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let p: Principal = serde_json::from_value(request(
-                        &args.server,
-                        args.session.as_deref(),
-                        "/auth/me",
-                        None,
-                        "GET",
-                    )?)?;
-                    let rooms: Vec<SavedRoom> = serde_json::from_value(request(
-                        &args.server,
-                        args.session.as_deref(),
-                        "/rooms",
-                        None,
-                        "GET",
-                    )?)?;
+                    let p: Principal = serde_json::from_value(
+                        request(
+                            &args.server,
+                            args.session.as_deref(),
+                            "/auth/me",
+                            None,
+                            "GET",
+                        )
+                        .await?,
+                    )?;
+                    let rooms: Vec<SavedRoom> = serde_json::from_value(
+                        request(&args.server, args.session.as_deref(), "/rooms", None, "GET")
+                            .await?,
+                    )?;
                     Ok::<_, anyhow::Error>((p, rooms))
                 })
                 .await;
@@ -345,16 +333,12 @@ impl Shell {
                         s.store.bind_rooms(Some(&p.id));
                         s.args.name = p.name.clone();
                         s.principal = Some(p);
-                        s.store.rooms = rooms;
+                        s.store.refresh_rooms(rooms);
                         s.store.save();
                         s.auth_message.clear();
                     }
                     Err(e) if unauthorized(&e) => {
-                        forget_session(&mut s.args.session, &mut s.principal, &mut s.store, || {
-                            clear(&s.args.server)
-                        });
-                        s.store.save();
-                        s.auth_message = "Your session expired. Sign in to continue.".into();
+                        s.expire_session(expected.as_deref(), cx);
                     }
                     Err(e) => {
                         s.auth_message = e.to_string();
@@ -370,14 +354,13 @@ impl Shell {
             return;
         }
         self.auth_attempt.cancel();
-        self.auth_busy = false;
         self.auth_message = "Sign-in cancelled".into();
         cx.notify();
     }
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
         let args = self.args.clone();
         self.auth_attempt.cancel();
-        self.auth_busy = false;
+        self.room_creation.cancel();
         forget_session(
             &mut self.args.session,
             &mut self.principal,
@@ -395,19 +378,20 @@ impl Shell {
                     "/auth/logout",
                     Some(json!({})),
                     "POST",
-                );
+                )
+                .await;
             })
             .detach();
     }
     pub fn create_room(&mut self, kind: &str, join: bool, cx: &mut Context<Self>) {
-        if self.auth_busy {
+        if self.auth_busy() {
             return;
         }
-        if self.principal.as_ref().is_none_or(|p| p.kind != "user") {
+        if self.args.session.is_none() {
             self.sign_in(None, cx);
             return;
         }
-        self.auth_busy = true;
+        let operation = self.room_creation.start();
         let args = self.args.clone();
         let expected = args.session.clone();
         let kind = kind.to_owned();
@@ -426,17 +410,18 @@ impl Shell {
                         "/rooms",
                         Some(json!({"name":name,"kind":kind})),
                         "POST",
-                    )?;
+                    )
+                    .await?;
                     serde_json::from_value::<SavedRoom>(r).map_err(anyhow::Error::from)
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
-                if s.args.session != expected {
+                if !s.room_creation.finish(operation) || s.args.session != expected {
                     return;
                 }
-                s.auth_busy = false;
                 match result {
                     Ok(r) => {
+                        s.store.bind_rooms(Some(&r.owner));
                         s.store.cache_room(r.clone());
                         s.store.save();
                         if join {
@@ -448,6 +433,11 @@ impl Shell {
                                 },
                                 cx,
                             );
+                        }
+                    }
+                    Err(e) if unauthorized(&e) => {
+                        if s.expire_session(expected.as_deref(), cx) {
+                            s.sign_in(None, cx);
                         }
                     }
                     Err(e) => s.auth_message = e.to_string(),
@@ -472,6 +462,7 @@ impl Shell {
                         Some(json!({"name":name})),
                         "PATCH",
                     )
+                    .await
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
@@ -512,6 +503,7 @@ impl Shell {
                         Some(json!({"name":title})),
                         "PATCH",
                     )
+                    .await
                 })
                 .await;
             let _ = this.update(cx, |s, cx| {
@@ -541,6 +533,25 @@ mod tests {
     };
 
     #[test]
+    fn expired_create_releases_busy_without_unlocking_a_newer_operation() {
+        let mut creation = PendingOperation::default();
+        let old = creation.start();
+        // Session invalidation releases the in-flight create immediately.
+        creation.cancel();
+        assert!(!creation.pending());
+        let mut signin = SignInAttempt::default();
+        let browser = signin.start();
+        assert!(!creation.finish(old));
+        assert!(signin.current(browser));
+        signin.finish(browser);
+        let retry = creation.start();
+        assert!(!creation.finish(old));
+        assert!(creation.pending());
+        assert!(creation.finish(retry));
+        assert!(!creation.pending());
+    }
+
+    #[test]
     fn cancelled_signin_cannot_open_browser_or_install_a_late_session() {
         let mut attempt = SignInAttempt::default();
         let old = attempt.start();
@@ -559,17 +570,26 @@ mod tests {
     #[test]
     fn expired_session_clears_credentials_identity_and_cached_rooms() {
         let error: anyhow::Error = RequestError {
-            status: reqwest::StatusCode::UNAUTHORIZED,
+            status: 401,
             message: "Expired".into(),
         }
         .into();
         assert!(unauthorized(&error));
         let network: anyhow::Error = RequestError {
-            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            status: 503,
             message: "Offline".into(),
         }
         .into();
         assert!(!unauthorized(&network));
+        let guest_role: anyhow::Error = RequestError {
+            status: 403,
+            message: "Account required".into(),
+        }
+        .into();
+        assert!(
+            !unauthorized(&guest_role),
+            "a valid guest credential must survive a role denial"
+        );
         let mut session = Some("old-token".into());
         let mut principal = Some(Principal {
             id: "a".into(),
@@ -594,11 +614,6 @@ mod tests {
     }
 
     #[test]
-    fn requests_share_one_http_client_and_runtime() {
-        assert!(std::ptr::eq(client().unwrap(), client().unwrap()));
-    }
-
-    #[test]
     fn throttled_non_json_response_keeps_status_for_poll_retry() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let server = format!("http://{}", listener.local_addr().unwrap());
@@ -615,11 +630,15 @@ mod tests {
             }
             stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 4\r\nConnection: close\r\n\r\nBusy").unwrap();
         });
-        let error = request(&server, None, "/auth/desktop/poll", None, "GET").unwrap_err();
-        assert_eq!(
-            error.downcast_ref::<RequestError>().unwrap().status,
-            reqwest::StatusCode::TOO_MANY_REQUESTS
-        );
+        let error = crate::test_support::block_on(request(
+            &server,
+            None,
+            "/auth/desktop/poll",
+            None,
+            "GET",
+        ))
+        .unwrap_err();
+        assert_eq!(error.downcast_ref::<RequestError>().unwrap().status, 429);
         task.join().unwrap();
     }
 }

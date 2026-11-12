@@ -16,6 +16,8 @@ mod share_picker;
 #[cfg(feature = "snapshot")]
 mod snapshot;
 mod store;
+#[cfg(test)]
+mod test_support;
 mod text_input;
 mod theme;
 mod timeline;
@@ -99,7 +101,7 @@ fn parse_args() -> Args {
     args.session = auth::load(&args.server);
     #[cfg(feature = "snapshot")]
     if let Ok(path) = std::env::var("QUIPCALL_TEST_SESSION_FILE") {
-        let url = reqwest::Url::parse(&args.server).expect("test server URL");
+        let url = quipcall_core::http::Url::parse(&args.server).expect("test server URL");
         assert!(
             matches!(url.host_str(), Some("127.0.0.1" | "localhost")),
             "test sessions are local only"
@@ -145,7 +147,7 @@ fn usage() -> ! {
 /// App-wide state: the home window, the current call and local data.
 pub struct Shell {
     pub principal: Option<auth::Principal>,
-    pub auth_busy: bool,
+    pub room_creation: auth::PendingOperation,
     pub auth_attempt: auth::SignInAttempt,
     pub auth_message: String,
     pub args: Args,
@@ -181,7 +183,7 @@ impl Shell {
             let room = RoomRef {
                 id: room.id.clone(),
                 name: room.name.clone(),
-                one_time: room.kind == store::RoomKind::Direct,
+                one_time: false,
             };
             self.start_call(room, cx);
         }
@@ -203,14 +205,25 @@ impl Shell {
     }
 
     pub fn rename_room(&mut self, id: &str, name: &str, cx: &mut Context<Self>) {
-        self.rename_remote_room(id, name, cx);
+        if self.store.is_bookmarked(id) {
+            self.store.rename_bookmark(id, name);
+            self.store.save();
+            cx.notify();
+        } else {
+            self.rename_remote_room(id, name, cx);
+        }
     }
 
     /// Keep a quick call's room in the rooms list.
-    pub fn keep_room(&mut self, id: &str, name: &str, cx: &mut Context<Self>) {
-        self.store.keep_room(id, name);
+    pub fn keep_room(&mut self, id: &str, name: &str, cx: &mut Context<Self>) -> bool {
+        if !self.store.keep_room(id, name) {
+            self.auth_message = "Sign in before saving a room.".into();
+            cx.notify();
+            return false;
+        }
         self.store.save();
         cx.notify();
+        true
     }
 
     /// Call a room from history again (same room, same link).
@@ -381,7 +394,7 @@ fn main() {
         }
         let shell = cx.new(|_| Shell {
             principal: None,
-            auth_busy: false,
+            room_creation: auth::PendingOperation::default(),
             auth_attempt: auth::SignInAttempt::default(),
             auth_message: String::new(),
             args,

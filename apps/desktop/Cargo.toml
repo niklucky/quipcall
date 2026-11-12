@@ -22,7 +22,6 @@ raw-window-handle = "0.6"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 unicode-segmentation = "1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

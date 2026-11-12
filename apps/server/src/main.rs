@@ -25,6 +25,7 @@ struct AppState {
     config: Arc<Config>,
     db: SqlitePool,
     http: reqwest::Client,
+    mail_ready: Arc<tokio::sync::Notify>,
 }
 impl AppState {
     async fn new(config: Config) -> anyhow::Result<Self> {
@@ -45,6 +46,7 @@ impl AppState {
         sqlx::migrate!().run(&db).await?;
         Ok(Self {
             config: Arc::new(config),
+            mail_ready: Arc::new(tokio::sync::Notify::new()),
             db,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
@@ -127,15 +129,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let state = AppState::new(Config::from_env()?).await?;
-    let mail_state = state.clone();
-    tokio::spawn(async move {
-        loop {
-            if let Err(e) = auth::deliver_pending(&mail_state).await {
-                tracing::warn!("mail queue: {}", e.message);
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    });
+    tokio::spawn(auth::mail_worker(state.clone()));
     let cleanup = state.db.clone();
     tokio::spawn(async move {
         loop {
