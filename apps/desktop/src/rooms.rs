@@ -274,7 +274,7 @@ impl RoomAccess {
                             v.link = None;
                             if let Some(id) = &v.id {
                                 Shell::global(cx).update(cx, |s, cx| {
-                                    s.store.remove_room(id);
+                                    s.store.close_room(id);
                                     s.store.save();
                                     cx.notify();
                                 });

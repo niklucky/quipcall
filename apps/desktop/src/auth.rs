@@ -62,36 +62,30 @@ fn clear(server: &str) {
 }
 pub(crate) use quipcall_core::http::{RequestError, request};
 
-/// A cancelled attempt can never open a browser or install a late session.
-#[derive(Default)]
-pub struct SignInAttempt {
+/// A completion can only modify the operation generation that started it.
+pub struct Generation<T> {
     generation: u64,
-    pub pending: bool,
-    pub code: Option<String>,
-    room: Option<String>,
+    pub payload: Option<T>,
 }
-impl SignInAttempt {
-    fn request(&mut self, room: Option<String>) -> Option<u64> {
-        if self.pending && room.is_none() {
-            return None;
+impl<T> Default for Generation<T> {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            payload: None,
         }
-        let generation = self.start();
-        self.room = room;
-        Some(generation)
     }
-    fn start(&mut self) -> u64 {
-        self.cancel();
-        self.pending = true;
+}
+impl<T> Generation<T> {
+    fn start(&mut self, payload: T) -> u64 {
+        self.generation += 1;
+        self.payload = Some(payload);
         self.generation
     }
     fn current(&self, generation: u64) -> bool {
-        self.pending && self.generation == generation
+        self.pending() && self.generation == generation
     }
     fn cancel(&mut self) {
-        self.generation += 1;
-        self.pending = false;
-        self.code = None;
-        self.room = None;
+        self.payload = None;
     }
     fn finish(&mut self, generation: u64) -> bool {
         if !self.current(generation) {
@@ -100,11 +94,38 @@ impl SignInAttempt {
         self.cancel();
         true
     }
+    pub fn pending(&self) -> bool {
+        self.payload.is_some()
+    }
+}
+#[derive(Default)]
+pub struct SignIn {
+    pub code: Option<String>,
+    room: Option<String>,
+}
+pub type SignInAttempt = Generation<SignIn>;
+pub type PendingOperation = Generation<()>;
+impl SignInAttempt {
+    fn request(&mut self, room: Option<String>) -> Option<u64> {
+        if self.pending() && room.is_none() {
+            return None;
+        }
+        Some(self.start(SignIn { code: None, room }))
+    }
+    pub fn code(&self) -> Option<String> {
+        self.payload.as_ref().and_then(|p| p.code.clone())
+    }
+    fn room(&self) -> Option<String> {
+        self.payload.as_ref().and_then(|p| p.room.clone())
+    }
 }
 pub(crate) fn unauthorized(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<RequestError>()
         .is_some_and(|e| e.status == 401)
+}
+fn session_matches(current: Option<&str>, expected: Option<&str>) -> bool {
+    current == expected
 }
 fn forget_session(
     session: &mut Option<String>,
@@ -119,32 +140,6 @@ fn forget_session(
     store.bind_rooms(None);
 }
 
-/// Tracks who owns a pending room request, independently of browser sign-in.
-#[derive(Default)]
-pub struct PendingOperation {
-    generation: u64,
-    active: Option<u64>,
-}
-impl PendingOperation {
-    fn start(&mut self) -> u64 {
-        self.generation += 1;
-        self.active = Some(self.generation);
-        self.generation
-    }
-    fn finish(&mut self, id: u64) -> bool {
-        if self.active != Some(id) {
-            return false;
-        }
-        self.active = None;
-        true
-    }
-    fn cancel(&mut self) {
-        self.active = None;
-    }
-    fn pending(&self) -> bool {
-        self.active.is_some()
-    }
-}
 async fn load_account(
     server: &str,
     session: Option<&str>,
@@ -173,10 +168,10 @@ async fn load_account(
 
 impl Shell {
     pub fn auth_busy(&self) -> bool {
-        self.auth_attempt.pending || self.room_creation.pending()
+        self.auth_attempt.pending() || self.room_creation.pending()
     }
     pub fn expire_session(&mut self, expected: Option<&str>, cx: &mut Context<Self>) -> bool {
-        if expected.is_none() || self.args.session.as_deref() != expected {
+        if !session_matches(self.args.session.as_deref(), expected) {
             return false;
         }
         self.room_creation.cancel();
@@ -184,7 +179,11 @@ impl Shell {
             &mut self.args.session,
             &mut self.principal,
             &mut self.store,
-            || clear(&self.args.server),
+            || {
+                if expected.is_some() {
+                    clear(&self.args.server);
+                }
+            },
         );
         self.store.save();
         self.auth_message = "Your session expired. Sign in to continue.".into();
@@ -251,7 +250,7 @@ impl Shell {
                     if !s.auth_attempt.current(generation) {
                         return false;
                     }
-                    s.auth_attempt.code = Some(code);
+                    s.auth_attempt.payload.as_mut().unwrap().code = Some(code);
                     s.auth_message = "Type this code in the browser on this Mac.".into();
                     cx.open_url(&url);
                     cx.notify();
@@ -287,10 +286,7 @@ impl Shell {
                     )
                     .await;
                     let value = match value {
-                        Err(e)
-                            if e.downcast_ref::<RequestError>()
-                                .is_some_and(|e| e.status == 429) =>
-                        {
+                        Err(e) if quipcall_core::http::transient(&e) => {
                             delay = (delay * 2).min(std::time::Duration::from_secs(30));
                             continue;
                         }
@@ -313,7 +309,7 @@ impl Shell {
             let issued = result.as_ref().ok().map(|(token, _)| token.clone());
             let installed = this
                 .update(cx, |s, cx| {
-                    let room = s.auth_attempt.room.clone();
+                    let room = s.auth_attempt.room();
                     if !s.auth_attempt.finish(generation) {
                         return false;
                     }
@@ -361,6 +357,10 @@ impl Shell {
     pub fn refresh_account(&mut self, cx: &mut Context<Self>) {
         let args = self.args.clone();
         if args.session.is_none() {
+            self.principal = None;
+            self.store.bind_rooms(None);
+            self.store.save();
+            cx.notify();
             return;
         }
         let expected = args.session.clone();
@@ -392,7 +392,7 @@ impl Shell {
         .detach();
     }
     pub fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
-        if !self.auth_attempt.pending {
+        if !self.auth_attempt.pending() {
             return;
         }
         self.auth_attempt.cancel();
@@ -432,7 +432,7 @@ impl Shell {
             self.sign_in(None, cx);
             return;
         }
-        let operation = self.room_creation.start();
+        let operation = self.room_creation.start(());
         let args = self.args.clone();
         let expected = args.session.clone();
         let kind = kind.to_owned();
@@ -568,19 +568,36 @@ mod tests {
     };
 
     #[test]
+    fn unauthenticated_401_recovers_but_stale_failures_cannot_clear_a_new_session() {
+        assert!(session_matches(None, None));
+        assert!(session_matches(Some("old"), Some("old")));
+        assert!(!session_matches(Some("new"), None));
+        assert!(!session_matches(Some("new"), Some("old")));
+        let mut store = crate::store::Store::default();
+        store.bind_rooms(Some("old-account"));
+        store.cache_room(SavedRoom {
+            id: "private".into(),
+            ..Default::default()
+        });
+        store.bind_rooms(None);
+        assert!(store.rooms.is_empty());
+        assert!(store.rooms_principal.is_none());
+    }
+
+    #[test]
     fn room_handoff_restarts_pending_approval_and_rejects_old_results() {
         let mut attempt = SignInAttempt::default();
         let home = attempt.request(None).unwrap();
         assert!(attempt.request(None).is_none());
         let linked = attempt.request(Some("room-a".into())).unwrap();
         assert!(!attempt.finish(home));
-        assert_eq!(attempt.room.as_deref(), Some("room-a"));
+        assert_eq!(attempt.room().as_deref(), Some("room-a"));
         let newer = attempt.request(Some("room-b".into())).unwrap();
         assert!(!attempt.finish(linked));
-        assert_eq!(attempt.room.as_deref(), Some("room-b"));
+        assert_eq!(attempt.room().as_deref(), Some("room-b"));
         assert!(attempt.current(newer));
         attempt.cancel();
-        assert!(attempt.room.is_none());
+        assert!(attempt.room().is_none());
     }
     #[test]
     fn profile_and_rooms_refresh_are_in_flight_together() {
@@ -638,16 +655,16 @@ mod tests {
     #[test]
     fn expired_create_releases_busy_without_unlocking_a_newer_operation() {
         let mut creation = PendingOperation::default();
-        let old = creation.start();
+        let old = creation.start(());
         // Session invalidation releases the in-flight create immediately.
         creation.cancel();
         assert!(!creation.pending());
         let mut signin = SignInAttempt::default();
-        let browser = signin.start();
+        let browser = signin.start(SignIn::default());
         assert!(!creation.finish(old));
         assert!(signin.current(browser));
         signin.finish(browser);
-        let retry = creation.start();
+        let retry = creation.start(());
         assert!(!creation.finish(old));
         assert!(creation.pending());
         assert!(creation.finish(retry));
@@ -657,17 +674,17 @@ mod tests {
     #[test]
     fn cancelled_signin_cannot_open_browser_or_install_a_late_session() {
         let mut attempt = SignInAttempt::default();
-        let old = attempt.start();
-        attempt.code = Some("1234ABCD".into());
+        let old = attempt.start(SignIn::default());
+        attempt.payload.as_mut().unwrap().code = Some("1234ABCD".into());
         attempt.cancel();
-        assert!(!attempt.pending);
-        assert!(attempt.code.is_none());
+        assert!(!attempt.pending());
+        assert!(attempt.code().is_none());
         assert!(!attempt.current(old)); // delayed /start cannot open a browser
-        let retry = attempt.start();
+        let retry = attempt.start(SignIn::default());
         assert!(!attempt.finish(old)); // delayed /poll cannot replace the retry
         assert!(attempt.current(retry));
         assert!(attempt.finish(retry));
-        assert!(!attempt.pending);
+        assert!(!attempt.pending());
     }
 
     #[test]

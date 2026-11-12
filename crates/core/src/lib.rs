@@ -4,8 +4,8 @@
 //! published tracks and remote video plumbing. It has no UI dependency — a UI
 //! drives it through [`Engine`] methods and consumes [`Event`]s.
 //!
-//! Calls and application HTTP share one small tokio runtime, so the UI can
-//! use any executor without creating another runtime for network requests.
+//! Each engine owns its runtime, including LiveKit internals. Application HTTP
+//! uses a separate lazy runtime that survives call teardown.
 
 pub mod audio_tap;
 mod camera;
@@ -214,6 +214,7 @@ pub struct Handover {
 }
 
 pub struct Engine {
+    runtime: Option<tokio::runtime::Runtime>,
     tasks: tasks::Tasks,
     state: Arc<Mutex<State>>,
     events: async_channel::Sender<Event>,
@@ -303,7 +304,7 @@ impl std::fmt::Display for StoppedStarting {
 
 impl std::error::Error for StoppedStarting {}
 
-/// One runtime for calls and account/room HTTP, initialized lazily per process.
+/// Account/room HTTP runtime, initialized lazily per process.
 fn runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
     static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, std::io::Error>> =
         std::sync::OnceLock::new();
@@ -311,7 +312,7 @@ fn runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
         .get_or_init(|| {
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
-                .thread_name("quipcall-engine")
+                .thread_name("quipcall-http")
                 .enable_all()
                 .build()
         })
@@ -328,11 +329,17 @@ async fn after_permission<T>(
 
 impl Engine {
     pub fn new() -> anyhow::Result<(Self, async_channel::Receiver<Event>)> {
-        runtime()?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("quipcall-engine")
+            .enable_all()
+            .build()?;
+        let tasks = tasks::Tasks::new(runtime.handle().clone());
         let (events, rx) = async_channel::unbounded();
         Ok((
             Self {
-                tasks: Default::default(),
+                runtime: Some(runtime),
+                tasks,
                 state: Default::default(),
                 events,
             },
@@ -360,14 +367,7 @@ impl Engine {
             // A macOS prompt can remain open indefinitely. Do not mint the
             // short-lived admission token until the user has answered it.
             let permission = async move {
-                if std::env::var("QUIPCALL_NO_MIC").is_err() {
-                    if permissions::status(MediaDevice::Microphone) == Access::Undecided {
-                        events
-                            .send(Event::WaitingForPermission(MediaDevice::Microphone))
-                            .await?;
-                    }
-                    permissions::request(MediaDevice::Microphone).await;
-                }
+                microphone_permission(&events).await?;
                 anyhow::Ok(())
             };
             let value = after_permission(permission, request).await?;
@@ -419,12 +419,13 @@ impl Engine {
             // Leaving finishes your recording, keeping everything up to now,
             // while what was being said is still transcribed: the call's
             // history waits for it.
-            wind_down(transcribing, recorder, &events, false).await;
-            // Say goodbye first: until the server hears it, everyone else
-            // (and you, if you rejoin) sees you in the room for another 20 s.
-            if let Some(room) = room {
-                let _ = room.close().await;
-            }
+            // Say goodbye independently of potentially slow local finalization.
+            futures_util::future::join(wind_down(transcribing, recorder, &events, false), async {
+                if let Some(room) = room {
+                    let _ = room.close().await;
+                }
+            })
+            .await;
             // Stopping the camera blocks briefly; keep it off the UI thread.
             if let Some(camera) = camera {
                 let _ = tokio::task::spawn_blocking(move || drop(camera)).await;
@@ -444,7 +445,7 @@ impl Engine {
     }
 
     fn rt(&self) -> &tokio::runtime::Runtime {
-        runtime().expect("engine runtime initialized")
+        self.runtime.as_ref().expect("engine runtime initialized")
     }
 
     pub fn set_mic_enabled(&self, enabled: bool) {
@@ -1656,13 +1657,17 @@ impl Drop for Engine {
         self.disconnect();
         let closed = self.closed();
         let tasks = self.tasks.clone();
-        // Give goodbye/finalization its usual grace period, then cancel every
-        // remaining engine task. Other engines and account HTTP keep running.
-        self.rt().spawn(async move {
-            if tokio::time::timeout(CLOSE_TIMEOUT, closed).await.is_err() {
-                tracing::warn!("leaving the room timed out");
-            }
-            tasks.shutdown().await;
+        let runtime = self.runtime.take().expect("engine runtime initialized");
+        // Runtime teardown also cancels LiveKit's untracked internal tasks.
+        // Never block the UI or try to drop a runtime from an async context.
+        std::thread::spawn(move || {
+            runtime.block_on(async move {
+                if tokio::time::timeout(CLOSE_TIMEOUT, closed).await.is_err() {
+                    tracing::warn!("leaving the room timed out");
+                }
+                tasks.shutdown().await;
+            });
+            runtime.shutdown_timeout(Duration::from_secs(1));
         });
     }
 }
@@ -1683,6 +1688,20 @@ async fn stop_screen_share(state: Arc<Mutex<State>>, events: async_channel::Send
         .await;
 }
 
+/// Ask before admission or opening WebRTC's audio device. Calling again after
+/// join only reads an answered permission; direct connect uses the same policy.
+async fn microphone_permission(events: &async_channel::Sender<Event>) -> anyhow::Result<bool> {
+    if std::env::var("QUIPCALL_NO_MIC").is_ok() {
+        return Ok(false);
+    }
+    if permissions::status(MediaDevice::Microphone) == Access::Undecided {
+        events
+            .send(Event::WaitingForPermission(MediaDevice::Microphone))
+            .await?;
+    }
+    Ok(permissions::request(MediaDevice::Microphone).await)
+}
+
 async fn connect(
     state: Arc<Mutex<State>>,
     events: async_channel::Sender<Event>,
@@ -1694,14 +1713,7 @@ async fn connect(
 
     // Ask before anything opens the mic: an unanswered prompt would block
     // WebRTC's audio thread. Without access we still play remote audio.
-    let mic_allowed = use_audio && {
-        if permissions::status(MediaDevice::Microphone) == Access::Undecided {
-            events
-                .send(Event::WaitingForPermission(MediaDevice::Microphone))
-                .await?;
-        }
-        permissions::request(MediaDevice::Microphone).await
-    };
+    let mic_allowed = microphone_permission(&events).await?;
     if use_audio && !mic_allowed {
         events
             .send(Event::Error(

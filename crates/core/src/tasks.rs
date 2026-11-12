@@ -1,4 +1,4 @@
-//! Engine-owned async work on the shared runtime. Child tasks inherit the
+//! Engine-owned async work on its runtime. Child tasks inherit the
 //! engine's scope; completed tasks leave it, and teardown cancels leftovers.
 use parking_lot::Mutex;
 use std::{
@@ -13,10 +13,10 @@ use tokio::{
 
 tokio::task_local! { static CURRENT: Tasks; }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct Tasks(Arc<Inner>);
-#[derive(Default)]
 struct Inner {
+    runtime: tokio::runtime::Handle,
     state: Mutex<State>,
     changed: Notify,
     cancelled: Notify,
@@ -37,31 +37,38 @@ impl Drop for Finished {
     }
 }
 impl Tasks {
+    pub fn new(runtime: tokio::runtime::Handle) -> Self {
+        Self(Arc::new(Inner {
+            runtime,
+            state: Default::default(),
+            changed: Notify::new(),
+            cancelled: Notify::new(),
+        }))
+    }
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
         let mut state = self.0.state.lock();
+        if state.closed {
+            drop(state);
+            drop(future);
+            let task = self.0.runtime.spawn(std::future::pending::<F::Output>());
+            task.abort();
+            return task;
+        }
         state.next += 1;
         let id = state.next;
         let finished = Finished(Arc::downgrade(&self.0), id);
-        let closed = state.closed;
-        let task = crate::runtime()
-            .expect("engine runtime initialized")
+        let task = self
+            .0
+            .runtime
             .spawn(CURRENT.scope(self.clone(), async move {
                 let _finished = finished;
-                // A worker may poll before spawn returns its handle. Never
-                // poll a late callback's body, even in that small interval.
-                if closed {
-                    std::future::pending::<()>().await;
-                }
                 future.await
             }));
         state.active.insert(id, task.abort_handle());
-        if state.closed {
-            task.abort();
-        }
         task
     }
 
@@ -180,7 +187,17 @@ mod tests {
                 engine.tasks.spawn(async {}).await.unwrap();
             }
             assert!(engine.tasks.0.state.lock().active.is_empty());
-            let (ended, dropped) = async_channel::bounded(1);
+            let (ended, dropped) = async_channel::bounded(2);
+            let untracked = Probe(ended.clone());
+            let (started, ready) = async_channel::bounded(1);
+            engine.rt().spawn(async move {
+                tokio::spawn(async move {
+                    let _probe = untracked;
+                    started.send(()).await.unwrap();
+                    std::future::pending::<()>().await;
+                });
+            });
+            ready.recv().await.unwrap();
             let probe = Probe(ended);
             let goodbye = engine.tasks.spawn(async move {
                 let _probe = probe;
@@ -193,10 +210,10 @@ mod tests {
                 .closing
                 .push(goodbye.map(|_| ()).boxed().shared());
             drop(engine);
-            tokio::time::timeout(
-                crate::CLOSE_TIMEOUT + Duration::from_secs(2),
-                dropped.recv(),
-            )
+            tokio::time::timeout(crate::CLOSE_TIMEOUT + Duration::from_secs(2), async {
+                dropped.recv().await.unwrap();
+                dropped.recv().await
+            })
             .await
             .unwrap()
             .unwrap();

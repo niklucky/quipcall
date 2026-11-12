@@ -1275,7 +1275,7 @@ async fn claimed_invite_survives_expiry_and_cleanup_without_restoring_removed_ac
 }
 
 #[tokio::test]
-async fn multiple_connections_are_removed_together_and_direct_slot_can_be_reused() {
+async fn multiple_connections_are_removed_and_fresh_identities_cannot_reclaim_direct_slot() {
     let t = Test::new().await;
     let owner = t.admin().await;
     let room = t.room(&owner, "direct").await;
@@ -1308,9 +1308,9 @@ async fn multiple_connections_are_removed_together_and_direct_slot_can_be_reused
         t.req("POST", "/api/entry", &replacement, json!({"room":room}))
             .await
             .1["state"],
-        "ready"
+        "full"
     );
-    assert_eq!(t.join(&replacement, &room).await.0, StatusCode::OK);
+    assert_eq!(t.join(&replacement, &room).await.0, StatusCode::FORBIDDEN);
     t.fail_disconnect
         .store(false, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
@@ -1329,14 +1329,14 @@ async fn multiple_connections_are_removed_together_and_direct_slot_can_be_reused
             StatusCode::FORBIDDEN
         );
     }
-    // Retrying A's removal must not clear B's newly claimed slot.
+    // Retrying removal must not reopen the bearer link.
     assert_eq!(
         t.req("POST", "/api/entry", "", json!({"room":room}))
             .await
             .1["state"],
         "full"
     );
-    assert_eq!(t.join(&replacement, &room).await.0, StatusCode::OK);
+    assert_eq!(t.join(&replacement, &room).await.0, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -1615,14 +1615,8 @@ async fn temporary_direct_calls_expire_and_only_the_owner_can_keep_them() {
         .execute(&t.state.db)
         .await
         .unwrap();
-    assert_eq!(t.join(&guest, &quick).await.0, StatusCode::NOT_FOUND);
-    assert_eq!(
-        t.req("POST", "/api/entry", "", json!({"room":quick}))
-            .await
-            .1["state"],
-        "unavailable"
-    );
-    // A previously admitted connection can recover through the handshake gate.
+    // Both admission paths agree until cleanup commits closure, in either order.
+    assert_eq!(t.join(&guest, &quick).await.0, StatusCode::OK);
     assert_eq!(t.gate(&token).await, StatusCode::NO_CONTENT);
     sqlx::query("UPDATE rooms SET expires=? WHERE id=?")
         .bind(auth::now() - 1)
@@ -1630,17 +1624,20 @@ async fn temporary_direct_calls_expire_and_only_the_owner_can_keep_them() {
         .execute(&t.state.db)
         .await
         .unwrap();
+    assert_eq!(t.gate(&token).await, StatusCode::NO_CONTENT);
+    assert_eq!(t.join(&guest, &quick).await.0, StatusCode::OK);
     assert_eq!(
-        t.req(
-            "POST",
-            &format!("/api/rooms/{quick}/keep"),
-            &owner,
-            json!({})
-        )
-        .await
-        .0,
-        StatusCode::NOT_FOUND
+        t.req("POST", "/api/entry", &guest, json!({"room":quick}))
+            .await
+            .1["state"],
+        "ready"
     );
+    sqlx::query("UPDATE rooms SET expires=? WHERE id=?")
+        .bind(auth::now() - 1)
+        .bind(&quick)
+        .execute(&t.state.db)
+        .await
+        .unwrap();
     rooms::cleanup_quick_calls(&t.state).await.unwrap();
     assert!(
         !sqlx::query_scalar::<_, bool>("SELECT closed FROM rooms WHERE id=?")
@@ -1656,6 +1653,13 @@ async fn temporary_direct_calls_expire_and_only_the_owner_can_keep_them() {
         .await
         .unwrap();
     rooms::cleanup_quick_calls(&t.state).await.unwrap();
+    assert_eq!(t.join(&guest, &quick).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        t.req("POST", "/api/entry", &guest, json!({"room":quick}))
+            .await
+            .1["state"],
+        "unavailable"
+    );
     assert_eq!(t.gate(&token).await, StatusCode::FORBIDDEN);
     assert!(
         sqlx::query_scalar::<_, bool>("SELECT closed FROM rooms WHERE id=?")
@@ -1867,4 +1871,28 @@ async fn cleanup_is_fair_retries_failures_and_preserves_active_calls() {
     assert_eq!(t.deleted_rooms.lock().unwrap().len(), 102);
     rooms::cleanup_quick_calls(&t.state).await.unwrap();
     assert_eq!(t.deleted_rooms.lock().unwrap().len(), 102); // completed work stays done
+}
+
+#[tokio::test]
+async fn failed_close_reports_closure_and_can_be_retried() {
+    let t = Test::new().await;
+    let owner = t.admin().await;
+    let room = t.room(&owner, "public").await;
+    t.fail_rooms.lock().unwrap().insert(room.clone());
+    let (status, body, _) = t
+        .req("DELETE", &format!("/api/rooms/{room}"), &owner, json!({}))
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body["error"],
+        "Room closed, but disconnection failed. Retry closing the room."
+    );
+    assert_eq!(t.join(&owner, &room).await.0, StatusCode::NOT_FOUND);
+    t.fail_rooms.lock().unwrap().clear();
+    assert_eq!(
+        t.req("DELETE", &format!("/api/rooms/{room}"), &owner, json!({}))
+            .await
+            .0,
+        StatusCode::OK
+    );
 }

@@ -23,10 +23,11 @@ pub struct Room {
     pub closed: bool,
     pub expires: Option<i64>,
 }
+// Cleanup commits the terminal closed state after confirming inactivity.
+// The inactivity deadline alone is not a separate admission boundary.
 async fn room(db: &mut SqliteConnection, id: &str) -> Result<Room> {
-    sqlx::query_as("SELECT * FROM rooms WHERE id=? AND closed=0 AND (expires IS NULL OR expires>?)")
+    sqlx::query_as("SELECT * FROM rooms WHERE id=? AND closed=0")
         .bind(id)
-        .bind(now())
         .fetch_optional(db)
         .await?
         .ok_or_else(AppError::missing)
@@ -109,13 +110,10 @@ pub async fn keep(
     Path(id): Path<String>,
 ) -> Result<Json<Room>> {
     owned(&s, &h, &id).await?;
-    sqlx::query(
-        "UPDATE rooms SET expires=NULL WHERE id=? AND closed=0 AND (expires IS NULL OR expires>?)",
-    )
-    .bind(&id)
-    .bind(now())
-    .execute(&s.db)
-    .await?;
+    sqlx::query("UPDATE rooms SET expires=NULL WHERE id=? AND closed=0")
+        .bind(&id)
+        .execute(&s.db)
+        .await?;
     Ok(Json(room(&mut *s.db.acquire().await?, &id).await?))
 }
 
@@ -393,11 +391,13 @@ pub async fn join(
         if blocked {
             return Err(AppError::forbidden("Your access was removed"));
         }
-        let claimed = sqlx::query("UPDATE rooms SET guest=? WHERE id=? AND guest IS NULL AND closed=0 AND (expires IS NULL OR expires>?)")
-            .bind(&p.id)
-            .bind(&r.id).bind(now())
-            .execute(&mut *tx)
-            .await?.rows_affected();
+        let claimed =
+            sqlx::query("UPDATE rooms SET guest=? WHERE id=? AND guest IS NULL AND closed=0")
+                .bind(&p.id)
+                .bind(&r.id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
         if claimed != 1 {
             return Err(AppError::forbidden("This call is full or unavailable"));
         }
@@ -607,8 +607,15 @@ async fn livekit(s: &AppState, method: &str, r: &Room, identity: Option<&str>) -
     }
     Err(AppError::new(
         StatusCode::SERVICE_UNAVAILABLE,
-        "Access revoked, but disconnection failed. Retry removal.",
+        format!("Call service {method} failed. Try again."),
     ))
+}
+fn removal_error(e: AppError) -> AppError {
+    tracing::warn!("removed participant disconnection: {}", e.message);
+    AppError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Access revoked, but disconnection failed. Retry removal.",
+    )
 }
 pub async fn remove(
     State(s): State<AppState>,
@@ -623,18 +630,19 @@ pub async fn remove(
     let mut tx = s.db.begin().await?;
     sqlx::query("INSERT INTO memberships VALUES (?,?,1) ON CONFLICT(room,principal) DO UPDATE SET revoked=1")
         .bind(&id).bind(&principal).execute(&mut *tx).await?;
-    // Free only this guest's slot, even on a retry after a replacement joined.
-    sqlx::query("UPDATE rooms SET guest=NULL WHERE id=? AND kind='direct' AND guest=?")
-        .bind(&id)
-        .bind(&principal)
-        .execute(&mut *tx)
-        .await?;
+    // Keep the claimed slot occupied: a fresh anonymous identity must not
+    // bypass removal by reclaiming the same bearer link. Start a new direct
+    // call to invite someone else.
     tx.commit().await?;
-    let active = livekit(&s, "ListParticipants", &r, None).await?;
+    let active = livekit(&s, "ListParticipants", &r, None)
+        .await
+        .map_err(removal_error)?;
     if let Some(participants) = active["participants"].as_array() {
         for identity in participants.iter().filter_map(|p| p["identity"].as_str()) {
             if media_principal(identity) == principal {
-                livekit(&s, "RemoveParticipant", &r, Some(identity)).await?;
+                livekit(&s, "RemoveParticipant", &r, Some(identity))
+                    .await
+                    .map_err(removal_error)?;
             }
         }
     }
@@ -657,6 +665,12 @@ pub async fn close(
         .bind(id)
         .execute(&s.db)
         .await?;
-    livekit(&s, "DeleteRoom", &r, None).await?;
+    livekit(&s, "DeleteRoom", &r, None).await.map_err(|e| {
+        tracing::warn!("closed room disconnection: {}", e.message);
+        AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Room closed, but disconnection failed. Retry closing the room.",
+        )
+    })?;
     Ok(Json(json!({"ok":true})))
 }

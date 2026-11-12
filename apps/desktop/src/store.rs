@@ -340,6 +340,17 @@ impl Store {
         }
     }
 
+    /// Closing is permanent; it must never create a restorable local bookmark.
+    pub fn close_room(&mut self, id: &str) {
+        self.rooms.retain(|r| r.id != id);
+        for bookmarks in self.bookmarks.values_mut() {
+            bookmarks.remove(id);
+        }
+        for hidden in self.hidden_rooms.values_mut() {
+            hidden.remove(id);
+        }
+    }
+
     pub fn remove_room(&mut self, id: &str) {
         if let Some(p) = &self.rooms_principal {
             self.hidden_rooms
@@ -583,6 +594,24 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::{SavedRoom, Store, civil_from_days, file_size};
+
+    #[test]
+    fn closed_bookmarks_never_return_when_restoring_hidden_rooms() {
+        let mut store = Store::default();
+        store.bind_rooms(Some("owner"));
+        store.keep_room("closed", "Closed");
+        store.keep_room("hidden", "Hidden");
+        store.remove_room("hidden");
+        store.close_room("closed");
+        store.restore_hidden_rooms();
+        store.refresh_rooms(vec![]);
+        assert!(store.rooms.iter().any(|r| r.id == "hidden"));
+        assert!(!store.rooms.iter().any(|r| r.id == "closed"));
+        assert!(!store.has_hidden_rooms());
+        store.remove_room("hidden");
+        store.close_room("hidden");
+        assert!(!store.has_hidden_rooms());
+    }
 
     #[test]
     fn owned_bookmarks_follow_shared_names_but_other_rooms_keep_local_aliases() {

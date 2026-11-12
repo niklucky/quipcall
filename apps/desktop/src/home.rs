@@ -757,7 +757,7 @@ impl Home {
                     .child(
                         button(
                             "sign-in",
-                            if s.auth_attempt.pending {
+                            if s.auth_attempt.pending() {
                                 "Waiting for browser…"
                             } else {
                                 "Sign in / switch account"
@@ -785,7 +785,7 @@ impl Home {
                             Shell::global(cx).update(cx, |s, cx| s.refresh_account(cx))
                         }),
                     )
-                    .when(s.auth_attempt.pending, |el| {
+                    .when(s.auth_attempt.pending(), |el| {
                         el.child(
                             button(
                                 "cancel-sign-in",
@@ -799,7 +799,7 @@ impl Home {
                             }),
                         )
                     })
-                    .when_some(s.auth_attempt.code.clone(), |el, code| {
+                    .when_some(s.auth_attempt.code(), |el, code| {
                         el.child(div().text_size(px(22.0)).text_color(rgb(TEXT)).child(code))
                     })
                     .when(s.args.session.is_some(), |el| {
