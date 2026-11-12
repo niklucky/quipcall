@@ -205,7 +205,7 @@ impl Shell {
     }
 
     pub fn rename_room(&mut self, id: &str, name: &str, cx: &mut Context<Self>) {
-        if self.store.is_bookmarked(id) {
+        if self.store.is_bookmarked(id) && !self.store.owns_room(id) {
             self.store.rename_bookmark(id, name);
             self.store.save();
             cx.notify();
@@ -225,7 +225,7 @@ impl Shell {
         let id = id.to_owned();
         let name = name.to_owned();
         cx.spawn(async move |this, cx| {
-            let result: anyhow::Result<()> = async {
+            let result: anyhow::Result<crate::store::SavedRoom> = async {
                 let detail = auth::request(
                     &args.server,
                     args.session.as_deref(),
@@ -234,19 +234,21 @@ impl Shell {
                     "GET",
                 )
                 .await?;
-                if detail["room"]["owner"].as_str() == Some(&principal)
-                    && !detail["room"]["expires"].is_null()
-                {
-                    auth::request(
-                        &args.server,
-                        args.session.as_deref(),
-                        &format!("/rooms/{id}/keep"),
-                        Some(serde_json::json!({})),
-                        "POST",
-                    )
-                    .await?;
+                let mut room: crate::store::SavedRoom =
+                    serde_json::from_value(detail["room"].clone())?;
+                if room.owner == principal && room.expires.is_some() {
+                    room = serde_json::from_value(
+                        auth::request(
+                            &args.server,
+                            args.session.as_deref(),
+                            &format!("/rooms/{id}/keep"),
+                            Some(serde_json::json!({})),
+                            "POST",
+                        )
+                        .await?,
+                    )?;
                 }
-                Ok(())
+                Ok(room)
             }
             .await;
             let _ = this.update(cx, |s, cx| {
@@ -254,22 +256,21 @@ impl Shell {
                     return;
                 }
                 match result {
-                    Ok(()) => {
+                    Ok(room) => {
                         s.store.keep_room(&id, &name);
+                        s.store.cache_room(room);
                         s.store.save();
                         s.auth_message.clear();
-                        cx.defer(move |cx| {
-                            for h in cx.windows() {
-                                if let Some(home) = h.downcast::<Home>() {
-                                    let _ = home.update(cx, |home, window, cx| {
-                                        home.select_room(id.clone(), cx);
-                                        home.start_rename(id.clone(), window, cx);
-                                    });
-                                }
-                            }
+                        home::with_home(cx, move |home, window, cx| {
+                            home.select_room(id.clone(), cx);
+                            home.start_rename(id.clone(), window, cx);
                         });
                     }
-                    Err(e) => s.auth_message = format!("Could not save room: {e}"),
+                    Err(e) => {
+                        if !s.recover_auth(&e, args.session.as_deref(), cx) {
+                            s.auth_message = format!("Could not save room: {e}");
+                        }
+                    }
                 }
                 cx.notify();
             });

@@ -145,7 +145,7 @@
         <select aria-label="Room type" bind:value={kind}><option value="direct">Guest 1-to-1</option><option value="public">Public room</option><option value="private">Private room</option></select>
         <button disabled={busy}>Create</button>
       </form>
-      <p>{kind === 'direct' ? 'You and one guest. The link expires in 24 hours unless you keep the room.' : kind === 'public' ? 'Anyone with the link can join.' : 'Only invited members and guests can join.'}</p>
+      <p>{kind === 'direct' ? 'You and one guest. Unused links expire after 24 hours. Active calls stay open; keep the room to reuse its link.' : kind === 'public' ? 'Anyone with the link can join.' : 'Only invited members and guests can join.'}</p>
     </section>
   {/if}
   {#if !flow && rooms.length}
@@ -155,7 +155,7 @@
     <section>
       <h2>{detail.room.name}</h2><p>{detail.room.kind === 'private' ? 'Sharing this room address does not grant access. Use an invitation below.' : 'Share this link to invite someone to the call.'}</p>
       {#if detail.room.expires}
-        <p>This call expires {new Date(detail.room.expires * 1000).toLocaleString()}.</p>
+        <p>Available until {new Date(detail.room.expires * 1000).toLocaleString()} if unused. Active calls stay open.</p>
         {#if detail.room.owner === me?.id}
           <button disabled={busy} onclick={() => run(async () => { const id = detail!.room.id; await api(`/rooms/${id}/keep`, {}); await inspect(id); await refresh(); })}>Keep as room</button>
         {/if}

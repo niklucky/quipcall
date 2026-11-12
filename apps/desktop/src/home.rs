@@ -40,6 +40,20 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Home>> {
         .ok()
 }
 
+/// Defer window updates until the caller's entity update has finished.
+pub(crate) fn with_home(
+    cx: &mut App,
+    mut update: impl FnMut(&mut Home, &mut Window, &mut Context<Home>) + 'static,
+) {
+    cx.defer(move |cx| {
+        for window in cx.windows() {
+            if let Some(home) = window.downcast::<Home>() {
+                let _ = home.update(cx, |home, window, cx| update(home, window, cx));
+            }
+        }
+    });
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Side {
     Rooms,
@@ -70,6 +84,7 @@ pub struct Home {
     /// The selected call's recording, playing under its transcript.
     playback: Option<Playback>,
     account: AccountView,
+    confirm_remove: Option<String>,
     _subscription: Subscription,
 }
 
@@ -159,6 +174,7 @@ impl Home {
             tab: Tab::Transcript,
             renaming: None,
             playback: None,
+            confirm_remove: None,
             account: AccountView {
                 principal: store.rooms_principal.clone(),
                 session: shell.read(cx).args.session.clone(),
@@ -169,6 +185,7 @@ impl Home {
                     s.args.session.as_deref(),
                     s.principal.as_ref().map(|p| p.id.as_str()),
                 ) {
+                    this.confirm_remove = None;
                     this.selected = None;
                     this.renaming = None;
                     this.playback = None;
@@ -212,6 +229,7 @@ impl Home {
     fn select(&mut self, room: String, call: usize, cx: &mut Context<Self>) {
         let selected = Selected { room, call };
         if self.selected.as_ref() != Some(&selected) {
+            self.confirm_remove = None;
             self.selected = Some(selected);
             self.tab = Tab::Transcript;
             self.playback = None;
@@ -676,13 +694,32 @@ impl Home {
                     .child(
                         button("quick", "Quick call", Some(Icon::Zap), Kind::Primary, true)
                             .tooltip(tooltip(
-                                "Start a 1-to-1 call; the link expires in 24 hours unless kept",
+                                "Start a 1-to-1 call; unused links expire after 24 hours",
                             ))
                             .on_click(|_, _, cx| {
                                 Shell::global(cx).update(cx, |s, cx| s.quick_call(cx))
                             }),
                     ),
             )
+            .when(s.store.has_hidden_rooms(), |v| {
+                v.child(
+                    button(
+                        "restore-rooms",
+                        "Restore hidden rooms",
+                        None,
+                        Kind::Secondary,
+                        true,
+                    )
+                    .on_click(|_, _, cx| {
+                        Shell::global(cx).update(cx, |s, cx| {
+                            s.store.restore_hidden_rooms();
+                            s.store.save();
+                            s.refresh_account(cx);
+                            cx.notify();
+                        })
+                    }),
+                )
+            })
             .child(
                 div()
                     .flex_none()
@@ -908,18 +945,40 @@ impl Home {
                 let manage = room.id.clone();
                 let join = room.id.clone();
                 let remove = room.id.clone();
+                let confirming = self.confirm_remove.as_deref() == Some(&room.id);
                 vec![
-                    icon_button("remove-room", Icon::Trash, 28.0)
-                        .tooltip(tooltip("Remove from your rooms on this Mac"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            Shell::global(cx).update(cx, |s, cx| {
-                                s.store.remove_room(&remove);
-                                s.store.save();
-                                cx.notify();
-                            });
-                            this.forget_room(&remove, cx);
-                        }))
-                        .into_any_element(),
+                    button(
+                        "remove-room",
+                        if confirming { "Remove?" } else { "" },
+                        Some(Icon::Trash),
+                        if confirming {
+                            Kind::Danger
+                        } else {
+                            Kind::Secondary
+                        },
+                        true,
+                    )
+                    .tooltip(tooltip(if confirming {
+                        "Click again to remove; Restore hidden rooms can undo this"
+                    } else {
+                        "Remove from your rooms on this Mac"
+                    }))
+                    .when(confirming, |v| v.bg(rgb(crate::theme::RAISED_2)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !confirming {
+                            this.confirm_remove = Some(remove.clone());
+                            cx.notify();
+                            return;
+                        }
+                        this.confirm_remove = None;
+                        Shell::global(cx).update(cx, |s, cx| {
+                            s.store.remove_room(&remove);
+                            s.store.save();
+                            cx.notify();
+                        });
+                        this.forget_room(&remove, cx);
+                    }))
+                    .into_any_element(),
                     icon_button("copy-link", Icon::Link, 28.0)
                         .tooltip(tooltip("Copy the room's link"))
                         .on_click(move |_, _, cx| {

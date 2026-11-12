@@ -44,9 +44,42 @@ pub fn credential(h: &HeaderMap) -> Option<&str> {
         .find_map(|c| c.strip_prefix("qc_session="))
 }
 pub async fn current(s: &AppState, h: &HeaderMap) -> Result<Principal> {
-    let token = credential(h).ok_or_else(AppError::unauthorized)?;
-    sqlx::query_as::<_, Principal>("SELECT p.* FROM sessions s JOIN principals p ON p.id=s.principal WHERE s.hash=? AND s.expires>?")
-        .bind(hash(token)).bind(now()).fetch_optional(&s.db).await?.ok_or_else(AppError::unauthorized)
+    let token = hash(credential(h).ok_or_else(AppError::unauthorized)?);
+    #[derive(FromRow)]
+    struct Authenticated {
+        #[sqlx(flatten)]
+        principal: Principal,
+        pending: bool,
+    }
+    let found: Authenticated = sqlx::query_as("SELECT p.*,s.pending FROM sessions s JOIN principals p ON p.id=s.principal WHERE s.hash=? AND s.expires>?")
+        .bind(&token).bind(now()).fetch_optional(&s.db).await?.ok_or_else(AppError::unauthorized)?;
+    if found.pending {
+        // The native client only uses the new credential after saving it. Lost
+        // poll responses and cancelled attempts leave the old session intact.
+        let mut tx = s.db.begin_with("BEGIN IMMEDIATE").await?;
+        let replaced: Option<Option<String>> = sqlx::query_scalar("UPDATE sessions SET pending=0,expires=? WHERE hash=? AND pending=1 AND expires>? RETURNING replaces")
+            .bind(now()+lifetime(&found.principal)).bind(&token).bind(now()).fetch_optional(&mut *tx).await?;
+        if let Some(Some(previous)) = replaced {
+            sqlx::query("DELETE FROM sessions WHERE hash=? AND hash<>?")
+                .bind(previous)
+                .bind(&token)
+                .execute(&mut *tx)
+                .await?;
+        } else if replaced.is_none() {
+            let valid: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE hash=? AND expires>?)",
+            )
+            .bind(&token)
+            .bind(now())
+            .fetch_one(&mut *tx)
+            .await?;
+            if !valid {
+                return Err(AppError::unauthorized());
+            }
+        }
+        tx.commit().await?;
+    }
+    Ok(found.principal)
 }
 pub async fn user(s: &AppState, h: &HeaderMap) -> Result<Principal> {
     let p = current(s, h).await?;
@@ -59,7 +92,7 @@ pub async fn user(s: &AppState, h: &HeaderMap) -> Result<Principal> {
 }
 pub async fn session(db: &mut SqliteConnection, p: &Principal) -> Result<String> {
     let token = random();
-    sqlx::query("INSERT INTO sessions VALUES (?, ?, ?)")
+    sqlx::query("INSERT INTO sessions(hash,principal,expires) VALUES (?, ?, ?)")
         .bind(hash(&token))
         .bind(&p.id)
         .bind(now() + lifetime(p))
@@ -556,12 +589,12 @@ pub async fn desktop_poll(
         .fetch_one(&mut *tx)
         .await?;
     let token = session(&mut tx, &p).await?;
-    if let Some(previous) = credential(&h) {
-        sqlx::query("DELETE FROM sessions WHERE hash=?")
-            .bind(hash(previous))
-            .execute(&mut *tx)
-            .await?;
-    }
+    sqlx::query("UPDATE sessions SET pending=1,expires=?,replaces=? WHERE hash=?")
+        .bind(now() + 600)
+        .bind(credential(&h).map(hash))
+        .bind(hash(&token))
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(Json(json!({"token":token,"principal":p})))
 }

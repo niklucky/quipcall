@@ -149,6 +149,7 @@ Started early (2026-11-03), ahead of Stages 3–6, with open room links. Invite-
 - [ ] Notarization (Apple Developer ID), so a downloaded zip opens without the manual "Open"; simple update check
 - [x] ~~Email-bound account invitations for friends~~
 - [x] ~~PR auth hardening: device-code approval, private queued email delivery, cancellable native sign-in and expired-session recovery, per-connection media identity, reusable direct slots and durable invitation return links~~
+- [x] ~~Review follow-up: shared owner names, recoverable room hiding, fair idle cleanup, provisional session activation, deep-link sign-in restart, parallel account refresh, unified 401 recovery, and common Home dispatch~~
 - [x] ~~Review follow-up: bounded durable mail retries and recipient caps, non-consuming owner invite previews, checked concurrent claims, expiring Quick calls with owner keep, removable local saved links, stable startup Home selection, atomic native session replacement, and engine-owned async task cancellation~~
 - [x] ~~Native recovery and saved-room fixes: permission before admission, typed 401 recovery, session-safe room requests, persistent local bookmarks, temporary quick calls, and shared async HTTP/runtime; notify-driven mail delivery~~
 - [x] ~~Fix: crash on join on Macs with a Touch Bar~~ — floating windows are created borderless (patched GPUI) instead of switching style afterwards; the accessibility content view also keeps its class when home closes so Touch Bar observers survive the transition

@@ -264,14 +264,8 @@ impl RoomAccess {
                             v.detail = Some(detail);
                             if created {
                                 let id = room.id;
-                                cx.defer(move |cx| {
-                                    for h in cx.windows() {
-                                        if let Some(home) = h.downcast::<crate::home::Home>() {
-                                            let _ = home.update(cx, |home, _, cx| {
-                                                home.select_room(id.clone(), cx)
-                                            });
-                                        }
-                                    }
+                                crate::home::with_home(cx, move |home, _, cx| {
+                                    home.select_room(id.clone(), cx)
                                 });
                             }
                         } else if matches!(performed, Action::Close) && !mutation_failed {
@@ -285,14 +279,8 @@ impl RoomAccess {
                                     cx.notify();
                                 });
                                 let id = id.clone();
-                                cx.defer(move |cx| {
-                                    for h in cx.windows() {
-                                        if let Some(home) = h.downcast::<crate::home::Home>() {
-                                            let _ = home.update(cx, |home, _, cx| {
-                                                home.forget_room(&id, cx)
-                                            });
-                                        }
-                                    }
+                                crate::home::with_home(cx, move |home, _, cx| {
+                                    home.forget_room(&id, cx)
                                 });
                             }
                         }
@@ -322,7 +310,12 @@ impl RoomAccess {
                             }
                         }
                     }
-                    Err(e) => v.error = Some(e.to_string()),
+                    Err(e) => {
+                        let recovered = Shell::global(cx)
+                            .update(cx, |s, cx| s.recover_auth(&e, args.session.as_deref(), cx));
+                        v.invalid_session |= recovered;
+                        v.error = Some(e.to_string());
+                    }
                 }
                 #[cfg(feature = "snapshot")]
                 v.export_test_state();
@@ -468,7 +461,10 @@ async fn execute(
         }
         Action::Close => request(&path, Some(json!({})), "DELETE").await,
     };
-    let error = mutation.err().map(|e| e.to_string());
+    let error = match mutation {
+        Err(e) if auth::unauthorized(&e) => return Err(e),
+        other => other.err().map(|e| e.to_string()),
+    };
     // Removal can persist revocation even when LiveKit disconnect fails. Refresh
     // that state, keep the error and offer retry instead of claiming success.
     if matches!(action, Action::Close) {
@@ -493,6 +489,7 @@ async fn execute(
             link,
             mutation_error: error,
         }),
+        Err(e) if auth::unauthorized(&e) => Err(e),
         // Don't lose a freshly issued single-use link if the follow-up read fails.
         Err(e) if link.is_some() => Ok(Reply {
             detail: None,
@@ -651,7 +648,7 @@ impl Render for RoomAccess {
             if let Some(expires) = d.room.expires {
                 let at = expires.max(0) as u64;
                 body = body.child(note(format!(
-                    "This call expires {} at {}.",
+                    "Available until {} at {} if unused. Active calls stay open.",
                     crate::store::day(at),
                     crate::store::clock(at)
                 )));
@@ -980,6 +977,47 @@ mod tests {
             task,
         )
     }
+    #[test]
+    fn room_actions_preserve_401_for_session_recovery() {
+        for (action, method, path) in [
+            (Action::Load, "GET", "/api/rooms/r"),
+            (Action::Keep, "POST", "/api/rooms/r/keep"),
+            (Action::Rename, "PATCH", "/api/rooms/r"),
+            (Action::Close, "DELETE", "/api/rooms/r"),
+            (
+                Action::Remove("guest".into()),
+                "DELETE",
+                "/api/rooms/r/members/guest",
+            ),
+        ] {
+            let (args, task) = server(vec![(method, path, 401, json!({"error":"expired"}))]);
+            let result = crate::test_support::block_on(execute(
+                &args,
+                Some("r"),
+                RoomKind::Private,
+                "Name",
+                "",
+                &action,
+            ));
+            assert!(auth::unauthorized(&result.err().unwrap()));
+            task.join().unwrap();
+        }
+        let (args, task) = server(vec![
+            ("PATCH", "/api/rooms/r", 200, json!({})),
+            ("GET", "/api/rooms/r", 401, json!({"error":"expired"})),
+        ]);
+        let result = crate::test_support::block_on(execute(
+            &args,
+            Some("r"),
+            RoomKind::Private,
+            "Name",
+            "",
+            &Action::Rename,
+        ));
+        assert!(auth::unauthorized(&result.err().unwrap()));
+        task.join().unwrap();
+    }
+
     fn room() -> Value {
         json!({"id":"room","name":"Project","kind":"private","owner":"owner"})
     }

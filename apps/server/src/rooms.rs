@@ -31,24 +31,38 @@ async fn room(db: &mut SqliteConnection, id: &str) -> Result<Room> {
         .await?
         .ok_or_else(AppError::missing)
 }
-async fn allowed(db: &mut SqliteConnection, r: &Room, p: &str) -> Result<bool> {
-    if r.owner == p {
-        return Ok(true);
-    }
-    let revoked: Option<bool> =
+async fn membership(
+    db: &mut SqliteConnection,
+    room: &str,
+    principal: &str,
+) -> Result<Option<bool>> {
+    Ok(
         sqlx::query_scalar("SELECT revoked FROM memberships WHERE room=? AND principal=?")
-            .bind(&r.id)
-            .bind(p)
-            .fetch_optional(&mut *db)
-            .await?;
-    if revoked == Some(true) {
-        return Ok(false);
+            .bind(room)
+            .bind(principal)
+            .fetch_optional(db)
+            .await?,
+    )
+}
+fn permits(r: &Room, principal: &str, revoked: Option<bool>) -> bool {
+    if r.owner == principal {
+        return true;
     }
-    Ok(match r.kind.as_str() {
+    if revoked == Some(true) {
+        return false;
+    }
+    match r.kind.as_str() {
         "public" => true,
-        "direct" => r.guest.as_deref() == Some(p),
+        "direct" => r.guest.as_deref() == Some(principal),
         _ => revoked == Some(false),
-    })
+    }
+}
+async fn allowed(db: &mut SqliteConnection, r: &Room, principal: &str) -> Result<bool> {
+    Ok(permits(
+        r,
+        principal,
+        membership(db, &r.id, principal).await?,
+    ))
 }
 async fn owned(s: &AppState, h: &HeaderMap, id: &str) -> Result<Room> {
     let p = auth::user(s, h).await?;
@@ -313,22 +327,13 @@ pub async fn entry(
         }
         Err(e) => return Err(e),
     };
-    let revoked = if let Some(p) = &p {
-        sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM memberships WHERE room=? AND principal=? AND revoked=1)",
-        )
-        .bind(&id)
-        .bind(&p.id)
-        .fetch_one(&mut *db)
-        .await?
+    let membership = if let Some(p) = &p {
+        membership(&mut db, &id, &p.id).await?
     } else {
-        false
+        None
     };
-    let already_allowed = if let Some(p) = &p {
-        allowed(&mut db, &r, &p.id).await?
-    } else {
-        false
-    };
+    let revoked = membership == Some(true);
+    let already_allowed = p.as_ref().is_some_and(|p| permits(&r, &p.id, membership));
     let state = if already_allowed {
         "ready"
     } else if let Some((kind, email, used)) = &invitation {
@@ -382,14 +387,9 @@ pub async fn join(
     let p = auth::current(&s, &h).await?;
     let mut tx = s.db.begin_with("BEGIN IMMEDIATE").await?;
     let mut r = room(&mut tx, &req.room).await?;
+    let membership = membership(&mut tx, &r.id, &p.id).await?;
     if r.kind == "direct" && r.owner != p.id && r.guest.is_none() {
-        let blocked: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM memberships WHERE room=? AND principal=? AND revoked=1)",
-        )
-        .bind(&r.id)
-        .bind(&p.id)
-        .fetch_one(&mut *tx)
-        .await?;
+        let blocked = membership == Some(true);
         if blocked {
             return Err(AppError::forbidden("Your access was removed"));
         }
@@ -403,7 +403,7 @@ pub async fn join(
         }
         r.guest = Some(p.id.clone());
     }
-    if !allowed(&mut tx, &r, &p.id).await? {
+    if !permits(&r, &p.id, membership) {
         return Err(AppError::forbidden(
             "This room is private, full, or your access was removed",
         ));
@@ -414,6 +414,9 @@ pub async fn join(
             .bind(&p.id)
             .execute(&mut *tx)
             .await?;
+    }
+    if r.expires.is_some() {
+        touch(&mut tx, &r.id).await?;
     }
     // LiveKit identities belong to connections, access belongs to principals.
     // The signed subject preserves this binding across LiveKit token refreshes.
@@ -475,9 +478,11 @@ pub async fn media_check(State(s): State<AppState>, h: HeaderMap) -> Result<Stat
     }
     let mut db = s.db.acquire().await?;
     // auth_request understands 401/403, not 404.
-    let r = room(&mut db, &claims.video.room)
-        .await
-        .map_err(|_| AppError::forbidden("Room unavailable"))?;
+    let r: Room = sqlx::query_as("SELECT * FROM rooms WHERE id=? AND closed=0")
+        .bind(&claims.video.room)
+        .fetch_optional(&mut *db)
+        .await?
+        .ok_or_else(|| AppError::forbidden("Room unavailable"))?;
     let principal = media_principal(&claims.sub);
     if !allowed(&mut db, &r, principal).await? {
         return Err(AppError::forbidden("Room access removed"));
@@ -488,6 +493,9 @@ pub async fn media_check(State(s): State<AppState>, h: HeaderMap) -> Result<Stat
         .await?;
     if !exists {
         return Err(AppError::unauthorized());
+    }
+    if r.expires.is_some() && !touch(&mut db, &r.id).await? {
+        return Err(AppError::forbidden("Room unavailable"));
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -505,20 +513,66 @@ pub async fn cleanup_invites(db: &sqlx::SqlitePool) -> Result<()> {
         .await?;
     Ok(())
 }
+/// Renew temporary room activity; closed rooms are never resurrected.
+async fn touch(db: &mut SqliteConnection, id: &str) -> Result<bool> {
+    Ok(sqlx::query("UPDATE rooms SET expires=CASE WHEN expires IS NOT NULL THEN ? ELSE NULL END,empty_since=NULL,cleanup_after=0 WHERE id=? AND closed=0")
+        .bind(now()+86400).bind(id).execute(db).await?.rows_affected() == 1)
+}
 pub async fn cleanup_quick_calls(s: &AppState) -> Result<()> {
-    let expired: Vec<Room> =
-        sqlx::query_as("SELECT * FROM rooms WHERE closed=0 AND expires<=? LIMIT 100")
-            .bind(now())
-            .fetch_all(&s.db)
-            .await?;
+    let expired: Vec<Room> = sqlx::query_as("SELECT * FROM rooms WHERE expires<=? AND cleanup_after<=? ORDER BY cleanup_after,expires,id LIMIT 100")
+        .bind(now()+600).bind(now()).fetch_all(&s.db).await?;
     for room in expired {
-        livekit(s, "DeleteRoom", &room, None).await?;
-        sqlx::query("UPDATE rooms SET closed=1 WHERE id=? AND expires<=?")
+        // Move this room behind unattempted work even if LiveKit fails. Process
+        // every candidate independently; retry closed rooms until deletion works.
+        sqlx::query("UPDATE rooms SET cleanup_after=? WHERE id=? AND cleanup_after IS NOT NULL")
+            .bind(now() + 600)
             .bind(&room.id)
-            .bind(now())
             .execute(&s.db)
             .await?;
+        if let Err(e) = cleanup_quick_call(s, &room).await {
+            tracing::warn!(room = %room.id, "quick call cleanup: {}", e.message);
+        }
     }
+    Ok(())
+}
+async fn cleanup_quick_call(s: &AppState, room: &Room) -> Result<()> {
+    if !room.closed {
+        let active = livekit(s, "ListParticipants", room, None).await?;
+        let occupied = match active.get("participants") {
+            Some(Value::Array(participants)) => !participants.is_empty(),
+            None if active.is_object() => false, // omitted empty protobuf list
+            _ => {
+                return Err(AppError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "Invalid room presence response",
+                ));
+            }
+        };
+        if occupied {
+            touch(&mut *s.db.acquire().await?, &room.id).await?;
+            return Ok(());
+        }
+        // Two empty observations ten minutes apart leave room for reconnects.
+        sqlx::query("UPDATE rooms SET empty_since=COALESCE(empty_since,?) WHERE id=? AND closed=0 AND expires<=?")
+            .bind(now()).bind(&room.id).bind(now()).execute(&s.db).await?;
+        let closed = sqlx::query(
+            "UPDATE rooms SET closed=1 WHERE id=? AND closed=0 AND expires<=? AND empty_since<=?",
+        )
+        .bind(&room.id)
+        .bind(now())
+        .bind(now() - 600)
+        .execute(&s.db)
+        .await?
+        .rows_affected();
+        if closed == 0 {
+            return Ok(());
+        } // renewed, kept, or still in the grace period
+    }
+    livekit(s, "DeleteRoom", room, None).await?;
+    sqlx::query("UPDATE rooms SET cleanup_after=NULL WHERE id=? AND closed=1")
+        .bind(&room.id)
+        .execute(&s.db)
+        .await?;
     Ok(())
 }
 

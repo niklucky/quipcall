@@ -14,6 +14,8 @@ struct Test {
     participants: Arc<std::sync::Mutex<Vec<String>>>,
     disconnected: Arc<std::sync::Mutex<Vec<String>>>,
     fail_disconnect: Arc<std::sync::atomic::AtomicBool>,
+    fail_rooms: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    deleted_rooms: Arc<std::sync::Mutex<Vec<String>>>,
 }
 impl Test {
     async fn new() -> Self {
@@ -24,6 +26,9 @@ impl Test {
         let participants = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let disconnected = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let fail_disconnect = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fail_rooms = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let deleted_rooms = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (failed_rooms, deleted) = (fail_rooms.clone(), deleted_rooms.clone());
         let (active, removed, fail) = (
             participants.clone(),
             disconnected.clone(),
@@ -34,7 +39,22 @@ impl Test {
                 listener,
                 Router::new().fallback(move |uri: axum::http::Uri, Json(body): Json<Value>| {
                     let (active, removed, fail) = (active.clone(), removed.clone(), fail.clone());
+                    let (failed_rooms, deleted) = (failed_rooms.clone(), deleted.clone());
                     async move {
+                        if uri.path().ends_with("DeleteRoom")
+                            && failed_rooms
+                                .lock()
+                                .unwrap()
+                                .contains(body["room"].as_str().unwrap_or_default())
+                        {
+                            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({})));
+                        }
+                        if uri.path().ends_with("DeleteRoom") {
+                            deleted
+                                .lock()
+                                .unwrap()
+                                .push(body["room"].as_str().unwrap().to_owned());
+                        }
                         if uri.path().ends_with("ListParticipants") {
                             let participants: Vec<_> = active
                                 .lock()
@@ -42,7 +62,12 @@ impl Test {
                                 .iter()
                                 .map(|id| json!({"identity":id}))
                                 .collect();
-                            return (StatusCode::OK, Json(json!({"participants":participants})));
+                            let response = if participants.is_empty() {
+                                json!({})
+                            } else {
+                                json!({"participants":participants})
+                            };
+                            return (StatusCode::OK, Json(response));
                         }
                         if uri.path().ends_with("RemoveParticipant") {
                             if fail.load(std::sync::atomic::Ordering::Relaxed) {
@@ -81,6 +106,8 @@ impl Test {
             participants,
             disconnected,
             fail_disconnect,
+            fail_rooms,
+            deleted_rooms,
         }
     }
     async fn req(
@@ -1364,11 +1391,19 @@ async fn desktop_session_replacement_revokes_only_the_previous_mac_credential() 
     let new = result["token"].as_str().unwrap();
     assert_eq!(
         t.req("GET", "/api/auth/me", &old, json!({})).await.0,
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        t.req("GET", "/api/auth/me", new, json!({})).await.0,
         StatusCode::OK
+    );
+    // Only using the stored replacement activates it. Parallel initial requests
+    // can both succeed, but the old credential is revoked once.
+    let (me, rooms) = tokio::join!(
+        t.req("GET", "/api/auth/me", new, json!({})),
+        t.req("GET", "/api/rooms", new, json!({}))
+    );
+    assert_eq!(me.0, StatusCode::OK);
+    assert_eq!(rooms.0, StatusCode::OK);
+    assert_eq!(
+        t.req("GET", "/api/auth/me", &old, json!({})).await.0,
+        StatusCode::UNAUTHORIZED
     );
     assert_eq!(
         t.req("GET", "/api/auth/me", &browser, json!({})).await.0,
@@ -1587,7 +1622,14 @@ async fn temporary_direct_calls_expire_and_only_the_owner_can_keep_them() {
             .1["state"],
         "unavailable"
     );
-    assert_eq!(t.gate(&token).await, StatusCode::FORBIDDEN);
+    // A previously admitted connection can recover through the handshake gate.
+    assert_eq!(t.gate(&token).await, StatusCode::NO_CONTENT);
+    sqlx::query("UPDATE rooms SET expires=? WHERE id=?")
+        .bind(auth::now() - 1)
+        .bind(&quick)
+        .execute(&t.state.db)
+        .await
+        .unwrap();
     assert_eq!(
         t.req(
             "POST",
@@ -1600,6 +1642,21 @@ async fn temporary_direct_calls_expire_and_only_the_owner_can_keep_them() {
         StatusCode::NOT_FOUND
     );
     rooms::cleanup_quick_calls(&t.state).await.unwrap();
+    assert!(
+        !sqlx::query_scalar::<_, bool>("SELECT closed FROM rooms WHERE id=?")
+            .bind(&quick)
+            .fetch_one(&t.state.db)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE rooms SET empty_since=?,cleanup_after=0 WHERE id=?")
+        .bind(auth::now() - 601)
+        .bind(&quick)
+        .execute(&t.state.db)
+        .await
+        .unwrap();
+    rooms::cleanup_quick_calls(&t.state).await.unwrap();
+    assert_eq!(t.gate(&token).await, StatusCode::FORBIDDEN);
     assert!(
         sqlx::query_scalar::<_, bool>("SELECT closed FROM rooms WHERE id=?")
             .bind(&quick)
@@ -1701,4 +1758,113 @@ async fn mail_retries_are_bounded_and_dont_spin_on_permanent_failure() {
             .unwrap(),
         5
     );
+}
+
+#[tokio::test]
+async fn abandoned_desktop_exchanges_keep_the_previous_session_usable() {
+    let t = Test::new().await;
+    let browser = t.admin().await;
+    let (old, _) = t.guest("Mac").await;
+    for cancel in [false, true] {
+        let challenge = t
+            .req("POST", "/api/auth/desktop/start", "", json!({}))
+            .await
+            .1;
+        t.req(
+            "POST",
+            "/api/auth/desktop/approve",
+            &browser,
+            challenge.clone(),
+        )
+        .await;
+        let issued = t
+            .req("POST", "/api/auth/desktop/poll", &old, challenge)
+            .await
+            .1;
+        let new = issued["token"].as_str().unwrap();
+        if cancel {
+            t.req("POST", "/api/auth/logout", new, json!({})).await;
+        } else {
+            // Lost response: the provisional credential expires unused.
+            sqlx::query("UPDATE sessions SET expires=0 WHERE hash=?")
+                .bind(auth::hash(new))
+                .execute(&t.state.db)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            t.req("GET", "/api/auth/me", new, json!({})).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            t.req("GET", "/api/auth/me", &old, json!({})).await.0,
+            StatusCode::OK
+        );
+    }
+}
+
+#[tokio::test]
+async fn cleanup_is_fair_retries_failures_and_preserves_active_calls() {
+    let t = Test::new().await;
+    let owner = t.admin().await;
+    let active = t.room(&owner, "direct").await;
+    let owner_id = t.req("GET", "/api/auth/me", &owner, json!({})).await.1["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Joining near the deadline renews it for a full day of activity.
+    sqlx::query("UPDATE rooms SET expires=? WHERE id=?")
+        .bind(auth::now() + 1)
+        .bind(&active)
+        .execute(&t.state.db)
+        .await
+        .unwrap();
+    let token = t.join(&owner, &active).await.1["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let deadline: i64 = sqlx::query_scalar("SELECT expires FROM rooms WHERE id=?")
+        .bind(&active)
+        .fetch_one(&t.state.db)
+        .await
+        .unwrap();
+    assert!(deadline >= auth::now() + 86399);
+    // An uninterrupted long call also stays open without a fresh API join.
+    t.participants
+        .lock()
+        .unwrap()
+        .push("still-connected".into());
+    sqlx::query("UPDATE rooms SET expires=? WHERE id=?")
+        .bind(auth::now() - 1)
+        .bind(&active)
+        .execute(&t.state.db)
+        .await
+        .unwrap();
+    rooms::cleanup_quick_calls(&t.state).await.unwrap();
+    assert!(t.deleted_rooms.lock().unwrap().is_empty());
+    assert_eq!(t.gate(&token).await, StatusCode::NO_CONTENT);
+    t.participants.lock().unwrap().clear();
+    // More failing rooms than a batch must not starve the healthy tail.
+    for i in 0..102 {
+        let id = format!("expired-{i:03}");
+        sqlx::query("INSERT INTO rooms(id,name,kind,owner,expires,empty_since) VALUES (?,'test','direct',?,?,?)")
+            .bind(&id).bind(&owner_id).bind(auth::now()-900).bind(auth::now()-700).execute(&t.state.db).await.unwrap();
+        if i < 100 {
+            t.fail_rooms.lock().unwrap().insert(id);
+        }
+    }
+    rooms::cleanup_quick_calls(&t.state).await.unwrap();
+    rooms::cleanup_quick_calls(&t.state).await.unwrap();
+    assert_eq!(t.deleted_rooms.lock().unwrap().len(), 2);
+    t.fail_rooms.lock().unwrap().clear();
+    sqlx::query(
+        "UPDATE rooms SET cleanup_after=0 WHERE id LIKE 'expired-%' AND cleanup_after IS NOT NULL",
+    )
+    .execute(&t.state.db)
+    .await
+    .unwrap();
+    rooms::cleanup_quick_calls(&t.state).await.unwrap();
+    assert_eq!(t.deleted_rooms.lock().unwrap().len(), 102);
+    rooms::cleanup_quick_calls(&t.state).await.unwrap();
+    assert_eq!(t.deleted_rooms.lock().unwrap().len(), 102); // completed work stays done
 }

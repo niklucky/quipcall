@@ -1,4 +1,5 @@
 //! Application HTTP on the same runtime as calls, usable from any UI executor.
+pub use futures_util::future::join;
 pub use reqwest::Url;
 use serde_json::Value;
 use std::{sync::OnceLock, time::Duration};

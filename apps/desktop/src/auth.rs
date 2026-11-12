@@ -68,8 +68,17 @@ pub struct SignInAttempt {
     generation: u64,
     pub pending: bool,
     pub code: Option<String>,
+    room: Option<String>,
 }
 impl SignInAttempt {
+    fn request(&mut self, room: Option<String>) -> Option<u64> {
+        if self.pending && room.is_none() {
+            return None;
+        }
+        let generation = self.start();
+        self.room = room;
+        Some(generation)
+    }
     fn start(&mut self) -> u64 {
         self.cancel();
         self.pending = true;
@@ -82,6 +91,7 @@ impl SignInAttempt {
         self.generation += 1;
         self.pending = false;
         self.code = None;
+        self.room = None;
     }
     fn finish(&mut self, generation: u64) -> bool {
         if !self.current(generation) {
@@ -135,6 +145,32 @@ impl PendingOperation {
         self.active.is_some()
     }
 }
+async fn load_account(
+    server: &str,
+    session: Option<&str>,
+) -> anyhow::Result<(Principal, Vec<SavedRoom>)> {
+    let (principal, rooms) = quipcall_core::http::join(
+        request(server, session, "/auth/me", None, "GET"),
+        request(server, session, "/rooms", None, "GET"),
+    )
+    .await;
+    // A 401 takes precedence over an unrelated transport error from its peer.
+    if let Err(e) = &principal
+        && unauthorized(e)
+    {
+        return Err(principal.unwrap_err());
+    }
+    if let Err(e) = &rooms
+        && unauthorized(e)
+    {
+        return Err(rooms.unwrap_err());
+    }
+    Ok((
+        serde_json::from_value(principal?)?,
+        serde_json::from_value(rooms?)?,
+    ))
+}
+
 impl Shell {
     pub fn auth_busy(&self) -> bool {
         self.auth_attempt.pending || self.room_creation.pending()
@@ -156,11 +192,31 @@ impl Shell {
         true
     }
 
-    pub fn sign_in(&mut self, room: Option<String>, cx: &mut Context<Self>) {
-        if self.auth_busy() {
-            return;
+    pub(crate) fn recover_auth(
+        &mut self,
+        error: &anyhow::Error,
+        expected: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !unauthorized(error) {
+            return false;
         }
-        let generation = self.auth_attempt.start();
+        if self.expire_session(expected, cx) {
+            self.sign_in(None, cx);
+        }
+        true
+    }
+
+    pub fn sign_in(&mut self, room: Option<String>, cx: &mut Context<Self>) {
+        if self.room_creation.pending() {
+            if room.is_none() {
+                return;
+            }
+            self.room_creation.cancel();
+        }
+        let Some(generation) = self.auth_attempt.request(room.clone()) else {
+            return;
+        };
         self.auth_message = "Opening browser sign-in…".into();
         cx.notify();
         let args = self.args.clone();
@@ -257,13 +313,13 @@ impl Shell {
             let issued = result.as_ref().ok().map(|(token, _)| token.clone());
             let installed = this
                 .update(cx, |s, cx| {
+                    let room = s.auth_attempt.room.clone();
                     if !s.auth_attempt.finish(generation) {
                         return false;
                     }
                     match result {
                         Ok((token, p)) => {
                             if let Err(e) = save(&s.args.server, &token) {
-                                s.expire_session(args.session.as_deref(), cx);
                                 s.auth_message = format!("Cannot save session in Keychain: {e}");
                                 cx.notify();
                                 return false;
@@ -309,23 +365,7 @@ impl Shell {
         }
         let expected = args.session.clone();
         cx.spawn(async move |this, cx| {
-            let result = async {
-                let p: Principal = serde_json::from_value(
-                    request(
-                        &args.server,
-                        args.session.as_deref(),
-                        "/auth/me",
-                        None,
-                        "GET",
-                    )
-                    .await?,
-                )?;
-                let rooms: Vec<SavedRoom> = serde_json::from_value(
-                    request(&args.server, args.session.as_deref(), "/rooms", None, "GET").await?,
-                )?;
-                Ok::<_, anyhow::Error>((p, rooms))
-            }
-            .await;
+            let result = load_account(&args.server, args.session.as_deref()).await;
             let _ = this.update(cx, |s, cx| {
                 if s.args.session != expected {
                     return;
@@ -472,7 +512,11 @@ impl Shell {
                             s.store.save();
                         }
                     }
-                    Err(e) => s.auth_message = e.to_string(),
+                    Err(e) => {
+                        if !s.recover_auth(&e, expected.as_deref(), cx) {
+                            s.auth_message = e.to_string();
+                        }
+                    }
                 }
                 cx.notify();
             });
@@ -502,7 +546,11 @@ impl Shell {
                         s.store.rename_room(&id, &name);
                         s.store.save();
                     }
-                    Err(e) => s.auth_message = e.to_string(),
+                    Err(e) => {
+                        if !s.recover_auth(&e, expected.as_deref(), cx) {
+                            s.auth_message = e.to_string();
+                        }
+                    }
                 }
                 cx.notify();
             });
@@ -518,6 +566,74 @@ mod tests {
         io::{Read, Write},
         net::TcpListener,
     };
+
+    #[test]
+    fn room_handoff_restarts_pending_approval_and_rejects_old_results() {
+        let mut attempt = SignInAttempt::default();
+        let home = attempt.request(None).unwrap();
+        assert!(attempt.request(None).is_none());
+        let linked = attempt.request(Some("room-a".into())).unwrap();
+        assert!(!attempt.finish(home));
+        assert_eq!(attempt.room.as_deref(), Some("room-a"));
+        let newer = attempt.request(Some("room-b".into())).unwrap();
+        assert!(!attempt.finish(linked));
+        assert_eq!(attempt.room.as_deref(), Some("room-b"));
+        assert!(attempt.current(newer));
+        attempt.cancel();
+        assert!(attempt.room.is_none());
+    }
+    #[test]
+    fn profile_and_rooms_refresh_are_in_flight_together() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let responder = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut sockets = vec![];
+            while sockets.len() < 2 {
+                match listener.accept() {
+                    Ok((stream, _)) => sockets.push(stream),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "second request waited for first response"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            }
+            for mut stream in sockets {
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let mut headers = vec![];
+                let mut byte = [0];
+                while !headers.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    headers.push(byte[0]);
+                }
+                let headers = String::from_utf8(headers).unwrap();
+                let body = if headers.starts_with("GET /api/auth/me ") {
+                    r#"{"id":"me","name":"Me","kind":"user"}"#
+                } else {
+                    assert!(headers.starts_with("GET /api/rooms "));
+                    "[]"
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let (p, rooms) =
+            crate::test_support::block_on(load_account(&server, Some("session"))).unwrap();
+        assert_eq!(p.id, "me");
+        assert!(rooms.is_empty());
+        responder.join().unwrap();
+    }
 
     #[test]
     fn expired_create_releases_busy_without_unlocking_a_newer_operation() {

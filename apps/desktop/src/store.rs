@@ -241,10 +241,12 @@ impl Store {
     }
 
     pub fn is_bookmarked(&self, id: &str) -> bool {
-        self.rooms_principal
-            .as_ref()
-            .and_then(|p| self.bookmarks.get(p))
-            .is_some_and(|b| b.contains_key(id))
+        !self.is_hidden(id)
+            && self
+                .rooms_principal
+                .as_ref()
+                .and_then(|p| self.bookmarks.get(p))
+                .is_some_and(|b| b.contains_key(id))
     }
     fn alias(&self, id: &str) -> Option<&String> {
         self.rooms_principal
@@ -266,7 +268,7 @@ impl Store {
             .cloned()
             .unwrap_or_default();
         for (id, name) in bookmarks {
-            if !self.rooms.iter().any(|r| r.id == id) {
+            if !self.is_hidden(&id) && !self.rooms.iter().any(|r| r.id == id) {
                 self.rooms.push(SavedRoom {
                     id,
                     name,
@@ -275,20 +277,42 @@ impl Store {
             }
         }
     }
-    pub fn cache_room(&mut self, mut room: SavedRoom) {
-        if self
-            .rooms_principal
+    pub fn owns_room(&self, id: &str) -> bool {
+        self.rooms.iter().any(|r| {
+            r.id == id && !r.owner.is_empty() && self.rooms_principal.as_deref() == Some(&r.owner)
+        })
+    }
+    fn is_hidden(&self, id: &str) -> bool {
+        self.rooms_principal
             .as_ref()
             .and_then(|p| self.hidden_rooms.get(p))
-            .is_some_and(|hidden| hidden.contains(&room.id))
-        {
+            .is_some_and(|h| h.contains(id))
+    }
+    pub fn has_hidden_rooms(&self) -> bool {
+        self.rooms_principal
+            .as_ref()
+            .and_then(|p| self.hidden_rooms.get(p))
+            .is_some_and(|h| !h.is_empty())
+    }
+    pub fn restore_hidden_rooms(&mut self) {
+        if let Some(p) = &self.rooms_principal {
+            self.hidden_rooms.remove(p);
+        }
+        let rooms = std::mem::take(&mut self.rooms);
+        self.refresh_rooms(rooms);
+    }
+    pub fn cache_room(&mut self, mut room: SavedRoom) {
+        if self.is_hidden(&room.id) {
             return;
         }
         if room.kind == RoomKind::Direct && room.expires.is_some() && !self.is_bookmarked(&room.id)
         {
             return;
         }
-        if let Some(name) = self.alias(&room.id) {
+        if !room.owner.is_empty() && self.rooms_principal.as_deref() == Some(&room.owner) {
+            // Owner names are shared; aliases are only for someone else's room.
+            self.rename_bookmark(&room.id, &room.name);
+        } else if let Some(name) = self.alias(&room.id) {
             room.name.clone_from(name);
         }
         if let Some(existing) = self.rooms.iter_mut().find(|r| r.id == room.id) {
@@ -324,17 +348,19 @@ impl Store {
                 .insert(id.to_owned());
         }
         self.rooms.retain(|r| r.id != id);
-        if let Some(bookmarks) = self
-            .rooms_principal
-            .as_ref()
-            .and_then(|p| self.bookmarks.get_mut(p))
-        {
-            bookmarks.remove(id);
-        }
     }
 
     pub fn rename_room(&mut self, id: &str, name: &str) {
         let name = name.trim();
+        if self.owns_room(id)
+            && let Some(alias) = self
+                .rooms_principal
+                .as_ref()
+                .and_then(|p| self.bookmarks.get_mut(p))
+                .and_then(|b| b.get_mut(id))
+        {
+            *alias = name.to_owned();
+        }
         if name.is_empty() {
             return;
         }
@@ -559,6 +585,54 @@ mod tests {
     use super::{SavedRoom, Store, civil_from_days, file_size};
 
     #[test]
+    fn owned_bookmarks_follow_shared_names_but_other_rooms_keep_local_aliases() {
+        let mut store = Store::default();
+        store.bind_rooms(Some("me"));
+        store.keep_room("owned", "Old alias");
+        let mut room = SavedRoom {
+            id: "owned".into(),
+            name: "Shared name".into(),
+            owner: "me".into(),
+            ..Default::default()
+        };
+        store.cache_room(room.clone());
+        assert!(store.owns_room("owned"));
+        assert_eq!(store.rooms[0].name, "Shared name");
+        store.rename_room("owned", "Home rename");
+        assert_eq!(store.alias("owned").unwrap(), "Home rename");
+        room.name = "Access rename".into();
+        store.refresh_rooms(vec![room]);
+        assert_eq!(store.rooms[0].name, "Access rename");
+        store.refresh_rooms(vec![]);
+        assert_eq!(store.rooms[0].name, "Access rename");
+    }
+    #[test]
+    fn hidden_rooms_without_history_and_local_links_can_be_restored() {
+        let mut store = Store::default();
+        store.bind_rooms(Some("me"));
+        let room = SavedRoom {
+            id: "never-called".into(),
+            owner: "me".into(),
+            ..Default::default()
+        };
+        store.cache_room(room.clone());
+        store.remove_room(&room.id);
+        store.keep_room("local-link", "Local alias");
+        store.remove_room("local-link");
+        let mut store: Store =
+            serde_json::from_slice(&serde_json::to_vec(&store).unwrap()).unwrap();
+        store.refresh_rooms(vec![room.clone()]);
+        assert!(store.rooms.is_empty());
+        assert!(store.has_hidden_rooms());
+        store.restore_hidden_rooms();
+        store.refresh_rooms(vec![room]);
+        assert_eq!(store.rooms.len(), 2);
+        assert_eq!(store.alias("local-link").unwrap(), "Local alias");
+        assert!(store.history.is_empty());
+        assert!(!store.has_hidden_rooms());
+    }
+
+    #[test]
     fn kept_link_and_local_alias_survive_refresh_and_account_switches() {
         let mut store = Store::default();
         store.bind_rooms(Some("me"));
@@ -618,7 +692,7 @@ mod tests {
     fn quick_calls_are_not_saved_until_kept_even_after_refresh() {
         let mut store = Store::default();
         store.bind_rooms(Some("owner"));
-        let direct = SavedRoom {
+        let mut direct = SavedRoom {
             id: "quick".into(),
             name: "Quick call".into(),
             kind: super::RoomKind::Direct,
@@ -630,6 +704,9 @@ mod tests {
         store.refresh_rooms(vec![direct.clone()]);
         assert!(store.rooms.is_empty());
         assert!(store.keep_room("quick", "Catch-up"));
+        // Keeping and renaming an owned room now changes its server metadata.
+        direct.expires = None;
+        direct.name = "Catch-up".into();
         store.refresh_rooms(vec![direct]);
         assert_eq!(store.rooms.len(), 1);
         assert_eq!(store.rooms[0].name, "Catch-up");
