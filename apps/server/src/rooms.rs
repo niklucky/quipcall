@@ -437,6 +437,7 @@ pub async fn join(
         .to_jwt()?;
     tx.commit().await?;
     Ok(Json(quipcall_protocol::JoinInfo {
+        room_name: Some(r.name),
         url: s.config.livekit_public_url.clone(),
         token,
         identity,
@@ -496,7 +497,7 @@ pub async fn media_check(State(s): State<AppState>, h: HeaderMap) -> Result<Stat
     if !exists {
         return Err(AppError::unauthorized());
     }
-    if r.expires.is_some() && !touch(&mut db, &r.id).await? {
+    if r.expires.is_some_and(|expires| expires < now() + 43200) && !touch(&mut db, &r.id).await? {
         return Err(AppError::forbidden("Room unavailable"));
     }
     Ok(StatusCode::NO_CONTENT)

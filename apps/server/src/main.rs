@@ -15,7 +15,7 @@ use axum::{
 use config::Config;
 use sqlx::{
     SqlitePool,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 use std::{sync::Arc, time::Duration};
 use tracing_subscriber::EnvFilter;
@@ -37,9 +37,10 @@ impl AppState {
         // Keep the alpha pool small; claims use explicit write transactions and
         // checked conditional updates independently of the pool size.
         let db = SqlitePoolOptions::new()
-            .max_connections(1)
+            .max_connections(4)
             .connect_with(
                 opts.create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Wal)
                     .foreign_keys(true)
                     .busy_timeout(Duration::from_secs(5)),
             )
@@ -101,22 +102,27 @@ async fn guard(State(s): State<AppState>, req: Request, next: Next) -> Response 
         }
     }
     if req.uri().path().starts_with("/api/auth/") && req.method() != axum::http::Method::GET {
-        // nginx replaces X-Real-IP; the API listener is loopback-only in deploy.
-        let ip = req
-            .headers()
-            .get("x-real-ip")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("local");
+        let ip = auth::client_ip(req.headers());
         let (bucket, limit) = if req.uri().path() == "/api/auth/desktop/poll" {
             ("desktop-poll-ip", 1800)
         } else {
             ("auth-ip", 120)
         };
-        if let Err(e) = auth::rate(&s, &format!("{bucket}:{}", auth::hash(ip)), limit, 60).await {
+        if let Err(e) = auth::rate(&s, &format!("{bucket}:{ip}"), limit, 60).await {
             return e.into_response();
         }
     }
+    let cookie_token = (!req.headers().contains_key(header::AUTHORIZATION))
+        .then(|| auth::credential(req.headers()).map(str::to_owned))
+        .flatten();
     let mut res = next.run(req).await;
+    if !res.headers().contains_key(header::SET_COOKIE)
+        && let Some(token) = cookie_token
+        && let Ok(Some(cookie)) = auth::renewed_cookie(&s, &token).await
+    {
+        res.headers_mut()
+            .insert(header::SET_COOKIE, cookie.parse().expect("session cookie"));
+    }
     res.headers_mut()
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     res.headers_mut()

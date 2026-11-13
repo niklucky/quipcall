@@ -390,6 +390,17 @@ impl Call {
                 call.waiting_for = None;
                 match result {
                     Ok(info) => {
+                        if let Some(name) = info
+                            .room_name
+                            .as_deref()
+                            .filter(|name| !name.trim().is_empty())
+                        {
+                            // Preserve an explicitly saved local alias, otherwise
+                            // use the authoritative name for header and history.
+                            if call.room.one_time {
+                                call.room.name = name.to_owned();
+                            }
+                        }
                         call.me.update(cx, |me, cx| {
                             me.identity = info.identity.clone();
                             cx.notify();

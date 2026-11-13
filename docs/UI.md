@@ -42,7 +42,7 @@ The browser starts with microphone and camera off. Guests can enter their name, 
 
 After accepting an invitation, the address becomes the ordinary room link so the same browser can return. Unclaimed invitations survive reload and sign-in in the current history entry. Consumed or expired invitations, removed access, full 1-to-1 calls and unavailable/private rooms have distinct recovery screens. Member invitations ask for the invited account before claiming access. The layout adapts to small screens and keeps the room name above the preview.
 
-**Open in the Mac app** uses `quipcall://open/<room>` (build 56+) to request explicit browser approval, even when a different identity is already signed in on the Mac. The private polling proof exchanges the browser identity for a Keychain session; session tokens never appear in the link. Complete approval in the browser where the invitation was accepted, using the code displayed in the Mac app. Existing `quipcall://join/<room>` links still join using the Mac's current identity.
+**Open in the Mac app** uses `quipcall://open/<room>` with the Mac’s current identity, as `quipcall://join/<room>` does. Missing or expired credentials open browser approval; switching an existing identity is an explicit action under Account. A private invitation is still claimed in the browser first, so if it belongs to a different identity, switch the Mac account deliberately before joining. Session tokens never appear in the link.
 
 ## Room access
 
@@ -118,3 +118,5 @@ One window (1040 × 680): the room's name and the call's time in the title bar, 
 
 - *Transcription*: the language spoken (Auto-detect, or one of thirteen, which suggests the model that knows it best and greys out the others), the model (Parakeet v3 or Qwen3-ASR, each with what it's good at, whether it's on this Mac, and Download, Cancel or Remove), *Try it with your voice* (up to 30 s of your microphone through the model, drafts in grey, nothing kept), whether the transcript window opens by itself, whether this Mac starts when someone asks, and the models' credits.
 - *Recording*: what Record offers first (Audio, or Audio and screen), each voice in its own file too, and the folder (Show in Finder, Change…).
+
+Home keeps account switching, sign-out and name editing behind the profile row’s Account button. Pending approval and errors remain visible. The room list refreshes when Home gains focus. Opening a room link preserves the Mac’s signed-in identity; approval is only needed for missing/expired credentials or an explicit switch. Unsaved calls show the server-provided room name in the call and history.

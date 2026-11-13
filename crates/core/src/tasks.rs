@@ -25,7 +25,7 @@ struct Inner {
 struct State {
     next: u64,
     closed: bool,
-    active: BTreeMap<u64, AbortHandle>,
+    active: BTreeMap<u64, Option<AbortHandle>>,
 }
 struct Finished(Weak<Inner>, u64);
 impl Drop for Finished {
@@ -60,15 +60,29 @@ impl Tasks {
         }
         state.next += 1;
         let id = state.next;
+        state.active.insert(id, None);
+        drop(state);
         let finished = Finished(Arc::downgrade(&self.0), id);
+        // Register before polling user code; neither spawn nor future destruction
+        // may run while the registry mutex is held.
+        let (start, registered) = tokio::sync::oneshot::channel();
         let task = self
             .0
             .runtime
             .spawn(CURRENT.scope(self.clone(), async move {
                 let _finished = finished;
+                let _ = registered.await;
                 future.await
             }));
-        state.active.insert(id, task.abort_handle());
+        let mut state = self.0.state.lock();
+        if let Some(slot) = state.active.get_mut(&id) {
+            *slot = Some(task.abort_handle());
+        }
+        if state.closed {
+            task.abort();
+        } else {
+            let _ = start.send(());
+        }
         task
     }
 
@@ -84,7 +98,7 @@ impl Tasks {
     pub fn cancel(&self) {
         let mut state = self.0.state.lock();
         state.closed = true;
-        for task in state.active.values() {
+        for task in state.active.values().flatten() {
             task.abort();
         }
         self.0.cancelled.notify_waiters();
@@ -120,6 +134,27 @@ mod tests {
         fn drop(&mut self) {
             let _ = self.0.try_send(());
         }
+    }
+
+    #[test]
+    fn spawning_after_runtime_shutdown_cannot_deadlock_or_leave_a_registry_entry() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let tasks = Tasks::new(runtime.handle().clone());
+        runtime.shutdown_background(); // Deliberately skip Tasks::cancel.
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let handle = tasks.spawn(async { panic!("closed runtime polled work") });
+            crate::runtime().unwrap().block_on(async {
+                assert!(handle.await.unwrap_err().is_cancelled());
+                tasks.shutdown().await;
+            });
+            assert!(tasks.0.state.lock().active.is_empty());
+            done.send(()).unwrap();
+        });
+        result.recv_timeout(Duration::from_secs(2)).unwrap();
     }
 
     #[test]

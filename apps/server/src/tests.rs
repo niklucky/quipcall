@@ -2102,3 +2102,147 @@ async fn stalled_media_cleanup_does_not_delay_auth_housekeeping() {
     }
     service.abort();
 }
+
+#[tokio::test]
+async fn media_admission_reads_while_unrelated_writer_holds_a_transaction() {
+    let t = Test::new().await;
+    let owner = t.admin().await;
+    for kind in ["public", "direct"] {
+        let room = t.room(&owner, kind).await;
+        let joined = t.join(&owner, &room).await.1;
+        assert_eq!(joined["room_name"], "Project");
+        let mut writer = t.state.db.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("INSERT INTO rate_limits VALUES ('held-writer',0,1,0)")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                t.gate(joined["token"].as_str().unwrap())
+            )
+            .await
+            .unwrap(),
+            StatusCode::NO_CONTENT
+        );
+        writer.rollback().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn active_sessions_renew_without_reviving_expired_or_logged_out_credentials() {
+    let t = Test::new().await;
+    let owner = t.admin().await;
+    let (guest, _) = t.guest("Guest").await;
+    for (token, lifetime) in [(&owner, 30 * 86400), (&guest, 365 * 86400)] {
+        let hash = auth::hash(token);
+        sqlx::query("UPDATE sessions SET expires=? WHERE hash=?")
+            .bind(auth::now() + lifetime / 2 - 10)
+            .bind(&hash)
+            .execute(&t.state.db)
+            .await
+            .unwrap();
+        // Browser response must extend the cookie too, not just the DB row.
+        let response = t
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auth/me")
+                    .header("cookie", format!("qc_session={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response.headers()["set-cookie"].to_str().unwrap();
+        let age: i64 = cookie
+            .split("Max-Age=")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(age >= lifetime - 2);
+        let expiry: i64 = sqlx::query_scalar("SELECT expires FROM sessions WHERE hash=?")
+            .bind(&hash)
+            .fetch_one(&t.state.db)
+            .await
+            .unwrap();
+        assert!(expiry >= auth::now() + lifetime - 2);
+        assert_eq!(
+            t.req("GET", "/api/auth/me", token, json!({})).await.0,
+            StatusCode::OK
+        );
+        let unchanged: i64 = sqlx::query_scalar("SELECT expires FROM sessions WHERE hash=?")
+            .bind(&hash)
+            .fetch_one(&t.state.db)
+            .await
+            .unwrap();
+        assert_eq!(expiry, unchanged, "fresh sessions need no renewal write");
+        sqlx::query("UPDATE sessions SET expires=0 WHERE hash=?")
+            .bind(&hash)
+            .execute(&t.state.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            t.req("GET", "/api/auth/me", token, json!({})).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(
+            auth::renewed_cookie(&t.state, token)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    let (token, _) = t.guest("Logout").await;
+    let response = t
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/logout")
+                .header("x-quipcall", "1")
+                .header("cookie", format!("qc_session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0")
+    );
+    assert!(
+        auth::renewed_cookie(&t.state, &token)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_pending_desktop_polls_commit_without_wal_upgrade_errors() {
+    let t = Test::new().await;
+    let challenge = t
+        .req("POST", "/api/auth/desktop/start", "", json!({}))
+        .await
+        .1;
+    let (a, b, c, d) = tokio::join!(
+        t.req("POST", "/api/auth/desktop/poll", "", challenge.clone()),
+        t.req("POST", "/api/auth/desktop/poll", "", challenge.clone()),
+        t.req("POST", "/api/auth/desktop/poll", "", challenge.clone()),
+        t.req("POST", "/api/auth/desktop/poll", "", challenge.clone()),
+    );
+    for result in [a, b, c, d] {
+        assert_eq!(result.0, StatusCode::OK);
+        assert_eq!(result.1["pending"], true);
+    }
+}

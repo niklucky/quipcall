@@ -184,7 +184,7 @@
       {#if !desktopId}
         <p class="fine media-summary">{!media.audio && !media.video ? 'You’ll join in this browser with your mic and camera off.' : `${media.audio ? 'Microphone on' : 'Microphone off'} · ${media.video ? 'Camera on' : 'Camera off'}`}</p>
         <button class="mac-button" disabled={working || loading || !name.trim()} onclick={() => proceed('mac')}>Open in the Mac app <span aria-hidden="true">↗</span></button>
-        {#if openedMac}<p class="fine" role="status">Approve the connection in the browser tab opened by Quipcall. If nothing opened, <a href="/download/">install or update the Mac app</a>, then try again. You can also join here.</p>{/if}
+        {#if openedMac}<p class="fine" role="status">Quipcall opens with the identity signed in on your Mac. If it asks you to sign in, complete the browser approval. If nothing opened, <a href="/download/">install or update the Mac app</a>, then try again. You can also join here.</p>{/if}
       {/if}
       {#if invitation && entry.inviteKind === 'guest'}<p class="access-note">This link is for one guest. Joining claims it for you; you can return until the owner removes your access.</p>{:else if me?.kind === 'guest' && entry.room?.kind === 'private'}<p class="access-note">Your access is remembered in this browser. Save this room’s address to come back.</p>{:else if entry.room?.kind === 'public'}<p class="access-note">Anyone with this room’s link can join.</p>{/if}
       {#if !me || me.kind === 'guest'}<p class="fine">Have an account? <button class="text-button" disabled={working} onclick={onlogin}>Sign in</button></p>{/if}

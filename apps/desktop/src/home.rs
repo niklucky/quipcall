@@ -84,6 +84,8 @@ pub struct Home {
     /// The selected call's recording, playing under its transcript.
     playback: Option<Playback>,
     account: AccountView,
+    account_open: bool,
+    _activation: Subscription,
     confirm_remove: Option<String>,
     _subscription: Subscription,
 }
@@ -144,7 +146,7 @@ impl Home {
         }
     }
 
-    fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let shell = Shell::global(cx);
         let store = &shell.read(cx).store;
         // Open on the latest call (the one you just left), else the first room.
@@ -175,6 +177,12 @@ impl Home {
             renaming: None,
             playback: None,
             confirm_remove: None,
+            account_open: false,
+            _activation: cx.observe_window_activation(window, |_, window, cx| {
+                if window.is_window_active() {
+                    Shell::global(cx).update(cx, |shell, cx| shell.refresh_account(cx));
+                }
+            }),
             account: AccountView {
                 principal: store.rooms_principal.clone(),
                 session: shell.read(cx).args.session.clone(),
@@ -747,76 +755,82 @@ impl Home {
                             .on_click(cx.listener(|this, _, window, cx| this.new_room(window, cx))),
                     ),
             )
-            .child(
-                div()
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
-                    .child(
-                        button(
-                            "sign-in",
-                            if s.auth_attempt.pending() {
-                                "Waiting for browser…"
-                            } else {
-                                "Sign in / switch account"
-                            },
-                            None,
-                            Kind::Secondary,
-                            true,
-                        )
-                        .when(s.auth_busy(), |button| button.opacity(0.45))
-                        .when(!s.auth_busy(), |button| {
-                            button.on_click(|_, _, cx| {
-                                Shell::global(cx).update(cx, |s, cx| s.sign_in(None, cx))
-                            })
-                        }),
-                    )
-                    .child(
-                        button(
-                            "refresh-rooms",
-                            "Refresh rooms",
-                            None,
-                            Kind::Secondary,
-                            true,
-                        )
-                        .on_click(|_, _, cx| {
-                            Shell::global(cx).update(cx, |s, cx| s.refresh_account(cx))
-                        }),
-                    )
-                    .when(s.auth_attempt.pending(), |el| {
-                        el.child(
-                            button(
-                                "cancel-sign-in",
-                                "Cancel sign-in",
-                                None,
-                                Kind::Secondary,
-                                true,
+            .when(
+                self.account_open || s.auth_attempt.pending() || !s.auth_message.is_empty(),
+                |el| {
+                    el.child(
+                        div()
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .child(
+                                button(
+                                    "sign-in",
+                                    if s.auth_attempt.pending() {
+                                        "Waiting for browser…"
+                                    } else {
+                                        "Sign in / switch account"
+                                    },
+                                    None,
+                                    Kind::Secondary,
+                                    true,
+                                )
+                                .when(s.auth_busy(), |button| button.opacity(0.45))
+                                .when(!s.auth_busy(), |button| {
+                                    button.on_click(|_, _, cx| {
+                                        Shell::global(cx).update(cx, |s, cx| s.sign_in(None, cx))
+                                    })
+                                }),
                             )
-                            .on_click(|_, _, cx| {
-                                Shell::global(cx).update(cx, |s, cx| s.cancel_sign_in(cx))
+                            .child(
+                                button(
+                                    "edit-name",
+                                    "Change your name",
+                                    None,
+                                    Kind::Secondary,
+                                    true,
+                                )
+                                .on_click(|_, _, cx| crate::onboarding::open_profile(cx)),
+                            )
+                            .when(s.auth_attempt.pending(), |el| {
+                                el.child(
+                                    button(
+                                        "cancel-sign-in",
+                                        "Cancel sign-in",
+                                        None,
+                                        Kind::Secondary,
+                                        true,
+                                    )
+                                    .on_click(|_, _, cx| {
+                                        Shell::global(cx).update(cx, |s, cx| s.cancel_sign_in(cx))
+                                    }),
+                                )
+                            })
+                            .when_some(s.auth_attempt.code(), |el, code| {
+                                el.child(
+                                    div().text_size(px(22.0)).text_color(rgb(TEXT)).child(code),
+                                )
+                            })
+                            .when(s.args.session.is_some(), |el| {
+                                el.child(
+                                    button("sign-out", "Sign out", None, Kind::Secondary, true)
+                                        .on_click(|_, _, cx| {
+                                            Shell::global(cx).update(cx, |s, cx| s.sign_out(cx))
+                                        }),
+                                )
+                            })
+                            .when(!s.auth_message.is_empty(), |el| {
+                                el.child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(TEXT_DIM))
+                                        .child(s.auth_message.clone()),
+                                )
                             }),
-                        )
-                    })
-                    .when_some(s.auth_attempt.code(), |el, code| {
-                        el.child(div().text_size(px(22.0)).text_color(rgb(TEXT)).child(code))
-                    })
-                    .when(s.args.session.is_some(), |el| {
-                        el.child(
-                            button("sign-out", "Sign out", None, Kind::Secondary, true).on_click(
-                                |_, _, cx| Shell::global(cx).update(cx, |s, cx| s.sign_out(cx)),
-                            ),
-                        )
-                    })
-                    .when(!s.auth_message.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(rgb(TEXT_DIM))
-                                .child(s.auth_message.clone()),
-                        )
-                    }),
+                    )
+                },
             )
             .child(
                 div()
@@ -852,8 +866,14 @@ impl Home {
                     ))
                     .child(
                         icon_button("edit-me", Icon::Pencil, 28.0)
-                            .tooltip(tooltip("Change your name"))
-                            .on_click(|_, _, cx| crate::onboarding::open_profile(cx)),
+                            .tooltip(tooltip("Account"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.account_open = !this.account_open;
+                                if !this.account_open {
+                                    Shell::global(cx).update(cx, |s, _| s.auth_message.clear());
+                                }
+                                cx.notify();
+                            })),
                     )
                     .child(
                         icon_button("settings", Icon::Settings, 28.0)

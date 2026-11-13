@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 /// Everything a client needs to join a LiveKit room.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinInfo {
+    /// Display name supplied by the authorizing server (absent on older servers).
+    #[serde(default)]
+    pub room_name: Option<String>,
     /// Server-assigned participant identity.
     pub identity: String,
     /// LiveKit WebSocket URL as reachable from the client.

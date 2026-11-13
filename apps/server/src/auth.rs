@@ -24,6 +24,14 @@ pub fn random() -> String {
 pub fn hash(s: &str) -> String {
     format!("{:x}", Sha256::digest(s.as_bytes()))
 }
+/// nginx overwrites X-Real-IP; the API listener is loopback-only in deployment.
+pub fn client_ip(h: &HeaderMap) -> String {
+    hash(
+        h.get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("local"),
+    )
+}
 #[derive(Clone, Serialize, FromRow)]
 pub struct Principal {
     pub id: String,
@@ -50,8 +58,9 @@ pub async fn current(s: &AppState, h: &HeaderMap) -> Result<Principal> {
         #[sqlx(flatten)]
         principal: Principal,
         pending: bool,
+        expires: i64,
     }
-    let found: Authenticated = sqlx::query_as("SELECT p.*,s.pending FROM sessions s JOIN principals p ON p.id=s.principal WHERE s.hash=? AND s.expires>?")
+    let found: Authenticated = sqlx::query_as("SELECT p.*,s.pending,s.expires FROM sessions s JOIN principals p ON p.id=s.principal WHERE s.hash=? AND s.expires>?")
         .bind(&token).bind(now()).fetch_optional(&s.db).await?.ok_or_else(AppError::unauthorized)?;
     if found.pending {
         // The native client only uses the new credential after saving it. Lost
@@ -78,6 +87,17 @@ pub async fn current(s: &AppState, h: &HeaderMap) -> Result<Principal> {
             }
         }
         tx.commit().await?;
+    } else if found.expires < now() + lifetime(&found.principal) / 2 {
+        let renewed =
+            sqlx::query("UPDATE sessions SET expires=MAX(expires,?) WHERE hash=? AND expires>?")
+                .bind(now() + lifetime(&found.principal))
+                .bind(&token)
+                .bind(now())
+                .execute(&s.db)
+                .await?;
+        if renewed.rows_affected() == 0 {
+            return Err(AppError::unauthorized());
+        }
     }
     Ok(found.principal)
 }
@@ -116,6 +136,17 @@ fn cookie(s: &AppState, token: &str, age: i64) -> String {
             ""
         }
     )
+}
+/// Align the browser cookie with the server deadline after authenticated use.
+/// Never recreate a logged-out/expired session or override a fresh login cookie.
+pub async fn renewed_cookie(s: &AppState, token: &str) -> Result<Option<String>> {
+    let expiry: Option<i64> =
+        sqlx::query_scalar("SELECT expires FROM sessions WHERE hash=? AND pending=0 AND expires>?")
+            .bind(hash(token))
+            .bind(now())
+            .fetch_optional(&s.db)
+            .await?;
+    Ok(expiry.map(|expires| cookie(s, token, expires - now())))
 }
 fn signed_in(s: &AppState, token: &str, p: &Principal) -> Response {
     (
@@ -164,11 +195,7 @@ pub async fn guest(
     if let Ok(p) = current(&s, &h).await {
         return Ok(Json(p).into_response());
     }
-    let ip = h
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("local");
-    let ip = hash(ip);
+    let ip = client_ip(&h);
     // Count new identities only; returning guests do not consume this budget.
     rate(&s, &format!("guest-hour:{ip}"), 30, 3600).await?;
     rate(&s, &format!("guest-day:{ip}"), 100, 86400).await?;
@@ -280,12 +307,7 @@ pub async fn request_link(
     Json(req): Json<LinkRequest>,
 ) -> Result<Json<Value>> {
     let email = email(&req.email)?;
-    // nginx overwrites this header; direct API traffic is loopback-only.
-    let requester = hash(
-        h.get("x-real-ip")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("local"),
-    );
+    let requester = client_ip(&h);
     sqlx::query("INSERT INTO mail_requests(email,requester,invite,created) VALUES (?,?,?,?)")
         .bind(email)
         .bind(requester)
@@ -571,7 +593,7 @@ pub async fn desktop_poll(
     h: HeaderMap,
     Json(req): Json<DesktopPoll>,
 ) -> Result<Json<Value>> {
-    let mut tx = s.db.begin().await?;
+    let mut tx = s.db.begin_with("BEGIN IMMEDIATE").await?;
     let pending: Option<(Option<String>,)> = sqlx::query_as(
         "SELECT principal FROM desktop_logins WHERE id=? AND secret_hash=? AND expires>?",
     )

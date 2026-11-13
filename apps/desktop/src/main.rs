@@ -197,7 +197,7 @@ impl Shell {
         }
         let saved = self.store.rooms.iter().find(|r| r.id == id);
         let room = RoomRef {
-            name: saved.map_or_else(|| id.clone(), |r| r.name.clone()),
+            name: saved.map_or_else(|| "Call".into(), |r| r.name.clone()),
             one_time: saved.is_none(),
             id,
         };
@@ -508,12 +508,7 @@ fn main() {
                             if s.in_call() {
                                 return;
                             }
-                            if url.starts_with("quipcall://open/") {
-                                s.open_home(cx);
-                                s.sign_in(Some(room), cx);
-                            } else {
-                                s.join_link(room, cx);
-                            }
+                            s.join_link(room, cx);
                         })
                     }),
                     None => tracing::warn!("not a call link: {url}"),

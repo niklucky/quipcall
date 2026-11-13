@@ -44,27 +44,14 @@ if ! $ROOT/bin/livekit-server --version 2>/dev/null | grep -qx "livekit-server v
 	restart_livekit=1
 fi
 
-# API keys are generated here once and never leave the box.
-if [ ! -f $ROOT/secrets.env ]; then
-	key=API$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')
-	secret=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
-	(
-		umask 077
-		printf 'LIVEKIT_API_KEY=%s\nLIVEKIT_API_SECRET=%s\nLIVEKIT_KEYS="%s: %s"\n' \
-			"$key" "$secret" "$key" "$secret" >$ROOT/secrets.env
-	)
-	echo "generated API keys in $ROOT/secrets.env"
-	restart_livekit=1
+# Merge supplied auth settings and fill missing LiveKit keys without rotating
+# an existing pair. This also supports an auth-only, pre-created secrets.env.
+if [ -f "$STAGE/deploy/auth.env" ]; then
+    keys_changed=$(python3 "$STAGE/deploy/configure-secrets.py" "$ROOT/secrets.env" "$STAGE/deploy/auth.env")
+else
+    keys_changed=$(python3 "$STAGE/deploy/configure-secrets.py" "$ROOT/secrets.env")
 fi
-
-# Auth deployment fails before replacing the running binary if email/bootstrap
-# configuration is absent. Fill secrets.env from deploy/auth.env.example first.
-for setting in RESEND_API_KEY QUIPCALL_MAIL_FROM QUIPCALL_BOOTSTRAP_EMAIL; do
-    if ! grep -q "^${setting}=.\+" "$ROOT/secrets.env"; then
-        echo "Set $setting in $ROOT/secrets.env before deploying auth" >&2
-        exit 1
-    fi
-done
+[ -z "$keys_changed" ] || restart_livekit=1
 
 put "$STAGE/deploy/livekit.yaml" $ROOT/livekit.yaml 644 && restart_livekit=1
 put "$STAGE/deploy/systemd/quipcall-livekit.service" /etc/systemd/system/quipcall-livekit.service 644 &&
