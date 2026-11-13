@@ -478,11 +478,13 @@ pub async fn media_check(State(s): State<AppState>, h: HeaderMap) -> Result<Stat
     }
     let mut db = s.db.acquire().await?;
     // auth_request understands 401/403, not 404.
-    let r: Room = sqlx::query_as("SELECT * FROM rooms WHERE id=? AND closed=0")
-        .bind(&claims.video.room)
-        .fetch_optional(&mut *db)
-        .await?
-        .ok_or_else(|| AppError::forbidden("Room unavailable"))?;
+    let r = room(&mut db, &claims.video.room).await.map_err(|e| {
+        if e.status == StatusCode::NOT_FOUND {
+            AppError::forbidden("Room unavailable")
+        } else {
+            e
+        }
+    })?;
     let principal = media_principal(&claims.sub);
     if !allowed(&mut db, &r, principal).await? {
         return Err(AppError::forbidden("Room access removed"));
@@ -627,7 +629,14 @@ pub async fn remove(
         return Err(AppError::bad("The owner cannot be removed"));
     }
     // Persist first: even if LiveKit is down, no new/replayed tokens get in.
-    let mut tx = s.db.begin().await?;
+    let mut tx = s.db.begin_with("BEGIN IMMEDIATE").await?;
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM principals WHERE id=?)")
+        .bind(&principal)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !exists {
+        return Err(AppError::missing());
+    }
     sqlx::query("INSERT INTO memberships VALUES (?,?,1) ON CONFLICT(room,principal) DO UPDATE SET revoked=1")
         .bind(&id).bind(&principal).execute(&mut *tx).await?;
     // Keep the claimed slot occupied: a fresh anonymous identity must not

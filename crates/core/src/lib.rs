@@ -278,6 +278,8 @@ struct State {
     can_transcribe: Option<String>,
     /// `disconnect` saying goodbye to the server; see [`Engine::closed`].
     closing: Vec<Closing>,
+    /// Delivery tasks for this connection, including a transcript already stopping.
+    transcript_sends: Vec<Closing>,
 }
 
 type Closing = futures_util::future::Shared<futures_util::future::BoxFuture<'static, ()>>;
@@ -397,7 +399,7 @@ impl Engine {
     pub fn disconnect(&self) {
         // Everything of this call leaves the state now, the audio device too:
         // a call connected before the goodbye below finishes has its own.
-        let (room, audio, screen, camera, recorder, transcribing) = {
+        let (room, audio, screen, camera, recorder, transcribing, outgoing) = {
             let mut s = self.state.lock();
             forget_call(&mut s);
             // Forget goodbyes already said. `peek` would only see ones
@@ -410,21 +412,26 @@ impl Engine {
                 s.camera.take(),
                 s.recorder.take(),
                 s.transcribing.take(),
+                std::mem::take(&mut s.transcript_sends),
             )
         };
         drop(screen);
         stop_taking_in(transcribing.as_ref(), recorder.as_ref());
         let events = self.events.clone();
         let closing = self.tasks.spawn(async move {
-            // Leaving finishes your recording, keeping everything up to now,
-            // while what was being said is still transcribed: the call's
-            // history waits for it.
-            // Say goodbye independently of potentially slow local finalization.
-            futures_util::future::join(wind_down(transcribing, recorder, &events, false), async {
-                if let Some(room) = room {
-                    let _ = room.close().await;
-                }
-            })
+            finish_call(
+                async {
+                    finish_words(transcribing, &events).await;
+                    futures_util::future::join_all(outgoing).await;
+                },
+                finish_recording(recorder, &events, false),
+                async {
+                    if let Some(room) = room {
+                        let _ = room.close().await;
+                    }
+                },
+                Duration::from_secs(2),
+            )
             .await;
             // Stopping the camera blocks briefly; keep it off the UI thread.
             if let Some(camera) = camera {
@@ -1102,8 +1109,9 @@ async fn start_transcribing(
         });
     };
     {
+        let state_for_delivery = state.clone();
         let (room, state) = (room.clone(), state.clone());
-        handle.spawn(async move {
+        let delivery = handle.spawn(async move {
             while let Some(line) = to_send.recv().await {
                 // The last words after you left still go to that call, but
                 // into no other's history.
@@ -1119,6 +1127,13 @@ async fn start_transcribing(
                 }
             }
         });
+        let mut s = state_for_delivery.lock();
+        if s.connection == connection {
+            s.transcript_sends
+                .retain(|task| task.clone().now_or_never().is_none());
+            s.transcript_sends
+                .push(delivery.map(|_| ()).boxed().shared());
+        }
     }
     let transcriber =
         tokio::task::spawn_blocking(move || quipcall_stt::Transcriber::start(stt, on_line))
@@ -1652,23 +1667,61 @@ pub(crate) fn autorelease_pool<R>(f: impl FnOnce() -> R) -> R {
     }
 }
 
+/// Falling back after thread creation failure must not drop a Runtime inside
+/// an async context (which would panic again during Engine::drop).
+struct ShutdownRuntime {
+    runtime: Option<tokio::runtime::Runtime>,
+    tasks: tasks::Tasks,
+}
+impl ShutdownRuntime {
+    fn take(&mut self) -> tokio::runtime::Runtime {
+        self.runtime.take().expect("runtime owned")
+    }
+}
+impl Drop for ShutdownRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            self.tasks.cancel();
+            runtime.shutdown_background();
+        }
+    }
+}
+fn retire_runtime(
+    runtime: tokio::runtime::Runtime,
+    tasks: tasks::Tasks,
+    finish: impl Future<Output = ()> + Send + 'static,
+    spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut owned = ShutdownRuntime {
+        runtime: Some(runtime),
+        tasks,
+    };
+    spawn(Box::new(move || {
+        let runtime = owned.take();
+        runtime.block_on(finish);
+        runtime.shutdown_timeout(Duration::from_secs(1));
+    }))
+}
 impl Drop for Engine {
     fn drop(&mut self) {
         self.disconnect();
         let closed = self.closed();
         let tasks = self.tasks.clone();
         let runtime = self.runtime.take().expect("engine runtime initialized");
-        // Runtime teardown also cancels LiveKit's untracked internal tasks.
-        // Never block the UI or try to drop a runtime from an async context.
-        std::thread::spawn(move || {
-            runtime.block_on(async move {
-                if tokio::time::timeout(CLOSE_TIMEOUT, closed).await.is_err() {
-                    tracing::warn!("leaving the room timed out");
-                }
-                tasks.shutdown().await;
-            });
-            runtime.shutdown_timeout(Duration::from_secs(1));
-        });
+        let finish = async move {
+            if tokio::time::timeout(CLOSE_TIMEOUT, closed).await.is_err() {
+                tracing::warn!("leaving the room timed out");
+            }
+            tasks.shutdown().await;
+        };
+        if let Err(e) = retire_runtime(runtime, self.tasks.clone(), finish, |close| {
+            std::thread::Builder::new()
+                .name("quipcall-close".into())
+                .spawn(close)
+                .map(|_| ())
+        }) {
+            tracing::warn!("could not start call teardown thread: {e}");
+        }
     }
 }
 
@@ -1964,6 +2017,7 @@ async fn connect(
         let mut s = state.lock();
         if is_current(&s, &room) {
             s.room = None;
+            s.transcript_sends.clear();
             forget_call(&mut s);
             (s.recorder.take(), s.transcribing.take())
         } else {
@@ -2019,33 +2073,64 @@ async fn wind_down(
     events: &async_channel::Sender<Event>,
     say_saved: bool,
 ) {
-    let words = async {
-        if let Some(transcribing) = transcribing {
-            let _ = tokio::task::spawn_blocking(move || transcribing.stop()).await;
-            let _ = events
-                .send(Event::TranscriptionStopped {
-                    by: None,
-                    handed_over: false,
-                })
-                .await;
-        }
+    futures_util::future::join(
+        finish_words(transcribing, events),
+        finish_recording(recorder, events, say_saved),
+    )
+    .await;
+}
+async fn finish_words(
+    transcribing: Option<transcribe::Transcribing>,
+    events: &async_channel::Sender<Event>,
+) {
+    if let Some(transcribing) = transcribing {
+        let _ = tokio::task::spawn_blocking(move || transcribing.stop()).await;
+        let _ = events
+            .send(Event::TranscriptionStopped {
+                by: None,
+                handed_over: false,
+            })
+            .await;
+    }
+}
+async fn finish_recording(
+    recorder: Option<record::Recorder>,
+    events: &async_channel::Sender<Event>,
+    say_saved: bool,
+) {
+    let Some(recorder) = recorder else { return };
+    let event = match tokio::task::spawn_blocking(move || recorder.stop()).await {
+        Ok(Ok(saved)) => Event::RecordingSaved(saved),
+        Ok(Err(e)) => Event::RecordingFailed(format!("{e:#}")),
+        Err(e) => Event::RecordingFailed(format!("{e}")),
     };
-    let file = async {
-        let Some(recorder) = recorder else { return };
-        let event = match tokio::task::spawn_blocking(move || recorder.stop()).await {
-            Ok(Ok(saved)) => Event::RecordingSaved(saved),
-            Ok(Err(e)) => Event::RecordingFailed(format!("{e:#}")),
-            Err(e) => Event::RecordingFailed(format!("{e}")),
-        };
-        match event {
-            _ if say_saved => {
-                let _ = events.send(event).await;
+    match event {
+        _ if say_saved => {
+            let _ = events.send(event).await;
+        }
+        Event::RecordingFailed(e) => tracing::warn!("recording: {e}"),
+        _ => {}
+    }
+}
+/// Finish sending final words before goodbye, with a bounded allowance so a
+/// stalled transcriber/network cannot prevent disconnection. Recording is local
+/// and runs independently. Engine drop retains its outer teardown deadline.
+async fn finish_call(
+    words: impl Future<Output = ()>,
+    recording: impl Future<Output = ()>,
+    close: impl Future<Output = ()>,
+    words_timeout: Duration,
+) {
+    futures_util::future::join(
+        async {
+            if tokio::time::timeout(words_timeout, words).await.is_err() {
+                tracing::warn!("final transcript delivery timed out; closing the call");
             }
-            Event::RecordingFailed(e) => tracing::warn!("recording: {e}"),
-            _ => {}
-        }
-    };
-    futures_util::future::join(words, file).await;
+            close.await;
+        },
+        recording,
+    )
+    .await;
 }
 
 /// Keeps track of remote videos and microphones, for `connection` only: a
@@ -2195,6 +2280,97 @@ fn translate(event: RoomEvent) -> Option<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn goodbye_waits_for_final_delivery_but_not_local_recording() {
+        let (send, mut lines) = tokio::sync::mpsc::unbounded_channel();
+        let (arrived, received) = tokio::sync::oneshot::channel();
+        let (release, network) = tokio::sync::oneshot::channel();
+        let delivery = tokio::spawn(async move {
+            assert_eq!(lines.recv().await, Some("last sentence"));
+            arrived.send(()).unwrap();
+            network.await.unwrap(); // A slow final send, after transcription stopped.
+            assert_eq!(lines.recv().await, None);
+        });
+        let (closed, mut goodbye) = tokio::sync::oneshot::channel();
+        let (recorded, recording) = tokio::sync::oneshot::channel();
+        let finish = tokio::spawn(finish_call(
+            async move {
+                send.send("last sentence").unwrap();
+                drop(send);
+                delivery.await.unwrap();
+            },
+            async {
+                recording.await.unwrap();
+            },
+            async {
+                closed.send(()).unwrap();
+            },
+            Duration::from_secs(2),
+        ));
+        received.await.unwrap();
+        assert!(matches!(
+            goodbye.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), goodbye)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!finish.is_finished(), "local recording is still finalizing");
+        recorded.send(()).unwrap();
+        finish.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_final_transcript_still_allows_goodbye() {
+        let (closed, goodbye) = tokio::sync::oneshot::channel();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            finish_call(
+                std::future::pending(),
+                async {},
+                async {
+                    closed.send(()).unwrap();
+                },
+                Duration::from_millis(10),
+            ),
+        )
+        .await
+        .unwrap();
+        goodbye.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn teardown_thread_failure_shuts_runtime_without_panicking_in_async_context() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let tasks = tasks::Tasks::new(runtime.handle().clone());
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let task = tasks.spawn(async {
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started.await.unwrap();
+        let error = retire_runtime(runtime, tasks.clone(), async {}, |job| {
+            drop(job); // Builder drops the closure when OS thread creation fails.
+            Err(std::io::Error::other("thread limit"))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "thread limit");
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(
+            tasks
+                .spawn(async { panic!("late work ran") })
+                .await
+                .unwrap_err()
+                .is_cancelled()
+        );
+    }
 
     #[test]
     fn the_newest_transcriber_carries_on() {

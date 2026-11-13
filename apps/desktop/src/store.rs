@@ -363,6 +363,9 @@ impl Store {
 
     pub fn rename_room(&mut self, id: &str, name: &str) {
         let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
         if self.owns_room(id)
             && let Some(alias) = self
                 .rooms_principal
@@ -371,9 +374,6 @@ impl Store {
                 .and_then(|b| b.get_mut(id))
         {
             *alias = name.to_owned();
-        }
-        if name.is_empty() {
-            return;
         }
         if let Some(room) = self.rooms.iter_mut().find(|r| r.id == id) {
             room.name = name.to_owned();
@@ -594,6 +594,22 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::{SavedRoom, Store, civil_from_days, file_size};
+
+    #[test]
+    fn blank_owner_rename_preserves_bookmark_during_offline_refresh() {
+        let mut store = Store::default();
+        store.bind_rooms(Some("owner"));
+        store.keep_room("room", "Project");
+        store.cache_room(SavedRoom {
+            id: "room".into(),
+            name: "Project".into(),
+            owner: "owner".into(),
+            ..Default::default()
+        });
+        store.rename_room("room", "   ");
+        store.refresh_rooms(vec![]);
+        assert_eq!(store.rooms[0].name, "Project");
+    }
 
     #[test]
     fn closed_bookmarks_never_return_when_restoring_hidden_rooms() {

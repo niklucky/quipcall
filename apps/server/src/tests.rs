@@ -1896,3 +1896,209 @@ async fn failed_close_reports_closure_and_can_be_retried() {
         StatusCode::OK
     );
 }
+
+#[tokio::test]
+async fn guest_creation_has_its_own_budget_and_reuses_existing_sessions() {
+    let t = Test::new().await;
+    let (session, _) = t.guest("Returning").await;
+    for _ in 1..30 {
+        t.guest("New guest").await;
+    }
+    assert_eq!(
+        t.req("POST", "/api/auth/guest", "", json!({"name":"Limited"}))
+            .await
+            .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        t.req(
+            "POST",
+            "/api/auth/guest",
+            &session,
+            json!({"name":"Returning"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        t.req_from(
+            "another-ip",
+            "POST",
+            "/api/auth/guest",
+            "",
+            json!({"name":"Other IP"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM principals WHERE kind='guest'")
+            .fetch_one(&t.state.db)
+            .await
+            .unwrap(),
+        31
+    );
+    // Exhausting new guests does not block browser approval initiation.
+    assert_eq!(
+        t.req("POST", "/api/auth/desktop/start", "", json!({}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    sqlx::query("UPDATE rate_limits SET count=100 WHERE key=?")
+        .bind(format!("guest-day:{}", auth::hash("another-ip")))
+        .execute(&t.state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        t.req_from(
+            "another-ip",
+            "POST",
+            "/api/auth/guest",
+            "",
+            json!({"name":"Daily limited"})
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn cleanup_prunes_orphan_guests_but_preserves_access_and_approval_references() {
+    let t = Test::new().await;
+    let owner = t.admin().await;
+    let room = t.room(&owner, "public").await;
+    let (orphan, orphan_id) = t.guest("Orphan").await;
+    let (_, active_id) = t.guest("Active session").await;
+    let (member, member_id) = t.guest("Revoked member").await;
+    assert_eq!(t.join(&member, &room).await.0, StatusCode::OK);
+    t.req(
+        "DELETE",
+        &format!("/api/rooms/{room}/members/{member_id}"),
+        &owner,
+        json!({}),
+    )
+    .await;
+    let (_, approval_id) = t.guest("Pending approval").await;
+    sqlx::query("INSERT INTO desktop_logins(id,secret_hash,principal,expires,code_hash) VALUES ('pending','proof',?,?,'code')")
+        .bind(&approval_id).bind(auth::now()+600).execute(&t.state.db).await.unwrap();
+    for id in [&orphan_id, &member_id, &approval_id] {
+        sqlx::query("UPDATE sessions SET expires=0 WHERE principal=?")
+            .bind(id)
+            .execute(&t.state.db)
+            .await
+            .unwrap();
+    }
+    auth::cleanup(&t.state).await.unwrap();
+    assert_eq!(
+        t.req("GET", "/api/auth/me", &orphan, json!({})).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    for (id, kept) in [
+        (&orphan_id, false),
+        (&active_id, true),
+        (&member_id, true),
+        (&approval_id, true),
+    ] {
+        assert_eq!(
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM principals WHERE id=?)")
+                .bind(id)
+                .fetch_one(&t.state.db)
+                .await
+                .unwrap(),
+            kept
+        );
+    }
+}
+
+#[tokio::test]
+async fn removing_unknown_principal_is_not_a_server_error_or_a_membership_mutation() {
+    let t = Test::new().await;
+    let owner = t.admin().await;
+    let room = t.room(&owner, "private").await;
+    assert_eq!(
+        t.req(
+            "DELETE",
+            &format!("/api/rooms/{room}/members/unknown"),
+            &owner,
+            json!({})
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM memberships WHERE room=?")
+            .bind(&room)
+            .fetch_one(&t.state.db)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn stalled_media_cleanup_does_not_delay_auth_housekeeping() {
+    let t = Test::new().await;
+    let owner = t.admin().await;
+    let room = t.room(&owner, "direct").await;
+    sqlx::query("UPDATE rooms SET expires=0 WHERE id=?")
+        .bind(&room)
+        .execute(&t.state.db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO rate_limits VALUES ('expired',0,1,0)")
+        .execute(&t.state.db)
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = (*t.state.config).clone();
+    config.livekit_api_url = format!("http://{}", listener.local_addr().unwrap());
+    let (entered, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let service = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().fallback(move || {
+                let entered = entered.clone();
+                async move {
+                    entered.send(()).unwrap();
+                    std::future::pending::<StatusCode>().await
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    });
+    let state = AppState {
+        config: Arc::new(config),
+        ..t.state.clone()
+    };
+    let workers = start_cleanup(state);
+    tokio::time::timeout(Duration::from_secs(2), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let remaining: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rate_limits WHERE key='expired')")
+                    .fetch_one(&t.state.db)
+                    .await
+                    .unwrap();
+            if !remaining {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    for worker in workers {
+        worker.abort();
+        let _ = worker.await;
+    }
+    service.abort();
+}

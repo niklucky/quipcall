@@ -164,6 +164,14 @@ pub async fn guest(
     if let Ok(p) = current(&s, &h).await {
         return Ok(Json(p).into_response());
     }
+    let ip = h
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("local");
+    let ip = hash(ip);
+    // Count new identities only; returning guests do not consume this budget.
+    rate(&s, &format!("guest-hour:{ip}"), 30, 3600).await?;
+    rate(&s, &format!("guest-day:{ip}"), 100, 86400).await?;
     let name = clean_name(&req.name);
     let p = Principal {
         id: random(),
@@ -597,4 +605,45 @@ pub async fn desktop_poll(
         .await?;
     tx.commit().await?;
     Ok(Json(json!({"token":token,"principal":p})))
+}
+
+/// Database housekeeping has no dependency on the media service.
+pub async fn cleanup(s: &AppState) -> Result<()> {
+    for table in [
+        "sessions",
+        "account_invites",
+        "magic_links",
+        "desktop_logins",
+    ] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE expires < ?"))
+            .bind(now())
+            .execute(&s.db)
+            .await?;
+    }
+    crate::rooms::cleanup_invites(&s.db).await?;
+    sqlx::query("DELETE FROM mail_requests WHERE created < ?")
+        .bind(now() - 900)
+        .execute(&s.db)
+        .await?;
+    sqlx::query("DELETE FROM rate_limits WHERE expires < ?")
+        .bind(now())
+        .execute(&s.db)
+        .await?;
+    // Keep durable access (including revocation tombstones) and every foreign
+    // key reference. Delete a bounded batch of guests that can no longer return.
+    sqlx::query(
+        "DELETE FROM principals WHERE id IN (
+        SELECT p.id FROM principals p WHERE p.kind='guest'
+        AND NOT EXISTS(SELECT 1 FROM sessions WHERE principal=p.id)
+        AND NOT EXISTS(SELECT 1 FROM memberships WHERE principal=p.id)
+        AND NOT EXISTS(SELECT 1 FROM desktop_logins WHERE principal=p.id)
+        AND NOT EXISTS(SELECT 1 FROM rooms WHERE owner=p.id OR guest=p.id)
+        AND NOT EXISTS(SELECT 1 FROM room_invites WHERE used_by=p.id)
+        AND NOT EXISTS(SELECT 1 FROM identities WHERE principal=p.id)
+        AND NOT EXISTS(SELECT 1 FROM account_invites WHERE created_by=p.id)
+        LIMIT 1000)",
+    )
+    .execute(&s.db)
+    .await?;
+    Ok(())
 }

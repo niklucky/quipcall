@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { api, type Entry, type Principal, type CallRoom } from './api';
   import type { TestEntry } from './test-entry';
-  import type { JoinFlow } from './join-flow';
+  import { loadJoinEntry, type JoinFlow } from './join-flow';
   import { MediaPreview, type PreviewState, type JoinOptions } from './media';
 
   let { roomId, invitation, desktopId, me, callError, joining, flow, testEntry, identify, accepted, onjoin, onlogin, onhome }:
@@ -37,7 +37,7 @@
   const working = $derived(busy || joining);
   const allowed = $derived(entry?.state === 'ready' || entry?.state === 'invite');
   const denied = $derived(entry && !allowed && entry.state !== 'signin');
-  const title = $derived(desktopId && !roomId && !invitation ? 'Connect your Mac' : entry?.room?.name ?? (invitation ? 'Your invitation' : 'Join a call'));
+  const title = $derived(desktopId ? 'Connect your Mac' : entry?.room?.name ?? (invitation ? 'Your invitation' : 'Join a call'));
   const descriptions: Record<string, [string, string]> = {
     expired: ['This invitation is no longer valid', 'It may have expired or been revoked. Ask the room owner for a new link.'],
     used: ['This invitation has been claimed', 'One person can use this link. If that was you, return in the same browser or sign in to the account you used. Otherwise, ask for a new invitation.'],
@@ -51,15 +51,13 @@
     const current = ++request;
     loading = true;
     try {
-      const result = invitation || roomId
-        ? await api<Entry>('/entry', invitation ? { invite: invitation } : { room: roomId })
-        : { state: 'ready' as const };
+      const result = await loadJoinEntry({ desktopId, invitation, roomId }, body => api<Entry>('/entry', body));
       if (alive && current === request) entry = result;
     } catch (e) {
       if (alive && current === request) { entry = null; error = 'Could not check this link. Check your connection and try again.'; }
     } finally { if (alive && current === request) loading = false; }
   }
-  $effect(() => { void roomId; void invitation; void me?.id; void loadEntry(); });
+  $effect(() => { void desktopId; void roomId; void invitation; void me?.id; void loadEntry(); });
   $effect(() => {
     if (me && identityId !== me.id) { name = me.name; identityId = me.id; }
   });

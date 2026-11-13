@@ -124,9 +124,6 @@ pub(crate) fn unauthorized(error: &anyhow::Error) -> bool {
         .downcast_ref::<RequestError>()
         .is_some_and(|e| e.status == 401)
 }
-fn session_matches(current: Option<&str>, expected: Option<&str>) -> bool {
-    current == expected
-}
 fn forget_session(
     session: &mut Option<String>,
     principal: &mut Option<Principal>,
@@ -171,7 +168,7 @@ impl Shell {
         self.auth_attempt.pending() || self.room_creation.pending()
     }
     pub fn expire_session(&mut self, expected: Option<&str>, cx: &mut Context<Self>) -> bool {
-        if !session_matches(self.args.session.as_deref(), expected) {
+        if self.args.session.as_deref() != expected {
             return false;
         }
         self.room_creation.cancel();
@@ -568,11 +565,7 @@ mod tests {
     };
 
     #[test]
-    fn unauthenticated_401_recovers_but_stale_failures_cannot_clear_a_new_session() {
-        assert!(session_matches(None, None));
-        assert!(session_matches(Some("old"), Some("old")));
-        assert!(!session_matches(Some("new"), None));
-        assert!(!session_matches(Some("new"), Some("old")));
+    fn unbinding_identity_clears_private_room_cache() {
         let mut store = crate::store::Store::default();
         store.bind_rooms(Some("old-account"));
         store.cache_room(SavedRoom {

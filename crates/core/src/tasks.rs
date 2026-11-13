@@ -81,15 +81,16 @@ impl Tasks {
         }
     }
 
-    pub async fn shutdown(&self) {
-        {
-            let mut state = self.0.state.lock();
-            state.closed = true;
-            for task in state.active.values() {
-                task.abort();
-            }
+    pub fn cancel(&self) {
+        let mut state = self.0.state.lock();
+        state.closed = true;
+        for task in state.active.values() {
+            task.abort();
         }
         self.0.cancelled.notify_waiters();
+    }
+    pub async fn shutdown(&self) {
+        self.cancel();
         loop {
             let changed = self.0.changed.notified();
             if self.0.state.lock().active.is_empty() {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { JoinFlow, type JoinEffects, type JoinRequest } from '../src/join-flow.ts';
+import { loadJoinEntry, JoinFlow, type JoinEffects, type JoinRequest } from '../src/join-flow.ts';
 import type { Principal, CallRoom } from '../src/api.ts';
 const principal: Principal = { id: 'guest', kind: 'guest', name: 'Guest', email: null, admin: false };
 const room: CallRoom = { id: 'claimed-room', name: 'Project', kind: 'private', owner: 'owner', guest: null, closed: false };
@@ -53,4 +53,25 @@ test('a current attempt completes with its original entry and device choices', a
   input.invitation = 'a-different-invitation'; input.options.videoDeviceId = 'other-camera';
   pending.resolve(principal); await run;
   assert.deepEqual(calls, ['redeem:invite', 'accepted:claimed-room', 'stop', 'join:claimed-room:Guest:camera-one']);
+});
+
+for (const state of ['private', 'full', 'removed', 'unavailable', 'signin'] as const) {
+  test(`Mac approval remains available when room entry would be ${state}`, async () => {
+    const { input, effects, calls, flow } = setup('approve');
+    input.roomId = 'denied-room';
+    const entry = await loadJoinEntry(input, async () => {
+      calls.push('room-check');
+      return { state };
+    });
+    assert.equal(entry.state, 'ready');
+    await flow.run(input, effects);
+    assert.deepEqual(calls, ['stop', 'approve:proof:ABC12345', 'approved']);
+  });
+}
+test('ordinary invitation entry still checks access before joining', async () => {
+  const { input } = setup(); input.desktopId = '';
+  const seen: unknown[] = [];
+  const entry = await loadJoinEntry(input, async body => { seen.push(body); return { state: 'private' }; });
+  assert.equal(entry.state, 'private');
+  assert.deepEqual(seen, [{ invite: 'invite' }]);
 });

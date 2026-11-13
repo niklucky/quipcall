@@ -123,6 +123,28 @@ async fn guard(State(s): State<AppState>, req: Request, next: Next) -> Response 
         .insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
     res
 }
+/// Independent loops prevent slow LiveKit timeouts from delaying auth purges.
+fn start_cleanup(state: AppState) -> [tokio::task::JoinHandle<()>; 2] {
+    let auth_state = state.clone();
+    let auth = tokio::spawn(async move {
+        loop {
+            if let Err(e) = auth::cleanup(&auth_state).await {
+                tracing::warn!("auth cleanup: {}", e.message);
+            }
+            tokio::time::sleep(Duration::from_secs(600)).await;
+        }
+    });
+    let rooms = tokio::spawn(async move {
+        loop {
+            if let Err(e) = rooms::cleanup_quick_calls(&state).await {
+                tracing::warn!("quick call cleanup: {}", e.message);
+            }
+            tokio::time::sleep(Duration::from_secs(600)).await;
+        }
+    });
+    [auth, rooms]
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -132,40 +154,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let state = AppState::new(Config::from_env()?).await?;
     tokio::spawn(auth::mail_worker(state.clone()));
-    let cleanup_state = state.clone();
-    tokio::spawn(async move {
-        let cleanup = &cleanup_state.db;
-        loop {
-            // Expired challenges and session credentials have no reason to remain.
-            for table in [
-                "sessions",
-                "account_invites",
-                "magic_links",
-                "desktop_logins",
-            ] {
-                if let Err(e) = sqlx::query(&format!("DELETE FROM {table} WHERE expires < ?"))
-                    .bind(auth::now())
-                    .execute(cleanup)
-                    .await
-                {
-                    tracing::warn!("auth cleanup: {e}");
-                }
-            }
-            let _ = rooms::cleanup_invites(cleanup).await;
-            if let Err(e) = rooms::cleanup_quick_calls(&cleanup_state).await {
-                tracing::warn!("quick call cleanup: {}", e.message);
-            }
-            let _ = sqlx::query("DELETE FROM mail_requests WHERE created < ?")
-                .bind(auth::now() - 900)
-                .execute(cleanup)
-                .await;
-            let _ = sqlx::query("DELETE FROM rate_limits WHERE expires < ?")
-                .bind(auth::now())
-                .execute(cleanup)
-                .await;
-            tokio::time::sleep(Duration::from_secs(600)).await;
-        }
-    });
+    let _cleanup = start_cleanup(state.clone());
     let listener = tokio::net::TcpListener::bind(&state.config.bind).await?;
     tracing::info!("listening on {}", listener.local_addr()?);
     axum::serve(listener, router(state)).await?;
