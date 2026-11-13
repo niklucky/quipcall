@@ -1311,7 +1311,6 @@ impl Capsule {
     fn controls_row(&self, cx: &mut Context<Self>) -> Div {
         let c = self.call.read(cx);
         let camera_off = c.camera == Camera::Off;
-        let copied = c.copied_at.is_some();
         let item = |id: &'static str,
                     glyph: Icon,
                     tone: Tone,
@@ -1360,10 +1359,10 @@ impl Capsule {
             ))
             .child(item(
                 "link",
-                if copied { Icon::Check } else { Icon::Link },
+                Icon::UserPlus,
                 Tone::Plain,
-                if copied { "Copied" } else { "Copy link" },
-                Box::new(move |cx| call2.update(cx, |c, cx| c.copy_link(cx))),
+                "Invite",
+                Box::new(move |cx| call2.update(cx, |c, cx| c.invite(cx))),
             ))
             .child(item(
                 "window",

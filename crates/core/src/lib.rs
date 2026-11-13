@@ -4,12 +4,13 @@
 //! published tracks and remote video plumbing. It has no UI dependency — a UI
 //! drives it through [`Engine`] methods and consumes [`Event`]s.
 //!
-//! LiveKit needs tokio; the engine owns a small runtime so the UI can use any
-//! executor it likes.
+//! Each engine owns its runtime, including LiveKit internals. Application HTTP
+//! uses a separate lazy runtime that survives call teardown.
 
 pub mod audio_tap;
 mod camera;
 pub mod denoise;
+pub mod http;
 pub mod models;
 pub mod permissions;
 #[cfg(target_os = "macos")]
@@ -22,6 +23,7 @@ mod record_mac;
 mod screen;
 #[cfg(target_os = "macos")]
 mod screen_mac;
+mod tasks;
 mod transcribe;
 pub mod trial;
 pub mod video;
@@ -37,7 +39,7 @@ use livekit::options::TrackPublishOptions;
 use livekit::prelude::*;
 use livekit::{AudioProcessingOptions, PlatformAudio};
 use parking_lot::Mutex;
-use quipcall_protocol::{ApiError, JoinInfo};
+use quipcall_protocol::JoinInfo;
 
 pub use audio_tap::{Listener, Speaker, VoiceFrame};
 pub use livekit;
@@ -212,8 +214,8 @@ pub struct Handover {
 }
 
 pub struct Engine {
-    /// `None` only while dropping, when it moves to a thread of its own.
-    rt: Option<tokio::runtime::Runtime>,
+    runtime: Option<tokio::runtime::Runtime>,
+    tasks: tasks::Tasks,
     state: Arc<Mutex<State>>,
     events: async_channel::Sender<Event>,
 }
@@ -276,6 +278,8 @@ struct State {
     can_transcribe: Option<String>,
     /// `disconnect` saying goodbye to the server; see [`Engine::closed`].
     closing: Vec<Closing>,
+    /// Delivery tasks for this connection, including a transcript already stopping.
+    transcript_sends: Vec<Closing>,
 }
 
 type Closing = futures_util::future::Shared<futures_util::future::BoxFuture<'static, ()>>;
@@ -302,17 +306,42 @@ impl std::fmt::Display for StoppedStarting {
 
 impl std::error::Error for StoppedStarting {}
 
+/// Account/room HTTP runtime, initialized lazily per process.
+fn runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
+    static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, std::io::Error>> =
+        std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_name("quipcall-http")
+                .enable_all()
+                .build()
+        })
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+async fn after_permission<T>(
+    permission: impl Future<Output = anyhow::Result<()>>,
+    request: impl Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    permission.await?;
+    request.await
+}
+
 impl Engine {
     pub fn new() -> anyhow::Result<(Self, async_channel::Receiver<Event>)> {
-        let rt = tokio::runtime::Builder::new_multi_thread()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("quipcall-engine")
             .enable_all()
             .build()?;
+        let tasks = tasks::Tasks::new(runtime.handle().clone());
         let (events, rx) = async_channel::unbounded();
         Ok((
             Self {
-                rt: Some(rt),
+                runtime: Some(runtime),
+                tasks,
                 state: Default::default(),
                 events,
             },
@@ -325,45 +354,26 @@ impl Engine {
         &self,
         server: &str,
         room: &str,
-        identity: &str,
-        name: &str,
-    ) -> impl Future<Output = anyhow::Result<JoinInfo>> + Send + 'static {
-        let url = format!("{}/api/join", server.trim_end_matches('/'));
-        let query = [
-            ("room", room.to_owned()),
-            ("identity", identity.to_owned()),
-            ("name", name.to_owned()),
-        ];
-        let handle = self.rt().handle().clone();
+        session: &str,
+    ) -> impl Future<Output = anyhow::Result<JoinInfo>> + Send + 'static + use<> {
+        let events = self.events.clone();
+        let request = http::request_with_retry(
+            server,
+            Some(session),
+            "/join",
+            Some(serde_json::json!({"room":room})),
+            "POST",
+            true,
+        );
         async move {
-            handle
-                .spawn(async move {
-                    let client = reqwest::Client::builder()
-                        .timeout(Duration::from_secs(10))
-                        .build()?;
-                    // Flaky Wi-Fi or a VPN dropping the first connection
-                    // shouldn't fail the call: retry transport errors only.
-                    let mut attempt = 1;
-                    let resp = loop {
-                        match client.get(&url).query(&query).send().await {
-                            Ok(resp) => break resp,
-                            Err(e) if attempt < 3 && (e.is_connect() || e.is_timeout()) => {
-                                tracing::warn!("join attempt {attempt} failed: {e}");
-                                tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
-                                attempt += 1;
-                            }
-                            Err(e) => return Err(e.into()),
-                        }
-                    };
-                    if !resp.status().is_success() {
-                        let err: ApiError = resp.json().await.unwrap_or(ApiError {
-                            error: "unknown server error".into(),
-                        });
-                        anyhow::bail!("server: {}", err.error);
-                    }
-                    Ok(resp.json::<JoinInfo>().await?)
-                })
-                .await?
+            // A macOS prompt can remain open indefinitely. Do not mint the
+            // short-lived admission token until the user has answered it.
+            let permission = async move {
+                microphone_permission(&events).await?;
+                anyhow::Ok(())
+            };
+            let value = after_permission(permission, request).await?;
+            Ok(serde_json::from_value(value)?)
         }
     }
 
@@ -377,7 +387,7 @@ impl Engine {
         };
         let state = self.state.clone();
         let events = self.events.clone();
-        self.rt().spawn(async move {
+        self.tasks.spawn(async move {
             if let Err(e) = connect(state, events.clone(), join, connection).await {
                 let _ = events
                     .send(Event::Error(format!("connect failed: {e:#}")))
@@ -389,7 +399,7 @@ impl Engine {
     pub fn disconnect(&self) {
         // Everything of this call leaves the state now, the audio device too:
         // a call connected before the goodbye below finishes has its own.
-        let (room, audio, screen, camera, recorder, transcribing) = {
+        let (room, audio, screen, camera, recorder, transcribing, outgoing) = {
             let mut s = self.state.lock();
             forget_call(&mut s);
             // Forget goodbyes already said. `peek` would only see ones
@@ -402,21 +412,27 @@ impl Engine {
                 s.camera.take(),
                 s.recorder.take(),
                 s.transcribing.take(),
+                std::mem::take(&mut s.transcript_sends),
             )
         };
         drop(screen);
         stop_taking_in(transcribing.as_ref(), recorder.as_ref());
         let events = self.events.clone();
-        let closing = self.rt().spawn(async move {
-            // Leaving finishes your recording, keeping everything up to now,
-            // while what was being said is still transcribed: the call's
-            // history waits for it.
-            wind_down(transcribing, recorder, &events, false).await;
-            // Say goodbye first: until the server hears it, everyone else
-            // (and you, if you rejoin) sees you in the room for another 20 s.
-            if let Some(room) = room {
-                let _ = room.close().await;
-            }
+        let closing = self.tasks.spawn(async move {
+            finish_call(
+                async {
+                    finish_words(transcribing, &events).await;
+                    futures_util::future::join_all(outgoing).await;
+                },
+                finish_recording(recorder, &events, false),
+                async {
+                    if let Some(room) = room {
+                        let _ = room.close().await;
+                    }
+                },
+                Duration::from_secs(2),
+            )
+            .await;
             // Stopping the camera blocks briefly; keep it off the UI thread.
             if let Some(camera) = camera {
                 let _ = tokio::task::spawn_blocking(move || drop(camera)).await;
@@ -436,7 +452,7 @@ impl Engine {
     }
 
     fn rt(&self) -> &tokio::runtime::Runtime {
-        self.rt.as_ref().expect("engine runtime")
+        self.runtime.as_ref().expect("engine runtime initialized")
     }
 
     pub fn set_mic_enabled(&self, enabled: bool) {
@@ -466,7 +482,7 @@ impl Engine {
         }
         let state = self.state.clone();
         let events = self.events.clone();
-        self.rt().spawn(async move {
+        self.tasks.spawn(async move {
             let result = async {
                 if !camera::synthetic() {
                     if permissions::status(MediaDevice::Camera) == Access::Undecided {
@@ -513,7 +529,7 @@ impl Engine {
             (s.room.clone(), s.camera.take())
         };
         let events = self.events.clone();
-        self.rt().spawn(async move {
+        self.tasks.spawn(async move {
             if let Some(camera) = camera {
                 match room {
                     Some(room) => camera.stop(&room).await,
@@ -537,12 +553,14 @@ impl Engine {
     ) -> async_channel::Receiver<anyhow::Result<ShareSourceUpdate>> {
         let (tx, rx) = async_channel::bounded(8);
         let runtime = self.rt().handle().clone();
+        let tasks = self.tasks.clone();
         self.rt().spawn_blocking(move || {
             crate::autorelease_pool(|| {
                 runtime.block_on(async {
                     tokio::select! {
                         biased;
                         _ = tx.closed() => {},
+                        _ = tasks.cancelled() => {},
                         result = screen_mac::list_sources(thumb_width, &tx) => {
                             if let Err(error) = result {
                                 let _ = tx.send(Err(error)).await;
@@ -565,8 +583,8 @@ impl Engine {
     ) {
         let state = self.state.clone();
         let events = self.events.clone();
-        let handle = self.rt().handle().clone();
-        self.rt().spawn(async move {
+        let handle = self.tasks.clone();
+        self.tasks.spawn(async move {
             let result = async {
                 let room = state.lock().room.clone().context("not in a call")?;
                 let previous = state.lock().screen.take();
@@ -604,7 +622,7 @@ impl Engine {
     }
 
     pub fn stop_screen_share(&self) {
-        self.rt()
+        self.tasks
             .spawn(stop_screen_share(self.state.clone(), self.events.clone()));
     }
 
@@ -626,12 +644,12 @@ impl Engine {
         track: &RemoteVideoTrack,
         sink: Arc<dyn FrameSink>,
     ) -> VideoSubscription {
-        video::attach(self.rt().handle(), track, sink)
+        video::attach(&self.tasks, track, sink)
     }
 
     /// Everyone's voice, 10 ms at a time, until the listener is dropped.
     pub fn listen(&self) -> Listener {
-        listen(&self.state, self.rt().handle())
+        listen(&self.state, &self.tasks)
     }
 
     /// Record the call into `path`: everyone's voice, mixed (.m4a), and with
@@ -648,9 +666,9 @@ impl Engine {
     ) {
         let state = self.state.clone();
         let events = self.events.clone();
-        let handle = self.rt().handle().clone();
+        let handle = self.tasks.clone();
         let with_screen = screen.is_some();
-        self.rt().spawn(async move {
+        self.tasks.spawn(async move {
             let event =
                 match start_recording(&state, &handle, &events, path, screen, each_voice).await {
                     Ok(path) => Event::RecordingStarted {
@@ -671,7 +689,7 @@ impl Engine {
         };
         let Some(recorder) = recorder else { return };
         let events = self.events.clone();
-        self.rt().spawn(async move {
+        self.tasks.spawn(async move {
             let saved = tokio::task::spawn_blocking(move || recorder.stop()).await;
             if let Some(room) = room
                 && let Err(e) = set_attribute(&room, RECORDING, "").await
@@ -711,8 +729,8 @@ impl Engine {
         };
         let state = self.state.clone();
         let events = self.events.clone();
-        let handle = self.rt().handle().clone();
-        self.rt().spawn(async move {
+        let handle = self.tasks.clone();
+        self.tasks.spawn(async move {
             let started =
                 start_transcribing(&state, &handle, &events, options, room, connection, id).await;
             let current = {
@@ -749,7 +767,7 @@ impl Engine {
     pub fn stop_transcribing(&self) {
         let state = self.state.clone();
         let events = self.events.clone();
-        self.rt()
+        self.tasks
             .spawn(async move { stop_transcribing(&state, &events, None).await });
     }
 
@@ -790,7 +808,7 @@ impl Engine {
             s.room.clone()
         };
         if let Some(room) = room {
-            self.rt().spawn(async move {
+            self.tasks.spawn(async move {
                 let value = value.as_deref().unwrap_or("");
                 if let Err(e) = set_attribute(&room, CAN_TRANSCRIBE, value).await {
                     tracing::warn!("can-transcribe attribute: {e}");
@@ -804,7 +822,7 @@ impl Engine {
             return;
         };
         let to = identity.to_owned();
-        self.rt().spawn(async move {
+        self.tasks.spawn(async move {
             if let Err(e) = send_transcript(&room, &message, Some(to)).await {
                 tracing::warn!("transcript message {message:?}: {e}");
             }
@@ -852,7 +870,7 @@ async fn stop_transcribing_for(
     };
     // Sending can wait on the connection: it holds nothing up.
     if let Some(room) = room.clone().filter(|_| !pass_on.is_empty()) {
-        tokio::spawn(async move {
+        tasks::spawn(async move {
             for to in pass_on {
                 tracing::info!(%to, "the transcript stopped: so does its handover");
                 if let Err(e) = send_transcript(&room, &TranscriptMessage::Stop, Some(to)).await {
@@ -1004,7 +1022,7 @@ async fn on_transcript(
             tracing::info!(%by, "asked to stop the transcript");
             // The last words take a moment; room events go on meanwhile.
             let (state, events) = (state.clone(), events.clone());
-            tokio::spawn(async move { stop_transcribing(&state, &events, Some(by)).await });
+            tasks::spawn(async move { stop_transcribing(&state, &events, Some(by)).await });
         }
         Ok(TranscriptMessage::Ask { handover, claim }) => {
             // Older apps don't say which claim they hand over: the one they
@@ -1035,7 +1053,7 @@ async fn on_transcript(
 /// Start `id` ([`reserve_start`]) in `room`, the call `connection`.
 async fn start_transcribing(
     state: &Arc<Mutex<State>>,
-    handle: &tokio::runtime::Handle,
+    handle: &tasks::Tasks,
     events: &async_channel::Sender<Event>,
     options: TranscribeOptions,
     room: Arc<Room>,
@@ -1091,8 +1109,9 @@ async fn start_transcribing(
         });
     };
     {
+        let state_for_delivery = state.clone();
         let (room, state) = (room.clone(), state.clone());
-        handle.spawn(async move {
+        let delivery = handle.spawn(async move {
             while let Some(line) = to_send.recv().await {
                 // The last words after you left still go to that call, but
                 // into no other's history.
@@ -1108,6 +1127,13 @@ async fn start_transcribing(
                 }
             }
         });
+        let mut s = state_for_delivery.lock();
+        if s.connection == connection {
+            s.transcript_sends
+                .retain(|task| task.clone().now_or_never().is_none());
+            s.transcript_sends
+                .push(delivery.map(|_| ()).boxed().shared());
+        }
     }
     let transcriber =
         tokio::task::spawn_blocking(move || quipcall_stt::Transcriber::start(stt, on_line))
@@ -1208,7 +1234,7 @@ fn install_transcribing(
     state: &Arc<Mutex<State>>,
     connection: u64,
     id: u64,
-    handle: &tokio::runtime::Handle,
+    handle: &tasks::Tasks,
     make: impl FnOnce(Listener) -> transcribe::Transcribing,
 ) -> anyhow::Result<()> {
     let weak = Arc::downgrade(state);
@@ -1241,7 +1267,7 @@ fn may_start(
 }
 
 /// A listener to this call; remote microphones start decoding for it.
-fn listen(state: &Arc<Mutex<State>>, handle: &tokio::runtime::Handle) -> Listener {
+fn listen(state: &Arc<Mutex<State>>, handle: &tasks::Tasks) -> Listener {
     let weak = Arc::downgrade(state);
     listen_to(&mut state.lock(), weak, handle)
 }
@@ -1249,7 +1275,7 @@ fn listen(state: &Arc<Mutex<State>>, handle: &tokio::runtime::Handle) -> Listene
 fn listen_to(
     s: &mut State,
     weak: std::sync::Weak<Mutex<State>>,
-    handle: &tokio::runtime::Handle,
+    handle: &tasks::Tasks,
 ) -> Listener {
     let listener = s.hub.listen(move || {
         if let Some(state) = weak.upgrade() {
@@ -1299,7 +1325,7 @@ async fn pump_mic(identity: String, track: RemoteAudioTrack, hub: Arc<audio_tap:
 
 async fn start_recording(
     state: &Arc<Mutex<State>>,
-    handle: &tokio::runtime::Handle,
+    handle: &tasks::Tasks,
     events: &async_channel::Sender<Event>,
     path: PathBuf,
     screen: Option<(SourceId, ScreenSharePreset)>,
@@ -1641,25 +1667,60 @@ pub(crate) fn autorelease_pool<R>(f: impl FnOnce() -> R) -> R {
     }
 }
 
+/// Falling back after thread creation failure must not drop a Runtime inside
+/// an async context (which would panic again during Engine::drop).
+struct ShutdownRuntime {
+    runtime: Option<tokio::runtime::Runtime>,
+    tasks: tasks::Tasks,
+}
+impl ShutdownRuntime {
+    fn take(&mut self) -> tokio::runtime::Runtime {
+        self.runtime.take().expect("runtime owned")
+    }
+}
+impl Drop for ShutdownRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            self.tasks.cancel();
+            runtime.shutdown_background();
+        }
+    }
+}
+fn retire_runtime(
+    runtime: tokio::runtime::Runtime,
+    tasks: tasks::Tasks,
+    finish: impl Future<Output = ()> + Send + 'static,
+    spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut owned = ShutdownRuntime {
+        runtime: Some(runtime),
+        tasks,
+    };
+    spawn(Box::new(move || {
+        let runtime = owned.take();
+        runtime.block_on(finish);
+        runtime.shutdown_timeout(Duration::from_secs(1));
+    }))
+}
 impl Drop for Engine {
     fn drop(&mut self) {
         self.disconnect();
-        // Dropping the runtime would cancel the goodbye mid-way. Let it
-        // finish on a thread of its own, then drop the runtime there.
         let closed = self.closed();
-        if let Some(rt) = self.rt.take() {
-            let spawned = std::thread::Builder::new()
-                .name("quipcall-close".into())
-                .spawn(move || {
-                    let closed =
-                        rt.block_on(async { tokio::time::timeout(CLOSE_TIMEOUT, closed).await });
-                    if closed.is_err() {
-                        tracing::warn!("leaving the room timed out");
-                    }
-                });
-            if let Err(e) = spawned {
-                tracing::warn!("leave the room: {e}");
+        let tasks = self.tasks.clone();
+        let runtime = self.runtime.take().expect("engine runtime initialized");
+        let finish = async move {
+            if tokio::time::timeout(CLOSE_TIMEOUT, closed).await.is_err() {
+                tracing::warn!("leaving the room timed out");
             }
+            tasks.shutdown().await;
+        };
+        if let Err(e) = retire_runtime(runtime, self.tasks.clone(), finish, |close| {
+            std::thread::Builder::new()
+                .name("quipcall-close".into())
+                .spawn(close)
+                .map(|_| ())
+        }) {
+            tracing::warn!("could not start call teardown thread: {e}");
         }
     }
 }
@@ -1680,6 +1741,20 @@ async fn stop_screen_share(state: Arc<Mutex<State>>, events: async_channel::Send
         .await;
 }
 
+/// Ask before admission or opening WebRTC's audio device. Calling again after
+/// join only reads an answered permission; direct connect uses the same policy.
+async fn microphone_permission(events: &async_channel::Sender<Event>) -> anyhow::Result<bool> {
+    if std::env::var("QUIPCALL_NO_MIC").is_ok() {
+        return Ok(false);
+    }
+    if permissions::status(MediaDevice::Microphone) == Access::Undecided {
+        events
+            .send(Event::WaitingForPermission(MediaDevice::Microphone))
+            .await?;
+    }
+    Ok(permissions::request(MediaDevice::Microphone).await)
+}
+
 async fn connect(
     state: Arc<Mutex<State>>,
     events: async_channel::Sender<Event>,
@@ -1691,14 +1766,7 @@ async fn connect(
 
     // Ask before anything opens the mic: an unanswered prompt would block
     // WebRTC's audio thread. Without access we still play remote audio.
-    let mic_allowed = use_audio && {
-        if permissions::status(MediaDevice::Microphone) == Access::Undecided {
-            events
-                .send(Event::WaitingForPermission(MediaDevice::Microphone))
-                .await?;
-        }
-        permissions::request(MediaDevice::Microphone).await
-    };
+    let mic_allowed = microphone_permission(&events).await?;
     if use_audio && !mic_allowed {
         events
             .send(Event::Error(
@@ -1761,7 +1829,7 @@ async fn connect(
     // Others can ask this Mac to transcribe.
     if let Some(model) = can_transcribe {
         let room = room.clone();
-        tokio::spawn(async move {
+        tasks::spawn(async move {
             if let Err(e) = set_attribute(&room, CAN_TRANSCRIBE, &model).await {
                 tracing::warn!("can-transcribe attribute: {e}");
             }
@@ -1789,7 +1857,7 @@ async fn connect(
     // Publishing opens the mic and can take a moment; don't hold up room events.
     if let Some(audio) = audio.filter(|_| mic_allowed) {
         let (room, state, events) = (room.clone(), state.clone(), events.clone());
-        tokio::spawn(async move {
+        tasks::spawn(async move {
             if let Some(denoise) = denoise
                 && let Err(e) = denoise.await
             {
@@ -1895,7 +1963,7 @@ async fn connect(
                 if yields {
                     tracing::info!(%identity, "their Mac takes over the transcript");
                     let (state, events) = (state.clone(), events.clone());
-                    tokio::spawn(async move {
+                    tasks::spawn(async move {
                         stop_transcribing_for(&state, &events, Some(identity), true).await
                     });
                 }
@@ -1923,7 +1991,7 @@ async fn connect(
                 };
                 if let Some(lines) = history.filter(|l| !l.is_empty()) {
                     let to = p.identity().to_string();
-                    tokio::spawn({
+                    tasks::spawn({
                         let room = room.clone();
                         async move { send_history(&room, lines, to).await }
                     });
@@ -1949,6 +2017,7 @@ async fn connect(
         let mut s = state.lock();
         if is_current(&s, &room) {
             s.room = None;
+            s.transcript_sends.clear();
             forget_call(&mut s);
             (s.recorder.take(), s.transcribing.take())
         } else {
@@ -2004,33 +2073,64 @@ async fn wind_down(
     events: &async_channel::Sender<Event>,
     say_saved: bool,
 ) {
-    let words = async {
-        if let Some(transcribing) = transcribing {
-            let _ = tokio::task::spawn_blocking(move || transcribing.stop()).await;
-            let _ = events
-                .send(Event::TranscriptionStopped {
-                    by: None,
-                    handed_over: false,
-                })
-                .await;
-        }
+    futures_util::future::join(
+        finish_words(transcribing, events),
+        finish_recording(recorder, events, say_saved),
+    )
+    .await;
+}
+async fn finish_words(
+    transcribing: Option<transcribe::Transcribing>,
+    events: &async_channel::Sender<Event>,
+) {
+    if let Some(transcribing) = transcribing {
+        let _ = tokio::task::spawn_blocking(move || transcribing.stop()).await;
+        let _ = events
+            .send(Event::TranscriptionStopped {
+                by: None,
+                handed_over: false,
+            })
+            .await;
+    }
+}
+async fn finish_recording(
+    recorder: Option<record::Recorder>,
+    events: &async_channel::Sender<Event>,
+    say_saved: bool,
+) {
+    let Some(recorder) = recorder else { return };
+    let event = match tokio::task::spawn_blocking(move || recorder.stop()).await {
+        Ok(Ok(saved)) => Event::RecordingSaved(saved),
+        Ok(Err(e)) => Event::RecordingFailed(format!("{e:#}")),
+        Err(e) => Event::RecordingFailed(format!("{e}")),
     };
-    let file = async {
-        let Some(recorder) = recorder else { return };
-        let event = match tokio::task::spawn_blocking(move || recorder.stop()).await {
-            Ok(Ok(saved)) => Event::RecordingSaved(saved),
-            Ok(Err(e)) => Event::RecordingFailed(format!("{e:#}")),
-            Err(e) => Event::RecordingFailed(format!("{e}")),
-        };
-        match event {
-            _ if say_saved => {
-                let _ = events.send(event).await;
+    match event {
+        _ if say_saved => {
+            let _ = events.send(event).await;
+        }
+        Event::RecordingFailed(e) => tracing::warn!("recording: {e}"),
+        _ => {}
+    }
+}
+/// Finish sending final words before goodbye, with a bounded allowance so a
+/// stalled transcriber/network cannot prevent disconnection. Recording is local
+/// and runs independently. Engine drop retains its outer teardown deadline.
+async fn finish_call(
+    words: impl Future<Output = ()>,
+    recording: impl Future<Output = ()>,
+    close: impl Future<Output = ()>,
+    words_timeout: Duration,
+) {
+    futures_util::future::join(
+        async {
+            if tokio::time::timeout(words_timeout, words).await.is_err() {
+                tracing::warn!("final transcript delivery timed out; closing the call");
             }
-            Event::RecordingFailed(e) => tracing::warn!("recording: {e}"),
-            _ => {}
-        }
-    };
-    futures_util::future::join(words, file).await;
+            close.await;
+        },
+        recording,
+    )
+    .await;
 }
 
 /// Keeps track of remote videos and microphones, for `connection` only: a
@@ -2074,7 +2174,7 @@ fn track_publications(state: &Mutex<State>, connection: u64, event: &RoomEvent) 
             };
             if s.hub.listening() && !s.mic_streams.contains_key(&key) {
                 let pump = pump_mic(key.participant.clone(), track.clone(), s.hub.clone());
-                s.mic_streams.insert(key.clone(), tokio::spawn(pump));
+                s.mic_streams.insert(key.clone(), tasks::spawn(pump));
             }
             s.mics.insert(key, track.clone());
         }
@@ -2181,6 +2281,97 @@ fn translate(event: RoomEvent) -> Option<Event> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn goodbye_waits_for_final_delivery_but_not_local_recording() {
+        let (send, mut lines) = tokio::sync::mpsc::unbounded_channel();
+        let (arrived, received) = tokio::sync::oneshot::channel();
+        let (release, network) = tokio::sync::oneshot::channel();
+        let delivery = tokio::spawn(async move {
+            assert_eq!(lines.recv().await, Some("last sentence"));
+            arrived.send(()).unwrap();
+            network.await.unwrap(); // A slow final send, after transcription stopped.
+            assert_eq!(lines.recv().await, None);
+        });
+        let (closed, mut goodbye) = tokio::sync::oneshot::channel();
+        let (recorded, recording) = tokio::sync::oneshot::channel();
+        let finish = tokio::spawn(finish_call(
+            async move {
+                send.send("last sentence").unwrap();
+                drop(send);
+                delivery.await.unwrap();
+            },
+            async {
+                recording.await.unwrap();
+            },
+            async {
+                closed.send(()).unwrap();
+            },
+            Duration::from_secs(2),
+        ));
+        received.await.unwrap();
+        assert!(matches!(
+            goodbye.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), goodbye)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!finish.is_finished(), "local recording is still finalizing");
+        recorded.send(()).unwrap();
+        finish.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_final_transcript_still_allows_goodbye() {
+        let (closed, goodbye) = tokio::sync::oneshot::channel();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            finish_call(
+                std::future::pending(),
+                async {},
+                async {
+                    closed.send(()).unwrap();
+                },
+                Duration::from_millis(10),
+            ),
+        )
+        .await
+        .unwrap();
+        goodbye.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn teardown_thread_failure_shuts_runtime_without_panicking_in_async_context() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let tasks = tasks::Tasks::new(runtime.handle().clone());
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let task = tasks.spawn(async {
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started.await.unwrap();
+        let error = retire_runtime(runtime, tasks.clone(), async {}, |job| {
+            drop(job); // Builder drops the closure when OS thread creation fails.
+            Err(std::io::Error::other("thread limit"))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "thread limit");
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(
+            tasks
+                .spawn(async { panic!("late work ran") })
+                .await
+                .unwrap_err()
+                .is_cancelled()
+        );
+    }
+
     #[test]
     fn the_newest_transcriber_carries_on() {
         assert_eq!(parse_transcribing("parakeet@1700"), ("parakeet", 1700));
@@ -2234,7 +2425,7 @@ mod tests {
             Some("anna".into()),
         ));
         assert_eq!(state.lock().start, Start::Stopped(id, Some("anna".into())));
-        let installed = install_transcribing(state, connection, id, engine.rt().handle(), |_| {
+        let installed = install_transcribing(state, connection, id, &engine.tasks, |_| {
             unreachable!("it listened")
         });
         let stopped = installed.expect_err("installed after Stop");
@@ -2501,9 +2692,8 @@ mod tests {
         engine.disconnect();
         // Wait for the goodbye task itself; awaiting `closed()` would hide
         // the bug this is about.
-        let metrics = engine.rt().metrics();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while metrics.num_alive_tasks() > 0 {
+        while engine.closed().now_or_never().is_none() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "goodbye never finished"

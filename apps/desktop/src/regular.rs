@@ -482,7 +482,6 @@ impl Regular {
                 ),
             }
         });
-        let copied = c.copied_at.is_some();
         let call = self.call.clone();
         div()
             .h(px(TITLE))
@@ -576,13 +575,13 @@ impl Regular {
             .child(
                 button(
                     "invite",
-                    if copied { "Link copied" } else { "Invite" },
-                    Some(if copied { Icon::Check } else { Icon::UserPlus }),
+                    "Invite",
+                    Some(Icon::UserPlus),
                     Kind::Secondary,
                     false,
                 )
-                .tooltip(tooltip("Copy the call link"))
-                .on_click(move |_, _, cx| call.update(cx, |c, cx| c.copy_link(cx))),
+                .tooltip(tooltip("Invitations and room access"))
+                .on_click(move |_, _, cx| call.update(cx, |c, cx| c.invite(cx))),
             )
     }
 
@@ -630,7 +629,7 @@ impl Regular {
             .child(
                 div()
                     .text_color(rgb(TEXT_DIM))
-                    .child("Anyone with the link can join."),
+                    .child("Use Invite to share access. Private rooms require an invitation."),
             )
             .child(
                 div()

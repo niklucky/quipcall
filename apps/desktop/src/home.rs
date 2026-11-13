@@ -40,6 +40,20 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Home>> {
         .ok()
 }
 
+/// Defer window updates until the caller's entity update has finished.
+pub(crate) fn with_home(
+    cx: &mut App,
+    mut update: impl FnMut(&mut Home, &mut Window, &mut Context<Home>) + 'static,
+) {
+    cx.defer(move |cx| {
+        for window in cx.windows() {
+            if let Some(home) = window.downcast::<Home>() {
+                let _ = home.update(cx, |home, window, cx| update(home, window, cx));
+            }
+        }
+    });
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Side {
     Rooms,
@@ -67,11 +81,37 @@ pub struct Home {
     tab: Tab,
     /// Renaming this room, with the field.
     renaming: Option<(String, Entity<TextInput>, Subscription)>,
-    /// The trash button was pressed once: press again to remove.
-    confirm_remove: Option<String>,
     /// The selected call's recording, playing under its transcript.
     playback: Option<Playback>,
+    account: AccountView,
+    account_open: bool,
+    _activation: Subscription,
+    confirm_remove: Option<String>,
     _subscription: Subscription,
+}
+
+/// Loading the identity for an existing credential is not an account switch.
+#[derive(Default)]
+struct AccountView {
+    principal: Option<String>,
+    session: Option<String>,
+}
+impl AccountView {
+    fn update(&mut self, session: Option<&str>, principal: Option<&str>) -> bool {
+        let replaced = self.session.as_deref() != session;
+        let changed = self.session.is_some() != session.is_some()
+            || principal.is_some_and(|p| self.principal.as_deref().is_some_and(|old| old != p))
+            || (self.principal.is_none() && replaced);
+        if replaced {
+            self.session = session.map(str::to_owned);
+        }
+        if session.is_none() {
+            self.principal = None;
+        } else if let Some(p) = principal {
+            self.principal = Some(p.to_owned());
+        }
+        changed
+    }
 }
 
 /// A recording in Home's player.
@@ -106,7 +146,7 @@ impl Home {
         }
     }
 
-    fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let shell = Shell::global(cx);
         let store = &shell.read(cx).store;
         // Open on the latest call (the one you just left), else the first room.
@@ -135,20 +175,73 @@ impl Home {
             selected,
             tab: Tab::Transcript,
             renaming: None,
-            confirm_remove: None,
             playback: None,
-            _subscription: cx.observe(&shell, |_, _, cx| cx.notify()),
+            confirm_remove: None,
+            account_open: false,
+            _activation: cx.observe_window_activation(window, |_, window, cx| {
+                if window.is_window_active() {
+                    Shell::global(cx).update(cx, |shell, cx| shell.refresh_account(cx));
+                }
+            }),
+            account: AccountView {
+                principal: store.rooms_principal.clone(),
+                session: shell.read(cx).args.session.clone(),
+            },
+            _subscription: cx.observe(&shell, |this, shell, cx| {
+                let s = shell.read(cx);
+                if this.account.update(
+                    s.args.session.as_deref(),
+                    s.principal.as_ref().map(|p| p.id.as_str()),
+                ) {
+                    this.confirm_remove = None;
+                    this.selected = None;
+                    this.renaming = None;
+                    this.playback = None;
+                    this.side = Side::Rooms;
+                    this.tab = Tab::Transcript;
+                }
+                if this.selected.is_none()
+                    && let Some(room) = shell.read(cx).store.rooms.first()
+                {
+                    this.selected = Some(Selected {
+                        room: room.id.clone(),
+                        call: 0,
+                    });
+                }
+                cx.notify();
+            }),
         }
+    }
+
+    pub fn forget_room(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self
+            .renaming
+            .as_ref()
+            .is_some_and(|(room, _, _)| room == id)
+        {
+            self.renaming = None;
+        }
+        if self.selected.as_ref().is_some_and(|s| s.room == id) {
+            self.selected = None;
+            self.playback = None;
+            self.side = Side::Rooms;
+            cx.notify();
+        }
+    }
+
+    pub fn select_room(&mut self, room: String, cx: &mut Context<Self>) {
+        self.side = Side::Rooms;
+        self.select(room, 0, cx);
     }
 
     fn select(&mut self, room: String, call: usize, cx: &mut Context<Self>) {
         let selected = Selected { room, call };
         if self.selected.as_ref() != Some(&selected) {
+            self.confirm_remove = None;
             self.selected = Some(selected);
             self.tab = Tab::Transcript;
             self.playback = None;
             self.renaming = None;
-            self.confirm_remove = None;
             cx.notify();
         }
     }
@@ -321,14 +414,16 @@ impl Home {
             )
     }
 
-    fn new_room(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let id = Shell::global(cx).update(cx, |s, cx| s.new_room(cx));
-        self.side = Side::Rooms;
-        self.select(id.clone(), 0, cx);
-        self.start_rename(id, window, cx);
+    fn new_room(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        crate::rooms::open(None, cx);
     }
 
-    fn start_rename(&mut self, room: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn start_rename(
+        &mut self,
+        room: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let name = Shell::global(cx)
             .read(cx)
             .store
@@ -416,8 +511,16 @@ impl Home {
                     .map(|(ix, room)| {
                         let people = store.people_in(&room.id);
                         let latest = store.calls_in(&room.id).next();
-                        let meta =
+                        let recent =
                             latest.map_or_else(|| "No calls yet".to_owned(), |i| when(i, true));
+                        let meta = format!(
+                            "{} · {recent}",
+                            if room.owner.is_empty() {
+                                "Saved link"
+                            } else {
+                                room.kind.label()
+                            }
+                        );
                         let selected = self.selected.as_ref().is_some_and(|s| s.room == room.id);
                         let id = room.id.clone();
                         let join = room.id.clone();
@@ -598,12 +701,33 @@ impl Home {
                     .px(px(12.0))
                     .child(
                         button("quick", "Quick call", Some(Icon::Zap), Kind::Primary, true)
-                            .tooltip(tooltip("A one-time room, started right away"))
+                            .tooltip(tooltip(
+                                "Start a 1-to-1 call; unused links expire after 24 hours",
+                            ))
                             .on_click(|_, _, cx| {
                                 Shell::global(cx).update(cx, |s, cx| s.quick_call(cx))
                             }),
                     ),
             )
+            .when(s.store.has_hidden_rooms(), |v| {
+                v.child(
+                    button(
+                        "restore-rooms",
+                        "Restore hidden rooms",
+                        None,
+                        Kind::Secondary,
+                        true,
+                    )
+                    .on_click(|_, _, cx| {
+                        Shell::global(cx).update(cx, |s, cx| {
+                            s.store.restore_hidden_rooms();
+                            s.store.save();
+                            s.refresh_account(cx);
+                            cx.notify();
+                        })
+                    }),
+                )
+            })
             .child(
                 div()
                     .flex_none()
@@ -631,6 +755,83 @@ impl Home {
                             .on_click(cx.listener(|this, _, window, cx| this.new_room(window, cx))),
                     ),
             )
+            .when(
+                self.account_open || s.auth_attempt.pending() || !s.auth_message.is_empty(),
+                |el| {
+                    el.child(
+                        div()
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .child(
+                                button(
+                                    "sign-in",
+                                    if s.auth_attempt.pending() {
+                                        "Waiting for browser…"
+                                    } else {
+                                        "Sign in / switch account"
+                                    },
+                                    None,
+                                    Kind::Secondary,
+                                    true,
+                                )
+                                .when(s.auth_busy(), |button| button.opacity(0.45))
+                                .when(!s.auth_busy(), |button| {
+                                    button.on_click(|_, _, cx| {
+                                        Shell::global(cx).update(cx, |s, cx| s.sign_in(None, cx))
+                                    })
+                                }),
+                            )
+                            .child(
+                                button(
+                                    "edit-name",
+                                    "Change your name",
+                                    None,
+                                    Kind::Secondary,
+                                    true,
+                                )
+                                .on_click(|_, _, cx| crate::onboarding::open_profile(cx)),
+                            )
+                            .when(s.auth_attempt.pending(), |el| {
+                                el.child(
+                                    button(
+                                        "cancel-sign-in",
+                                        "Cancel sign-in",
+                                        None,
+                                        Kind::Secondary,
+                                        true,
+                                    )
+                                    .on_click(|_, _, cx| {
+                                        Shell::global(cx).update(cx, |s, cx| s.cancel_sign_in(cx))
+                                    }),
+                                )
+                            })
+                            .when_some(s.auth_attempt.code(), |el, code| {
+                                el.child(
+                                    div().text_size(px(22.0)).text_color(rgb(TEXT)).child(code),
+                                )
+                            })
+                            .when(s.args.session.is_some(), |el| {
+                                el.child(
+                                    button("sign-out", "Sign out", None, Kind::Secondary, true)
+                                        .on_click(|_, _, cx| {
+                                            Shell::global(cx).update(cx, |s, cx| s.sign_out(cx))
+                                        }),
+                                )
+                            })
+                            .when(!s.auth_message.is_empty(), |el| {
+                                el.child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(TEXT_DIM))
+                                        .child(s.auth_message.clone()),
+                                )
+                            }),
+                    )
+                },
+            )
             .child(
                 div()
                     .id("list")
@@ -655,11 +856,24 @@ impl Home {
                     .border_t_1()
                     .border_color(rgb(LINE))
                     .child(avatar(&me, 26.0))
-                    .child(row_text(me.clone(), "On this Mac"))
+                    .child(row_text(
+                        me.clone(),
+                        if s.principal.as_ref().is_some_and(|p| p.kind == "user") {
+                            "Signed in"
+                        } else {
+                            "Guest / signed out"
+                        },
+                    ))
                     .child(
                         icon_button("edit-me", Icon::Pencil, 28.0)
-                            .tooltip(tooltip("Change your name"))
-                            .on_click(|_, _, cx| crate::onboarding::open_profile(cx)),
+                            .tooltip(tooltip("Account"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.account_open = !this.account_open;
+                                if !this.account_open {
+                                    Shell::global(cx).update(cx, |s, _| s.auth_message.clear());
+                                }
+                                cx.notify();
+                            })),
                     )
                     .child(
                         icon_button("settings", Icon::Settings, 28.0)
@@ -680,7 +894,7 @@ impl Home {
             return pane.child(div().h(px(52.0))).child(empty_state(
                 Icon::Users,
                 "No calls yet",
-                "Start a quick call, or make a room with + and send its link around.",
+                "Start a quick call, or create a public or private room with +.",
             ));
         };
         let saved = store.rooms.iter().find(|r| r.id == selected.room).cloned();
@@ -726,56 +940,81 @@ impl Home {
                         .truncate()
                         .child(title.clone()),
                 )
-                .when(saved.is_some(), |el| {
-                    let id = room_id.clone();
-                    el.child(
-                        icon_button("rename", Icon::Pencil, 24.0)
-                            .tooltip(tooltip("Rename"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.start_rename(id.clone(), window, cx)
-                            })),
-                    )
-                })
+                .when(
+                    saved.as_ref().is_some_and(|r| {
+                        s.store.is_bookmarked(&r.id)
+                            || s.principal.as_ref().is_some_and(|p| p.id == r.owner)
+                    }),
+                    |el| {
+                        let id = room_id.clone();
+                        el.child(
+                            icon_button("rename", Icon::Pencil, 24.0)
+                                .tooltip(tooltip("Rename"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.start_rename(id.clone(), window, cx)
+                                })),
+                        )
+                    },
+                )
                 .into_any_element(),
         };
 
         let actions: Vec<AnyElement> = match &saved {
             Some(room) => {
                 let copy = link.clone();
-                let remove = room.id.clone();
-                let confirming = self.confirm_remove.as_deref() == Some(room.id.as_str());
+                let manage = room.id.clone();
                 let join = room.id.clone();
+                let remove = room.id.clone();
+                let confirming = self.confirm_remove.as_deref() == Some(&room.id);
                 vec![
+                    button(
+                        "remove-room",
+                        if confirming { "Remove?" } else { "" },
+                        Some(Icon::Trash),
+                        if confirming {
+                            Kind::Danger
+                        } else {
+                            Kind::Secondary
+                        },
+                        true,
+                    )
+                    .tooltip(tooltip(if confirming {
+                        "Click again to remove; Restore hidden rooms can undo this"
+                    } else {
+                        "Remove from your rooms on this Mac"
+                    }))
+                    .when(confirming, |v| v.bg(rgb(crate::theme::RAISED_2)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !confirming {
+                            this.confirm_remove = Some(remove.clone());
+                            cx.notify();
+                            return;
+                        }
+                        this.confirm_remove = None;
+                        Shell::global(cx).update(cx, |s, cx| {
+                            s.store.remove_room(&remove);
+                            s.store.save();
+                            cx.notify();
+                        });
+                        this.forget_room(&remove, cx);
+                    }))
+                    .into_any_element(),
                     icon_button("copy-link", Icon::Link, 28.0)
                         .tooltip(tooltip("Copy the room's link"))
                         .on_click(move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
                         })
                         .into_any_element(),
-                    if confirming {
-                        button(
-                            "remove",
-                            "Remove room",
-                            Some(Icon::Trash),
-                            Kind::Danger,
-                            false,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.confirm_remove = None;
-                            this.selected = None;
-                            Shell::global(cx).update(cx, |s, cx| s.remove_room(&remove, cx));
-                            cx.notify();
-                        }))
-                        .into_any_element()
-                    } else {
-                        icon_button("remove", Icon::Trash, 28.0)
-                            .tooltip(tooltip("Remove room"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.confirm_remove = Some(remove.clone());
-                                cx.notify();
-                            }))
-                            .into_any_element()
-                    },
+                    button(
+                        "room-access",
+                        "Access",
+                        Some(Icon::UserPlus),
+                        Kind::Secondary,
+                        false,
+                    )
+                    .tooltip(tooltip("Invitations and room access"))
+                    .on_click(move |_, _, cx| crate::rooms::open(Some(manage.clone()), cx))
+                    .into_any_element(),
                     button("call", "Call", Some(Icon::Phone), Kind::Primary, false)
                         .on_click(move |_, _, cx| {
                             Shell::global(cx).update(cx, |s, cx| s.join_saved(&join, cx))
@@ -797,12 +1036,10 @@ impl Home {
                         Kind::Secondary,
                         false,
                     )
-                    .tooltip(tooltip("Add it to your rooms, link and all"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .tooltip(tooltip("Save this link; your Quick call becomes reusable"))
+                    .on_click(move |_, _, cx| {
                         Shell::global(cx).update(cx, |s, cx| s.keep_room(&keep, &keep_name, cx));
-                        this.side = Side::Rooms;
-                        this.start_rename(keep.clone(), window, cx);
-                    }))
+                    })
                     .into_any_element(),
                     button(
                         "again",
@@ -947,7 +1184,7 @@ impl Home {
             (None, _) => empty_state(
                 Icon::Phone,
                 "No calls in this room yet",
-                "Press Call, or copy the link and send it to whoever should join.",
+                "Press Call to join. Use Access to invite someone or share the room link.",
             )
             .into_any_element(),
             (Some(item), Tab::Transcript) if item.started == 0 => empty_state(
@@ -1284,4 +1521,36 @@ fn nav_button(id: &'static str, glyph: Icon, enabled: bool) -> Stateful<Div> {
                 rgb(RAISED_2)
             },
         ))
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::AccountView;
+    #[test]
+    fn initial_identity_load_preserves_home_but_account_changes_reset_it() {
+        let mut first = AccountView {
+            session: Some("token-a".into()),
+            ..Default::default()
+        };
+        assert!(!first.update(Some("token-a"), None));
+        assert!(!first.update(Some("token-a"), Some("a")));
+        assert!(!first.update(Some("token-a"), Some("a")));
+        assert!(first.update(Some("token-b"), Some("b")));
+        assert!(first.update(None, None));
+        assert!(!first.update(None, None));
+        assert!(first.update(Some("token-a"), Some("a")));
+        let mut cached = AccountView {
+            session: Some("token-a".into()),
+            principal: Some("a".into()),
+        };
+        assert!(!cached.update(Some("token-a"), None));
+        assert!(!cached.update(Some("token-a"), Some("a")));
+        assert!(!cached.update(Some("renewed-token-a"), Some("a")));
+        assert!(cached.update(Some("token-b"), Some("b")));
+        let mut unknown = AccountView {
+            session: Some("unloaded-a".into()),
+            ..Default::default()
+        };
+        assert!(unknown.update(Some("token-b"), Some("b")));
+    }
 }

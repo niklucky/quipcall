@@ -1,4 +1,5 @@
 mod assets;
+mod auth;
 mod call;
 mod capsule;
 mod fullscreen;
@@ -8,12 +9,15 @@ mod mac;
 mod models;
 mod onboarding;
 mod regular;
+mod rooms;
 mod screen_window;
 mod settings;
 mod share_picker;
 #[cfg(feature = "snapshot")]
 mod snapshot;
 mod store;
+#[cfg(test)]
+mod test_support;
 mod text_input;
 mod theme;
 mod timeline;
@@ -35,6 +39,7 @@ use crate::store::Store;
 /// Launch options. Login and contacts replace the dev parts in Stage 4.
 #[derive(Clone)]
 pub struct Args {
+    pub session: Option<String>,
     pub server: String,
     /// Base URL of the web client, for call links.
     pub web: String,
@@ -64,6 +69,7 @@ const WEB: &str = match (option_env!("QUIPCALL_WEB"), option_env!("QUIPCALL_SERV
 
 fn parse_args() -> Args {
     let mut args = Args {
+        session: None,
         server: SERVER.into(),
         web: WEB.into(),
         name: default_name(),
@@ -92,6 +98,21 @@ fn parse_args() -> Args {
             _ => usage(),
         }
     }
+    args.session = auth::load(&args.server);
+    #[cfg(feature = "snapshot")]
+    if let Ok(path) = std::env::var("QUIPCALL_TEST_SESSION_FILE") {
+        let url = quipcall_core::http::Url::parse(&args.server).expect("test server URL");
+        assert!(
+            matches!(url.host_str(), Some("127.0.0.1" | "localhost")),
+            "test sessions are local only"
+        );
+        args.session = Some(
+            std::fs::read_to_string(path)
+                .expect("test session")
+                .trim()
+                .into(),
+        );
+    }
     args
 }
 
@@ -109,7 +130,9 @@ fn default_name() -> String {
 
 /// The room in a call link: `quipcall://join/<room>`.
 fn room_from_link(url: &str) -> Option<String> {
-    let room = url.strip_prefix("quipcall://join/")?;
+    let room = url
+        .strip_prefix("quipcall://join/")
+        .or_else(|| url.strip_prefix("quipcall://open/"))?;
     let room = room.split(['/', '?', '#']).next()?;
     quipcall_protocol::is_valid_room_id(room).then(|| room.to_owned())
 }
@@ -123,6 +146,10 @@ fn usage() -> ! {
 
 /// App-wide state: the home window, the current call and local data.
 pub struct Shell {
+    pub principal: Option<auth::Principal>,
+    pub room_creation: auth::PendingOperation,
+    pub auth_attempt: auth::SignInAttempt,
+    pub auth_message: String,
     pub args: Args,
     pub store: Store,
     call: Option<(Entity<Call>, Subscription)>,
@@ -148,14 +175,7 @@ impl Shell {
     }
 
     pub fn quick_call(&mut self, cx: &mut Context<Self>) {
-        self.start_call(
-            RoomRef {
-                id: store::quick_room_id(),
-                name: "Quick call".into(),
-                one_time: true,
-            },
-            cx,
-        );
+        self.create_room("direct", true, cx);
     }
 
     pub fn join_saved(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -177,33 +197,85 @@ impl Shell {
         }
         let saved = self.store.rooms.iter().find(|r| r.id == id);
         let room = RoomRef {
-            name: saved.map_or_else(|| id.clone(), |r| r.name.clone()),
+            name: saved.map_or_else(|| "Call".into(), |r| r.name.clone()),
             one_time: saved.is_none(),
             id,
         };
         self.start_call(room, cx);
     }
 
-    /// A new room with a placeholder name; returns its id.
-    pub fn new_room(&mut self, cx: &mut Context<Self>) -> String {
-        let name = self.store.next_room_name();
-        let room = self.store.add_room(&name);
-        self.store.save();
-        cx.notify();
-        room.id
-    }
-
     pub fn rename_room(&mut self, id: &str, name: &str, cx: &mut Context<Self>) {
-        self.store.rename_room(id, name);
-        self.store.save();
-        cx.notify();
+        if self.store.is_bookmarked(id) && !self.store.owns_room(id) {
+            self.store.rename_bookmark(id, name);
+            self.store.save();
+            cx.notify();
+        } else {
+            self.rename_remote_room(id, name, cx);
+        }
     }
 
-    /// Keep a quick call's room in the rooms list.
+    /// Save a link locally, first making an owned Quick call reusable.
     pub fn keep_room(&mut self, id: &str, name: &str, cx: &mut Context<Self>) {
-        self.store.keep_room(id, name);
-        self.store.save();
-        cx.notify();
+        let Some(principal) = self.store.rooms_principal.clone() else {
+            self.auth_message = "Sign in before saving a room.".into();
+            cx.notify();
+            return;
+        };
+        let args = self.args.clone();
+        let id = id.to_owned();
+        let name = name.to_owned();
+        cx.spawn(async move |this, cx| {
+            let result: anyhow::Result<crate::store::SavedRoom> = async {
+                let detail = auth::request(
+                    &args.server,
+                    args.session.as_deref(),
+                    &format!("/rooms/{id}"),
+                    None,
+                    "GET",
+                )
+                .await?;
+                let mut room: crate::store::SavedRoom =
+                    serde_json::from_value(detail["room"].clone())?;
+                if room.owner == principal && room.expires.is_some() {
+                    room = serde_json::from_value(
+                        auth::request(
+                            &args.server,
+                            args.session.as_deref(),
+                            &format!("/rooms/{id}/keep"),
+                            Some(serde_json::json!({})),
+                            "POST",
+                        )
+                        .await?,
+                    )?;
+                }
+                Ok(room)
+            }
+            .await;
+            let _ = this.update(cx, |s, cx| {
+                if s.args.session != args.session {
+                    return;
+                }
+                match result {
+                    Ok(room) => {
+                        s.store.keep_room(&id, &name);
+                        s.store.cache_room(room);
+                        s.store.save();
+                        s.auth_message.clear();
+                        home::with_home(cx, move |home, window, cx| {
+                            home.select_room(id.clone(), cx);
+                            home.start_rename(id.clone(), window, cx);
+                        });
+                    }
+                    Err(e) => {
+                        if !s.recover_auth(&e, args.session.as_deref(), cx) {
+                            s.auth_message = format!("Could not save room: {e}");
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Call a room from history again (same room, same link).
@@ -228,19 +300,21 @@ impl Shell {
         if name.is_empty() {
             return;
         }
+        if self.args.session.is_some() {
+            self.rename_profile(name, cx);
+            return;
+        }
         self.args.name = name.to_owned();
         self.store.name = Some(name.to_owned());
         self.store.save();
         cx.notify();
     }
 
-    pub fn remove_room(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.store.remove_room(id);
-        self.store.save();
-        cx.notify();
-    }
-
     fn start_call(&mut self, room: RoomRef, cx: &mut Context<Self>) {
+        if self.args.session.is_none() {
+            self.sign_in(Some(room.id), cx);
+            return;
+        }
         if self.call.is_some() {
             return;
         }
@@ -371,6 +445,10 @@ fn main() {
             args.name = name.clone();
         }
         let shell = cx.new(|_| Shell {
+            principal: None,
+            room_creation: auth::PendingOperation::default(),
+            auth_attempt: auth::SignInAttempt::default(),
+            auth_message: String::new(),
             args,
             store,
             call: None,
@@ -379,6 +457,7 @@ fn main() {
             quitting: false,
         });
         cx.set_global(GlobalShell(shell.clone()));
+        shell.update(cx, |s, cx| s.refresh_account(cx));
         share_picker::bind_keys(cx);
         settings::bind_keys(cx);
         fullscreen::bind_keys(cx);
@@ -424,9 +503,14 @@ fn main() {
         cx.spawn(async move |cx| {
             while let Ok(url) = links.recv().await {
                 match room_from_link(&url) {
-                    Some(room) => {
-                        cx.update(|cx| Shell::global(cx).update(cx, |s, cx| s.join_link(room, cx)))
-                    }
+                    Some(room) => cx.update(|cx| {
+                        Shell::global(cx).update(cx, |s, cx| {
+                            if s.in_call() {
+                                return;
+                            }
+                            s.join_link(room, cx);
+                        })
+                    }),
                     None => tracing::warn!("not a call link: {url}"),
                 }
             }
@@ -455,6 +539,8 @@ mod tests {
             Some("room-1-ab12")
         );
         assert_eq!(room("quipcall://join/spike?x=1").as_deref(), Some("spike"));
+        assert_eq!(room("quipcall://open/spike").as_deref(), Some("spike"));
+        assert_eq!(room("quipcall://open/"), None);
         assert_eq!(room("quipcall://join/"), None);
         assert_eq!(room("quipcall://join/a%20b"), None);
         assert_eq!(room("https://quipcall.com/?room=spike"), None);

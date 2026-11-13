@@ -6,6 +6,7 @@
 #   deploy/mac/package.sh            build only
 #   deploy/mac/package.sh --upload   build and publish at https://quipcall.com/download/
 #
+# QUIPCALL_BUILD overrides the commit-count build number for an uncommitted release.
 # QUIPCALL_SERVER picks the server the app talks to (default https://quipcall.com).
 # The signing identity lives in QUIPCALL_SIGNING_KEYCHAIN (made on first use,
 # see signing.sh).
@@ -23,7 +24,11 @@ KEYCHAIN=${QUIPCALL_SIGNING_KEYCHAIN:-$HOME/Library/Keychains/quipcall-signing.k
 security unlock-keychain -p "" "$KEYCHAIN"
 
 VERSION=$(cargo pkgid -p quipcall-desktop | sed 's/.*@//')
-BUILD=$(git rev-list --count HEAD)
+BUILD=${QUIPCALL_BUILD:-$(git rev-list --count HEAD)}
+case "$BUILD" in
+    ''|*[!0-9]*) echo "error: QUIPCALL_BUILD must be a positive integer" >&2; exit 1 ;;
+esac
+[ "$BUILD" -gt 0 ] || { echo "error: QUIPCALL_BUILD must be a positive integer" >&2; exit 1; }
 OUT=target/mac
 rm -rf "$OUT"
 

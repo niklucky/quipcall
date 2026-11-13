@@ -25,7 +25,7 @@ impl Drop for VideoSubscription {
 }
 
 pub(crate) fn attach(
-    rt: &tokio::runtime::Handle,
+    rt: &crate::tasks::Tasks,
     track: &RemoteVideoTrack,
     sink: Arc<dyn FrameSink>,
 ) -> VideoSubscription {

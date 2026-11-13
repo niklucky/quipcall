@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Lobby from './Lobby.svelte';
+  import type { JoinOptions } from './media';
   import {
     Room,
     RoomEvent,
@@ -15,7 +17,6 @@
     transcriber,
     requestJoin,
     screenShareOptions,
-    uniqueIdentity,
     type ScreenSharePreset,
     type Tile,
   } from './call';
@@ -29,15 +30,14 @@
     type Line,
   } from './transcript';
 
-  // Test participants: `?room=spike&name=Bot&autojoin=1`, plus `codec=vp8`
+  // Dev-only test participants: `?room=<created-id>&name=Bot&autojoin=1`, plus `codec=vp8`
   // (camera codec) and `mic=0` (join without a microphone).
   const params = new URLSearchParams(location.search);
   // H.264 by default: desktop receivers decode it in hardware and draw the
   // frames without a CPU copy (~40% less CPU than VP8 in our measurements).
   const codec = (params.get('codec') ?? 'h264') as VideoCodec;
-  const withMic = params.get('mic') !== '0';
-  const linkedRoom = params.get('room');
-  let roomName = $state(linkedRoom ?? (import.meta.env.DEV ? 'spike' : ''));
+  let roomName = $state('');
+  let roomTitle = $state('');
   let name = $state(params.get('name') ?? localStorage.getItem('quipcall.name') ?? '');
 
   let room: Room | undefined;
@@ -78,18 +78,21 @@
     if (atBottom) queueMicrotask(() => el.scrollTo({ top: el.scrollHeight }));
   });
 
-  async function join() {
+  async function join(options: JoinOptions) {
+    if (status !== 'idle') return;
+    let connecting: Room | undefined;
     error = '';
     status = 'joining';
     try {
       name = name.trim() || 'Guest';
       localStorage.setItem('quipcall.name', name);
-      const { url, token } = await requestJoin(roomName.trim(), uniqueIdentity(name), name);
+      const { url, token } = await requestJoin(roomName.trim());
       const r = new Room({
         adaptiveStream: true,
         dynacast: true,
         publishDefaults: { videoCodec: codec },
       });
+      connecting = r;
       transcribers = new Transcribers();
       // Lets headless tests inspect the call over the DevTools protocol.
       if (import.meta.env.DEV) Object.assign(window, { qcRoom: r });
@@ -133,15 +136,18 @@
       room = r;
       status = 'connected';
       refresh();
-      // Ask for devices after connecting so a slow permission prompt doesn't block joining.
-      const devices = withMic
-        ? r.localParticipant.enableCameraAndMicrophone()
-        : r.localParticipant.setCameraEnabled(true);
-      await devices.catch((e) => (error = `devices: ${e.message}`));
-      refresh();
+      // The preview has released its tracks. Reopen only the selected devices,
+      // and never turn on a microphone or camera the guest left off.
+      await Promise.allSettled([
+        ...(options.microphone ? [r.localParticipant.setMicrophoneEnabled(true, { deviceId: options.audioDeviceId }).catch(e => { if (room === r) error = `Microphone could not start: ${e.message}`; })] : []),
+        ...(options.camera ? [r.localParticipant.setCameraEnabled(true, { deviceId: options.videoDeviceId }).catch(e => { if (room === r) error = `Camera could not start: ${e.message}`; })] : []),
+      ]);
+      if (room === r) refresh();
     } catch (e) {
+      await connecting?.disconnect();
       error = (e as Error).message;
       status = 'idle';
+      throw e;
     }
   }
 
@@ -206,27 +212,15 @@
 
   const cols = $derived(Math.max(1, Math.ceil(Math.sqrt(tiles.length))));
 
-  if (params.get('autojoin') === '1') join();
+
 </script>
 
 <main>
   {#if status !== 'connected'}
-    <form class="join" onsubmit={(e) => { e.preventDefault(); join(); }}>
-      <h1>Quipcall</h1>
-      <input bind:value={roomName} placeholder="Room" />
-      <input bind:value={name} placeholder="Your name" />
-      <button class="active" disabled={status === 'joining'}>
-        {status === 'joining' ? 'Joining…' : 'Join'}
-      </button>
-      {#if error}<p class="error">{error}</p>{/if}
-      {#if linkedRoom}
-        <a href={`quipcall://join/${encodeURIComponent(linkedRoom)}`}>Open in the Quipcall app</a>
-      {/if}
-      <a class="dim" href="/download/">Get Quipcall for Mac</a>
-    </form>
+    <Lobby callError={error} joining={status === 'joining'} onjoin={async (id, displayName, options, title) => { roomName = id; roomTitle = title; name = displayName; await join(options); }} />
   {:else}
     <header>
-      <span>In “{roomName}” as {name}</span>
+      <span class="call-title">In “{roomTitle}” as {name}</span>
       {#if recordedBy}
         <span class="rec">
           ● {recordedBy.name} is recording this call{recordedBy.screen ? ' and their screen' : ''}
@@ -312,6 +306,7 @@
           Transcript
         </button>
       {/if}
+      <a href={`/?manage=${roomName}`} target="_blank" rel="noopener noreferrer">Room access</a>
       <button class="danger" onclick={leave}>Leave</button>
     </footer>
   {/if}
@@ -319,11 +314,8 @@
 
 <style>
   main { height: 100%; display: flex; flex-direction: column; }
-  .join { margin: auto; display: flex; flex-direction: column; gap: 8px; width: 260px; }
-  .join h1 { margin: 0 0 8px; font-size: 20px; }
-  .join a { color: #8ab4ff; text-align: center; text-decoration: none; }
-  .join a.dim { color: #9aa3b2; font-size: 12px; }
   header { display: flex; justify-content: space-between; padding: 8px 16px; border-bottom: 1px solid #262a33; }
+  .call-title { min-width: 0; overflow-wrap: anywhere; }
   .body { flex: 1; display: flex; min-height: 0; }
   .grid { flex: 1; display: grid; gap: 8px; padding: 8px; min-height: 0; grid-auto-rows: 1fr; }
   .transcript { width: 320px; display: flex; flex-direction: column; border-left: 1px solid #262a33; min-height: 0; }
